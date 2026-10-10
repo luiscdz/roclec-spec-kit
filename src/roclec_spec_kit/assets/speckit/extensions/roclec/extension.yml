@@ -3,7 +3,7 @@ schema_version: "1.0"
 extension:
   id: roclec
   name: "Roclec delivery workflow"
-  version: "0.1.0"
+  version: "0.2.0"
   description: "Configurable sync, UX, ready gate and release commands backed by roclec CLI"
   category: "process"
   effect: "read-write"

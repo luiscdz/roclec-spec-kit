@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from .config import CONFIG_PATH, LINK_PATH, ConfigError, NAME_RE, Project, load_project, render_config
+from .external_skills import SkillLockError, ensure_design_lock, read_lock, restore_external_skills
 from .workflow import (SPEC_DIR_RE, VERSION_RE, Spec, _check_ready, _check_spec,
                        check_coverage, check_immutable, scan, stale_views, write_views)
 
@@ -74,6 +75,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             target = root / host / "skills" / skill / "SKILL.md"
             if target.exists() and "<!-- managed by roclec-spec-kit -->" not in target.read_text(encoding="utf-8"):
                 raise UsageError(f"Will not overwrite unmanaged skill: {target}")
+    if args.user_facing and (root / "skills-lock.json").exists():
+        read_lock(root)
     root.mkdir(parents=True, exist_ok=True)
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(render_config(args.name, components), encoding="utf-8")
@@ -89,7 +92,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     project = load_project(root)
     write_views(project, scan(project))
     _install_skills(root)
+    added = ensure_design_lock(root) if args.user_facing else []
     print(f"Initialized {args.name} at {root}")
+    if added:
+        print(f"Pinned design skills: {', '.join(added)}. Run `roclec skills --restore` to install them.")
     print(f"Edit {config} and run `roclec check`.")
     return 0
 
@@ -97,6 +103,8 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_skills(args: argparse.Namespace) -> int:
     project = _project(args)
     destination = Path(args.into).resolve() if args.into else project.root
+    if args.restore:
+        read_lock(destination)
     link = destination / LINK_PATH
     link_text = ""
     if destination != project.root:
@@ -116,6 +124,9 @@ def cmd_skills(args: argparse.Namespace) -> int:
         link.parent.mkdir(parents=True, exist_ok=True)
         link.write_text(link_text, encoding="utf-8")
         print(f"linked {destination} to {project.root}")
+    if args.restore:
+        names = restore_external_skills(destination)
+        print(f"restored {len(names)} external skill(s) from {destination / 'skills-lock.json'}")
     return 0
 
 
@@ -300,6 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.set_defaults(func=cmd_init)
     skills = sub.add_parser("skills", help="refresh managed agent skills from this package version")
     skills.add_argument("--into", help="install skills into a configured code repo")
+    skills.add_argument("--restore", action="store_true", help="also install pinned third-party skills from destination skills-lock.json")
     skills.set_defaults(func=cmd_skills)
     speckit = sub.add_parser("speckit", help="install the bundled spec-kit preset and extension")
     speckit.set_defaults(func=cmd_speckit_install)
@@ -334,7 +346,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except (ConfigError, UsageError, OSError) as exc:
+    except (ConfigError, SkillLockError, UsageError, OSError) as exc:
         print(f"ERROR {exc}", file=sys.stderr)
         return 2
 

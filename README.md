@@ -2,7 +2,7 @@
 
 Framework configurable para gestionar specs, tareas y releases de proyectos de software. El paquete proporciona la CLI y dos skills de agentes; cada proyecto conserva su configuración, producto, decisiones, specs y versiones en Git.
 
-**Estado:** versión inicial `0.1.0` para uso interno. Requiere Python 3.11 o posterior. No necesita servicios ni dependencias de ejecución externas.
+**Estado:** versión inicial `0.2.0` para uso interno. Requiere Python 3.11 o posterior. El núcleo Python no tiene dependencias de ejecución externas; spec-kit requiere `specify` y la restauración de skills externas requiere Node.js con `npx`.
 
 ## Instalar dentro de un proyecto
 
@@ -94,6 +94,14 @@ La cobertura busca referencias `[NNN/AC-NN]` en archivos de pruebas de los repos
 
 `roclec init` instala `roclec-coordinator` y `roclec-implement` en `.agents/skills/` y `.claude/skills/`. Tras actualizar el paquete, `roclec skills` sincroniza únicamente esos archivos administrados. Las skills leen el perfil y las instrucciones propias del proyecto.
 
+Si declaras algún componente `--user-facing`, `init` crea o completa `skills-lock.json` con cuatro skills de diseño fijadas: `ui-ux-pro-max`, `frontend-design`, `impeccable` y `web-design-guidelines`. Los archivos se descargan únicamente al ejecutar:
+
+```bash
+roclec skills --restore
+```
+
+La restauración usa `npx -y skills experimental_install`, respeta las versiones/hashes del lock y comprueba que cada skill aparezca instalada. Roclec expone después las skills en `.agents/skills/` y `.claude/skills/`, mediante un enlace relativo cuando el instalador solo crea una de esas rutas. Si ya hay un lock, Roclec conserva las versiones elegidas y añade solo las skills de diseño que falten.
+
 En un repositorio de código separado, puedes instalar las mismas skills allí sin duplicar las specs:
 
 ```bash
@@ -101,6 +109,15 @@ roclec --project ../mi-producto-specs skills --into ../mi-api
 ```
 
 Esto crea `.roclec/link.toml` en el repo de código, apuntando al perfil del repositorio de specs. Desde allí, `roclec check` encuentra el proyecto sin pasar `--project`. El link y las skills pueden guardarse en Git; no duplican las specs. La carpeta de specs necesita estar accesible para los cambios de tareas y estados que produzca la implementación.
+
+Cada repo de código declara sus propias dependencias de agente en su `skills-lock.json` (por ejemplo, React Native o TanStack Query). Para instalar **todas** las skills fijadas allí junto con las skills de Roclec:
+
+```bash
+roclec --project ../mi-producto-specs skills --into ../mi-api --restore
+```
+
+El paquete no adivina skills según el framework del código: el lock de cada repo es la lista completa y versionada. Skills opcionales vendorizadas por un proyecto también pueden permanecer en ese proyecto; no se descargan como dependencias del núcleo.
+El ejecutable `roclec` debe estar disponible en el entorno desde el que trabaje cada agente; las skills y el link de proyecto no instalan la CLI.
 
 Ejemplo mínimo de CI desde la raíz del proyecto, después de instalar su versión fijada del paquete:
 

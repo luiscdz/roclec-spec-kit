@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 from roclec_spec_kit.cli import main
 from roclec_spec_kit.config import load_project
@@ -30,6 +33,8 @@ class WorkflowTest(unittest.TestCase):
             code, output = run("init", str(root), "--name", "Example", "--component", "service=../service", "--component", "frontend=../frontend", "--user-facing", "frontend")
             self.assertEqual(code, 0, output)
             self.assertTrue((root / ".agents/skills/roclec-coordinator/SKILL.md").is_file())
+            design_lock = json.loads((root / "skills-lock.json").read_text())
+            self.assertEqual(set(design_lock["skills"]), {"frontend-design", "impeccable", "ui-ux-pro-max", "web-design-guidelines"})
             self.assertEqual(run("--project", str(root), "check")[0], 0)
             code, output = run("--project", str(root), "skills", "--into", str(api))
             self.assertEqual(code, 0, output)
@@ -78,6 +83,44 @@ class WorkflowTest(unittest.TestCase):
             roadmap.write_text(roadmap.read_text() + "manual edit\n")
             self.assertEqual(run("--project", str(root), "check")[0], 1)
             self.assertEqual(run("--project", str(root), "check", "--write")[0], 0)
+
+    def test_restore_pinned_skills_in_project_and_code_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace) / "specs-repo"
+            code_repo = Path(workspace) / "client"
+            code_repo.mkdir()
+            self.assertEqual(run("init", str(root), "--name", "Example", "--component", "client=../client", "--user-facing", "client")[0], 0)
+            code_lock = {"version": 1, "skills": {"tanstack-query": {
+                "source": "example/skills", "sourceType": "github", "skillPath": "skills/tanstack-query/SKILL.md", "computedHash": "a" * 64,
+            }}}
+            (code_repo / "skills-lock.json").write_text(json.dumps(code_lock))
+            calls = []
+
+            def fake_install(command, cwd, check):
+                calls.append((command, cwd, check))
+                lock = json.loads((cwd / "skills-lock.json").read_text())
+                for name in lock["skills"]:
+                    target = cwd / ".agents/skills" / name / "SKILL.md"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(f"---\nname: {name}\n---\n")
+                return SimpleNamespace(returncode=0)
+
+            with mock.patch("roclec_spec_kit.external_skills.shutil.which", return_value="/usr/bin/npx"), mock.patch("roclec_spec_kit.external_skills.subprocess.run", side_effect=fake_install):
+                self.assertEqual(run("--project", str(root), "skills", "--restore")[0], 0)
+                self.assertEqual(run("--project", str(root), "skills", "--into", str(code_repo), "--restore")[0], 0)
+            self.assertEqual([cwd for _, cwd, _ in calls], [root.resolve(), code_repo.resolve()])
+            self.assertEqual(calls[0][0], ["npx", "-y", "skills", "experimental_install"])
+            self.assertTrue((code_repo / ".roclec/link.toml").is_file())
+            self.assertTrue((root / ".claude/skills/impeccable/SKILL.md").is_file())
+            self.assertTrue((code_repo / ".claude/skills/tanstack-query/SKILL.md").is_file())
+
+    def test_restore_requires_a_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace:
+            root = Path(workspace)
+            self.assertEqual(run("init", str(root), "--name", "No UI")[0], 0)
+            code, output = run("--project", str(root), "skills", "--restore")
+            self.assertEqual(code, 2)
+            self.assertIn("skills-lock.json is missing", output)
 
     def test_config_and_release_membership_are_rejected_when_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as workspace:
