@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "roclec-spec-kit"
+version = "0.1.0"
+description = "Configurable spec and release workflow for software projects"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+roclec = "roclec_spec_kit.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+roclec_spec_kit = [
+  "assets/skills/*/SKILL.md",
+  "assets/speckit/presets/roclec/preset.yml",
+  "assets/speckit/presets/roclec/templates/*.md",
+  "assets/speckit/presets/roclec/commands/*.md",
+  "assets/speckit/extensions/roclec/extension.yml",
+  "assets/speckit/extensions/roclec/commands/*.md",
+]
