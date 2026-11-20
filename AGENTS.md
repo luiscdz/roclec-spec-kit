@@ -11,6 +11,7 @@
 - `src/roclec_spec_kit/authoring.py`, `causality.py`, `run_logs.py`: bundle sealing, record identity and causal ordering, and bounded local capture.
 - `src/roclec_spec_kit/verification.py`, `integration.py`: candidate classification, executed runs, evidence/review gates and reconstructed integration plans.
 - `src/roclec_spec_kit/releases.py`, `installation.py`: C3 final release runs, prepared Git publication records, native installation and staged adapter writes. Publication verification never pushes or creates tags.
+- `src/roclec_spec_kit/viewer/`: optional read-only `roclec view` (extra `viewer`). `reader.py` projects `Kernel`, `Releases` and `Verification` without writing, executing checks or querying remotes; `docs.py` bounds the Markdown index; `server.py` is the local Flask API. `viewer-ui/` is the React/Vite source and `viewer/static/` its committed bundle: rebuild with `scripts/build_viewer.py` (CI guard: `--check`). `scripts/viewer_scenarios.py` is shared by `tests/test_viewer.py` and `harness.py --viewer`.
 - `src/roclec_spec_kit/assets/`: canonical skills, templates and upstream attribution shipped in the wheel.
 - `src/roclec_spec_kit/assets/legacy/`: frozen schema-1 regression assets, used only by explicit legacy oracles; never install them into native consumers.
 - `src/roclec_spec_kit/assets/profiles/design-skills-lock.json`: pinned default dependencies for user-facing design work.

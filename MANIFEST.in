@@ -5,3 +5,6 @@ include docs/evaluation/evidence.sha256
 prune docs/definition/evidence
 prune docs/evaluation/evidence
 prune docs/implementation/evidence
+recursive-include viewer-ui/src *
+include viewer-ui/package.json viewer-ui/package-lock.json viewer-ui/tsconfig.json viewer-ui/vite.config.ts viewer-ui/index.html
+prune viewer-ui/node_modules

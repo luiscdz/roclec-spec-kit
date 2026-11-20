@@ -150,6 +150,9 @@ def build_parser():
     skills.add_argument("--into")
     skills.add_argument("--restore", action="store_true")
     sub.add_parser("speckit")
+    view = sub.add_parser("view", help="Open the local read-only project viewer (needs the 'viewer' extra)")
+    view.add_argument("--no-open", action="store_true", help="Print the URL without opening a browser")
+    view.add_argument("--port", type=int, default=0, help="Local port (default: any available port)")
     for name in ("product",):
         unavailable = sub.add_parser(name, help="Consumer-specific views; no schema-1 fallback")
         unavailable.add_argument("arguments", nargs=argparse.REMAINDER)
@@ -174,6 +177,10 @@ def execute(args):
             if store.path(relative).is_file():
                 return {"operation": read_json(store.path(relative))}
         raise ModelError("INVALID_REFERENCE", "Unknown operation", entity=args.id)
+    if command == "view":
+        need(0 <= args.port <= 65535, "INVALID_INPUT", "Port must be between 0 and 65535", exit_code=2)
+        from .viewer import serve
+        return serve(Path(args.project), port=args.port, open_browser=not args.no_open)
     kernel = Kernel(load_profile(Path(args.project)))
     read_only = {"inspect", "check", "status", "list", "integrate", "product"}
     branch_commands = {("change", "start"), ("run", "verify"), ("evidence", "record")}
