@@ -1,7 +1,9 @@
 <!-- managed by roclec-spec-kit -->
-# Native Roclec workflow — profile 2
+# Native Roclec workflow — profile 3
 
 Definition: agreed references → explicit capability/change bundle → exact intent approval → release membership per component → implementation/checks/evidence → integration per component → combined release run → preparation → record existing Git publication.
+
+Approve and assign changes on the configured `trunk_ref`. Worktrees on other branches can record a start, a run and evidence. The profile executes configured checks, so verify only repositories you trust. Raw output goes to local runtime logs. Integration requires a fetched target tracking ref that contains the candidate commit.
 
 Read `.roclec/model.md` for JSON authoring. Commands use `roclec --project ROOT --json COMMAND` or `./.roclec/run --json COMMAND`. The launcher always supplies ROOT. Init does not invent contracts or install product policy. `skills` installs/refreshes native instructions; `speckit` installs optional aliases only after the desired spec-kit integration was initialized. Templates/constitutions remain consumer-owned after seeding.
 

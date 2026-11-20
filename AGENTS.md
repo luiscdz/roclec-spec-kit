@@ -7,8 +7,9 @@
 - `src/roclec_spec_kit/config.py`: profile schema and project discovery.
 - `src/roclec_spec_kit/workflow.py`: deterministic checks and generated views.
 - `src/roclec_spec_kit/cli.py`: user-facing commands.
-- `src/roclec_spec_kit/native_cli.py`, `kernel.py`, `model.py`, `store.py`: schema-2 public CLI, C1 operations, record validation and recoverable writes. `cli.legacy_main` and schema-1 helpers are retained only as regression oracles during the redesign; never auto-dispatch a consumer to them.
-- `src/roclec_spec_kit/verification.py`, `integration.py`: C2 candidate classification, executed runs, evidence/review gates and reconstructed integration plans.
+- `src/roclec_spec_kit/native_cli.py`, `kernel.py`, `model.py`, `store.py`: profile-3 public CLI, model-schema-2 records, C1 operations and recoverable writes. `cli.legacy_main` and profile-1 helpers are regression oracles; never auto-dispatch a consumer to them.
+- `src/roclec_spec_kit/authoring.py`, `causality.py`, `run_logs.py`: bundle sealing, record identity and causal ordering, and bounded local capture.
+- `src/roclec_spec_kit/verification.py`, `integration.py`: candidate classification, executed runs, evidence/review gates and reconstructed integration plans.
 - `src/roclec_spec_kit/releases.py`, `installation.py`: C3 final release runs, prepared Git publication records, native installation and staged adapter writes. Publication verification never pushes or creates tags.
 - `src/roclec_spec_kit/assets/`: canonical skills, templates and upstream attribution shipped in the wheel.
 - `src/roclec_spec_kit/assets/legacy/`: frozen schema-1 regression assets, used only by explicit legacy oracles; never install them into native consumers.

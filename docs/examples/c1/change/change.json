@@ -1,5 +1,5 @@
 {
-  "model_schema": 1,
+  "model_schema": 2,
   "id": "CHG-001",
   "kind": "evolution",
   "semantic": {
@@ -30,11 +30,11 @@
         "components": [
           "app"
         ],
-        "revision": "a5b2b8c7fa1cc4611f75963e2c39984623e3919560ce739e459859c5c6a381d9"
+        "revision": "523a581a71e4124f828f67d9ddadba48e6e35c563e08ca66b57aa9f3d1a03787"
       }
     ],
     "dependencies": [],
     "references": []
   },
-  "proposal_digest": "6d21db244ecc59f899272b0f39b03d0ebbe09e70645a8404da3a80053dad853c"
+  "proposal_digest": "b8a6fcb14224803d24dfd58c176962574f17b68fcec5e851899ee39bea7b8d79"
 }

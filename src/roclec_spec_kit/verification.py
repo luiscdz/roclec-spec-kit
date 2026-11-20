@@ -6,13 +6,14 @@ content is read. Reports express claims; they cannot manufacture Roclec runs.
 from __future__ import annotations
 
 import fnmatch
-import os
+import hashlib
 from pathlib import Path
 import shutil
-import signal
 import subprocess
-import time
 
+from .causality import one_head, record_id, scoped_heads
+from .config import DEFAULT_LOG_QUOTA
+from .run_logs import execute as execute_check
 from .model import (ModelError, digest, encoded, fields, fingerprint, identifier,
                     local_path, need, read_json, schema, sha, strings, text, version_key)
 
@@ -112,6 +113,8 @@ class Verification:
         for relative in sorted(paths):
             # Operational records do not attest code or invalidate themselves.
             absolute = repo / relative
+            if absolute.is_relative_to(self.k.profile.root / ".roclec/runtime"):
+                continue
             metadata = absolute.is_relative_to(self.k.profile.root / ".roclec") or absolute.is_relative_to(self.k.profile.root / "specs/capabilities")
             if metadata:
                 categories[relative] = "operational"
@@ -144,15 +147,19 @@ class Verification:
         inputs["tools"] = tools
         if self.release:
             inputs["release"] = record["release_context"]
-        return {"model_schema": 1, "change_id": change_id, "component": component,
+        return {"model_schema": 2, "change_id": change_id, "component": component,
                 "head": head, "base": base_commit, "dirty": bool(status), "categories": categories,
                 "inputs": inputs, "inputs_digest": digest(inputs), **self.extras()}
 
-    def next_id(self, namespace, prefix):
-        directory = self.store.path(f".roclec/{namespace}")
-        ids = [int(p.name[len(prefix) + 1:].split('.')[0]) for p in directory.glob(f"{prefix}-*")
-               if p.name[len(prefix) + 1:].split('.')[0].isdigit()]
-        return f"{prefix}-{max(ids, default=0) + 1:03}"
+    @staticmethod
+    def report_scopes(report):
+        if report["kind"] == "independent-review":
+            return [("review", report["actor"])]
+        return [("observation", ac) for ac in report["acceptance_ids"]]
+
+    @staticmethod
+    def run_heads(attempts):
+        return scoped_heads(attempts, lambda _: ["run"])
 
     def run(self, change_id, component, base):
         if self.release:
@@ -165,49 +172,26 @@ class Verification:
         applicable = self.acceptance(self.target(change_id), component)
         for check in checks:
             need(set(check.get("acceptance_ids", [])) <= set(applicable), "INVALID_REFERENCE", "Check cites an inapplicable AC", entity=check["id"])
-        run_id = self.next_id("runs", "RUN")
+        run_id = record_id("RUN")
+        previous = self.run_heads(self.attempts(change_id, component)).get("run", [])
         root = f".roclec/runs/{run_id}"
-        started = {"model_schema": 1, "id": run_id, "change_id": change_id, "component": component,
-                   "candidate": before, "status": "incomplete", "checks": checks, **self.extras()}
+        started = {"model_schema": 2, "id": run_id, "change_id": change_id, "component": component,
+                   "candidate": before, "status": "incomplete", "checks": checks,
+                   "supersedes": [run["id"] for run in previous], **self.extras()}
         started["digest"] = digest(started)
         self.store.apply("run-start", {"id": run_id}, {f"{root}/start.json": encoded(started)}, self.k.token)
         execution_token = self.store.token()
-        results, logs, interrupted = [], {}, False
-        for check in checks:
+        results, interrupted = [], False
+        log_root = f".roclec/runtime/logs/{run_id}"
+        profile = self.k.profile.data
+        quota = profile.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
+        for index, check in enumerate(checks):
             cwd = self.k.profile.repo(component) / check["cwd"]
-            result = {"id": check["id"], "argv": check["argv"], "cwd": check["cwd"],
-                      "acceptance_ids": check.get("acceptance_ids", []), "executed_by_roclec": False}
-            start = time.monotonic()
-            process = None
-            out, err = b"", b""
-            try:
-                # A process group prevents a timeout/interrupt leaving children running.
-                process = subprocess.Popen(check["argv"], cwd=cwd, stdout=subprocess.PIPE,
-                                           stderr=subprocess.PIPE, start_new_session=True)
-                result["executed_by_roclec"] = True
-                out, err = process.communicate(timeout=check["timeout_seconds"])
-                result.update(status="pass" if process.returncode == 0 else "fail", returncode=process.returncode)
-            except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
-                if process:
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    out, err = process.communicate()
-                interrupted = isinstance(exc, KeyboardInterrupt)
-                result.update(status="interrupted" if interrupted else "incomplete", returncode=None,
-                              limitation="interrupted" if interrupted else "timeout")
-            except OSError as exc:
-                result.update(status="incomplete", returncode=None, limitation=f"environment: {exc}")
-            result["duration_seconds"] = round(time.monotonic() - start, 6)
-            # Filenames are allocated by position, never by a consumer-controlled check id.
-            index = len(results)
-            for label, data in (("stdout", out), ("stderr", err)):
-                relative = f"logs/{index:03}.{label}"
-                logs[relative] = data
-                result[label] = {"path": relative, "sha256": sha(data)}
+            result, size = execute_check(self.store, check, cwd, log_root, index, profile, quota)
+            quota -= size
             results.append(result)
-            if interrupted:
+            interrupted = result["status"] == "interrupted"
+            if interrupted or result.get("limitation") in {"log quota exceeded", "log write failed", "log read failed"}:
                 break
         limitations = []
         try:
@@ -221,12 +205,11 @@ class Verification:
             limitations.append("project records changed during verification")
         status = ("interrupted" if interrupted else "incomplete" if limitations or any(r["status"] == "incomplete" for r in results)
                   else "fail" if any(r["status"] == "fail" for r in results) else "pass")
-        manifest = {"model_schema": 1, "id": run_id, "change_id": change_id, "component": component,
+        manifest = {"model_schema": 2, "id": run_id, "change_id": change_id, "component": component,
                     "candidate": before, "status": status, "results": results, "limitations": limitations,
-                    "tools": before["inputs"]["tools"], **self.extras()}
+                    "tools": before["inputs"]["tools"], "supersedes": started["supersedes"], **self.extras()}
         manifest["digest"] = digest(manifest)
-        writes = {f"{root}/{p}": b for p, b in logs.items()}
-        writes[f"{root}/manifest.json"] = encoded(manifest)
+        writes = {f"{root}/manifest.json": encoded(manifest)}
         need(not self.store.path(f"{root}/manifest.json").exists(), "OPERATION_CONFLICT", "Run was already finalized", exit_code=3)
         receipt = self.store.apply("run-verify", {"id": run_id}, writes, completion_token)
         # Re-open to include our own records, but never run checks in a gate.
@@ -243,15 +226,17 @@ class Verification:
         return {"recorded": True, "run": manifest, "receipt": receipt, "issues": issues,
                 "exit_code": 130 if interrupted else 1 if issues else 0}
 
-    def read_run(self, run_id):
+    def read_run(self, run_id, *, started=None):
         identifier(run_id, "RUN")
         record = self.k.read(f".roclec/runs/{run_id}/manifest.json")
-        fields(record, ("model_schema", "id", "change_id", "component", "candidate", "status", "results", "limitations", "tools", "digest"), ("release",))
+        fields(record, ("model_schema", "id", "change_id", "component", "candidate", "status", "results", "limitations", "tools", "digest",
+                        "supersedes"), ("release",))
         need(record["id"] == run_id and record["digest"] == digest({k: v for k, v in record.items() if k != "digest"}),
              "HASH_MISMATCH", "Run manifest integrity mismatch")
-        started = self.k.read(f".roclec/runs/{run_id}/start.json")
+        if started is None:
+            started = self.read_start(self.store.path(f".roclec/runs/{run_id}/start.json"))
         need(started.get("digest") == digest({k: v for k, v in started.items() if k != "digest"})
-             and all(started.get(k) == record[k] for k in ("id", "change_id", "component", "candidate")),
+             and all(started.get(k) == record[k] for k in ("id", "change_id", "component", "candidate", "supersedes")),
              "HASH_MISMATCH", "Run differs from its reserved candidate")
         need(record["status"] in {"pass", "fail", "incomplete", "interrupted"}
              and isinstance(record["results"], list) and isinstance(record["limitations"], list),
@@ -270,26 +255,60 @@ class Verification:
              and (candidate["change_id"], candidate["component"], candidate.get("release")) == (record["change_id"], record["component"], record.get("release"))
              and started.get("release") == record.get("release"),
              "HASH_MISMATCH", "Candidate manifest integrity mismatch")
-        for result in record["results"]:
-            fields(result, ("id", "argv", "cwd", "acceptance_ids", "executed_by_roclec", "status", "returncode", "duration_seconds", "stdout", "stderr"), ("limitation",))
+        for index, result in enumerate(record["results"]):
+            fields(result, ("id", "argv", "cwd", "acceptance_ids", "executed_by_roclec", "status", "returncode", "duration_seconds", "stdout", "stderr",
+                            "environment"), ("limitation",))
             strings(result["acceptance_ids"])
+            strings(result["environment"])
             for label in ("stdout", "stderr"):
                 log = result[label]
-                path = local_path(self.store.path(f".roclec/runs/{run_id}"), log["path"])
-                need(path.is_file() and sha(path.read_bytes()) == log["sha256"], "HASH_MISMATCH", "Run log integrity mismatch")
+                fields(log, ("path", "sha256", "size", "complete"), ("excerpt",))
+                fingerprint(log["sha256"])
+                need(log["path"] == f".roclec/runtime/logs/{run_id}/{index:03}.{label}"
+                     and type(log["size"]) is int and log["size"] >= 0 and type(log["complete"]) is bool
+                     and (result["status"] not in {"pass", "fail"} or log["complete"]),
+                     "INVALID_INPUT", "Invalid local log descriptor", exit_code=2, entity=run_id)
+                if "excerpt" in log:
+                    need(isinstance(log["excerpt"], str) and len(log["excerpt"].encode("utf-8")) <= 1024 * 1024,
+                         "INVALID_INPUT", "Invalid log excerpt", exit_code=2, entity=run_id)
         return record
 
+    def log_issues(self, run):
+        for result in run["results"]:
+            for label in ("stdout", "stderr"):
+                log = result[label]
+                path = self.store.path(log["path"])
+                if not path.is_file():
+                    issue = ModelError("LOG_UNAVAILABLE", "Local capture is unavailable", path=log["path"], entity=run["id"]).issue
+                    yield {**issue, "severity": "warning"}
+                elif log["complete"]:
+                    with path.open("rb") as stream:
+                        actual = hashlib.file_digest(stream, "sha256").hexdigest()
+                    need(actual == log["sha256"] and path.stat().st_size == log["size"],
+                         "HASH_MISMATCH", "Local capture differs from its manifest", path=log["path"])
+
+    def read_start(self, path):
+        started = self.k.read(path.relative_to(self.k.profile.root).as_posix())
+        fields(started, ("model_schema", "id", "change_id", "component", "candidate", "status", "checks", "digest",
+                         "supersedes"), ("release",))
+        need(started["id"] == path.parent.name and started["digest"] == digest({k: v for k, v in started.items() if k != "digest"}),
+             "HASH_MISMATCH", "Run start integrity mismatch")
+        identifier(started["id"], "RUN")
+        need(started["component"] in self.k.profile.components and isinstance(started["checks"], list),
+             "INVALID_REFERENCE", "Run start has an invalid component or check list")
+        if "release" in started:
+            fields(started["release"], ("component", "version"))
+            version_key(started["release"]["version"])
+            need(started["change_id"] is None and started["release"]["component"] == started["component"],
+                 "INVALID_REFERENCE", "Run start has an invalid release scope")
+        else:
+            identifier(started["change_id"], "CHG")
+        return started
+
     def attempts(self, change_id, component):
-        result = []
-        for path in self.store.path(".roclec/runs").glob("RUN-*/start.json"):
-            started = self.k.read(path.relative_to(self.k.profile.root).as_posix())
-            fields(started, ("model_schema", "id", "change_id", "component", "candidate", "status", "checks", "digest"), ("release",))
-            need(started["id"] == path.parent.name and started["digest"] == digest({k: v for k, v in started.items() if k != "digest"}),
-                 "HASH_MISMATCH", "Run start integrity mismatch")
-            identifier(started["id"], "RUN")
-            if self.same_scope(started, change_id, component):
-                result.append(started)
-        return sorted(result, key=lambda r: int(r["id"].split("-")[1]))
+        result = [started for started in (self.read_start(p) for p in self.store.path(".roclec/runs").glob("RUN-*/start.json"))
+                  if self.same_scope(started, change_id, component)]
+        return sorted(result, key=lambda r: r["id"])
 
     def record_evidence(self, file):
         record = read_json(file)
@@ -323,46 +342,51 @@ class Verification:
             policy = context.policy(record["change_id"])
             need(record.get("policy_id") == (policy["id"] if policy else None), "EVIDENCE_STALE", "Review policy changed")
             record["policy_id"] = policy["id"] if policy else None
-        record.update(id=self.next_id("evidence", "EVD"), executed_by_roclec=False)
+        heads = scoped_heads(context.evidence(record["change_id"], record["component"]), self.report_scopes)
+        supersedes = sorted({r["id"] for scope in self.report_scopes(record) for r in heads.get(scope, [])})
+        record.update(id=record_id("EVD"), executed_by_roclec=False, supersedes=supersedes)
         record["digest"] = digest(record)
         receipt = self.store.apply("evidence-record", {"id": record["id"]},
                                    {f".roclec/evidence/{record['id']}.json": encoded(record)}, self.k.token)
         return {"evidence": record, "receipt": receipt}
 
+    def read_evidence(self, path, runs=None):
+        record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
+        fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
+                        "outcome", "acceptance_ids", "checks", "limitations", "findings", "id", "digest", "executed_by_roclec",
+                        "supersedes"), ("policy_id", "release"))
+        identifier(record["id"], "EVD")
+        if "release" not in record:
+            identifier(record["change_id"], "CHG")
+        identifier(record["run_id"], "RUN")
+        fingerprint(record["candidate_digest"])
+        strings(record["acceptance_ids"])
+        need(record["executed_by_roclec"] is False and record["kind"] in {"manual", "automated-import", "independent-review"}
+             and record["component"] in self.k.profile.components and text(record["actor"]) and text(record["context"]),
+             "INVALID_INPUT", "Invalid evidence attribution/scope", exit_code=2)
+        need(record["outcome"] in ({"ready", "changes-needed", "incomplete"} if record["kind"] == "independent-review" else {"pass", "fail", "incomplete"}),
+             "INVALID_INPUT", "Invalid evidence outcome", exit_code=2)
+        for key in ("checks", "limitations"):
+            need(isinstance(record[key], list) and all(text(v) for v in record[key]), "INVALID_INPUT", "Invalid observation strings", exit_code=2)
+        need(record.get("id") == path.stem and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),
+             "HASH_MISMATCH", "Evidence integrity mismatch")
+        source = self.read_run(record["run_id"]) if runs is None else runs.get(record["run_id"])
+        need(source is not None, "INVALID_REFERENCE", "Evidence requires a finalized run", entity=record["id"])
+        need((source["change_id"], source["component"], source["candidate"]["inputs_digest"]) ==
+             (record["change_id"], record["component"], record["candidate_digest"]),
+             "INVALID_REFERENCE", "Evidence differs from its source run candidate")
+        need(record.get("release") == source.get("release"), "INVALID_REFERENCE", "Evidence release scope differs from run")
+        return record
+
     def evidence(self, change_id, component):
-        records = []
-        for path in self.store.path(".roclec/evidence").glob("EVD-*.json"):
-            record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
-            fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
-                            "outcome", "acceptance_ids", "checks", "limitations", "findings", "id", "digest", "executed_by_roclec"), ("policy_id", "release"))
-            identifier(record["id"], "EVD")
-            if "release" not in record:
-                identifier(record["change_id"], "CHG")
-            identifier(record["run_id"], "RUN")
-            fingerprint(record["candidate_digest"])
-            strings(record["acceptance_ids"])
-            need(record["executed_by_roclec"] is False and record["kind"] in {"manual", "automated-import", "independent-review"}
-                 and record["component"] in self.k.profile.components and text(record["actor"]) and text(record["context"]),
-                 "INVALID_INPUT", "Invalid evidence attribution/scope", exit_code=2)
-            need(record["outcome"] in ({"ready", "changes-needed", "incomplete"} if record["kind"] == "independent-review" else {"pass", "fail", "incomplete"}),
-                 "INVALID_INPUT", "Invalid evidence outcome", exit_code=2)
-            for key in ("checks", "limitations"):
-                need(isinstance(record[key], list) and all(text(v) for v in record[key]), "INVALID_INPUT", "Invalid observation strings", exit_code=2)
-            need(record.get("id") == path.stem and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),
-                 "HASH_MISMATCH", "Evidence integrity mismatch")
-            source = self.read_run(record["run_id"])
-            need((source["change_id"], source["component"], source["candidate"]["inputs_digest"]) ==
-                 (record["change_id"], record["component"], record["candidate_digest"]),
-                 "INVALID_REFERENCE", "Evidence differs from its source run candidate")
-            need(record.get("release") == source.get("release"), "INVALID_REFERENCE", "Evidence release scope differs from run")
-            if self.same_scope(record, change_id, component):
-                records.append(record)
-        return sorted(records, key=lambda r: int(r["id"].split("-")[1]))
+        records = [record for record in (self.read_evidence(p) for p in self.store.path(".roclec/evidence").glob("EVD-*.json"))
+                   if self.same_scope(record, change_id, component)]
+        return sorted(records, key=lambda r: r["id"])
 
     def verify(self, change_id, component, *, run_id=None, final=False):
         attempts = self.attempts(change_id, component)
         need(bool(attempts), "COVERAGE_MISSING", "No verification run for this component")
-        latest = attempts[-1]
+        latest = one_head(self.run_heads(attempts), "run")
         need(self.store.path(f".roclec/runs/{latest['id']}/manifest.json").is_file(), "CANDIDATE_INCOMPLETE",
              "Latest verification attempt was interrupted before finalization", entity=latest["id"])
         need(run_id is None or run_id == latest["id"], "EVIDENCE_STALE", "Use the latest verification attempt for this scope")
@@ -381,14 +405,14 @@ class Verification:
              and r["argv"] == c["argv"] and r["cwd"] == c["cwd"] and r["id"] == c["id"]
              for r, c in zip(run["results"], checks)), "CANDIDATE_INCOMPLETE", "Every declared check must have executed successfully")
         reports = self.evidence(change_id, component)
-        live = [r for r in reports if r["candidate_digest"] == candidate["inputs_digest"]]
+        heads = scoped_heads(reports, self.report_scopes)
+        live = set()
         covered = {a for r in run["results"] for a in r["acceptance_ids"]}
-        observations = {}
-        for report in live:
-            if report["kind"] != "independent-review":
-                for ac in report["acceptance_ids"]:
-                    observations[ac] = report
-        for ac, report in observations.items():
+        for ac in self.acceptance(self.target(change_id), component):
+            report = one_head(heads, ("observation", ac))
+            if not report or report["candidate_digest"] != candidate["inputs_digest"]:
+                continue
+            live.add(report["id"])
             if report["outcome"] == "pass" and report["checks"]:
                 covered.add(ac)
             else:
@@ -397,11 +421,12 @@ class Verification:
         need(not missing, "COVERAGE_MISSING", "Checks passing does not cover every applicable AC", actual=sorted(missing))
         policy = self.policy(change_id)
         if policy and policy["enabled"]:
-            reviews = [r for r in reports if r["kind"] == "independent-review"]
-            latest = reviews[-1] if reviews else None
-            need(latest is not None and latest in live and latest.get("policy_id") == policy["id"]
-                 and latest["outcome"] == "ready" and bool(latest["checks"]),
-                 "REVIEW_REQUIRED", "An enabled policy requires a current favorable independent report")
+            reviews = [one_head(heads, scope) for scope in sorted(heads) if scope[0] == "review"]
+            current = [r for r in reviews if r["candidate_digest"] == candidate["inputs_digest"] and r.get("policy_id") == policy["id"]]
+            need(any(r["outcome"] == "ready" and bool(r["checks"]) for r in current)
+                 and all(r["outcome"] == "ready" for r in current),
+                 "REVIEW_REQUIRED", "An enabled policy requires a current favorable independent report with no adverse current reviews")
+            live.update(r["id"] for r in current)
         return {"change": change_id, "component": component, "status": "verified", "run_id": run["id"],
                 "candidate": candidate, "policy_id": policy["id"] if policy else None,
-                "evidence": [r["id"] for r in live], **self.extras()}
+                "evidence": sorted(live), **self.extras()}

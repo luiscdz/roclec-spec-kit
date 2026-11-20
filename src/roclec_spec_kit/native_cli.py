@@ -24,7 +24,7 @@ class Parser(argparse.ArgumentParser):
 
 
 def build_parser():
-    parser = Parser(prog="roclec", description="Native contract/change/release workflow, profile 2 (C3)")
+    parser = Parser(prog="roclec", description="Native contract/change/release workflow, profile 3")
     parser.add_argument("--project", default=".")
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--debug", action="store_true", help="Print unexpected error tracebacks to stderr")
@@ -33,7 +33,7 @@ def build_parser():
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
     listing.add_argument("category", choices=("changes", "futs", "releases", "runs"))
-    init = sub.add_parser("init", help="Initialize a profile-2 project; does not install old skills")
+    init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
     inspect = sub.add_parser("inspect", help="Read integrated, proposed or historical state")
@@ -42,6 +42,7 @@ def build_parser():
         selectors.add_argument(f"--{name}")
     inspect.add_argument("--component")
     inspect.add_argument("--at")
+    inspect.add_argument("--deep", action="store_true", help="Evaluate live verification gates for a change")
     foundation = sub.add_parser("foundation")
     fsub = foundation.add_subparsers(dest="action", required=True)
     fcheck = fsub.add_parser("check")
@@ -122,6 +123,8 @@ def build_parser():
         command.add_argument("id")
     apply = osub.add_parser("apply")
     apply.add_argument("file")
+    unlock = osub.add_parser("unlock")
+    unlock.add_argument("--if-stale", action="store_true", required=True)
     run = sub.add_parser("run")
     verify = run.add_subparsers(dest="action", required=True).add_parser("verify")
     verify.add_argument("id", nargs="?")
@@ -157,10 +160,12 @@ def execute(args):
     command, action = args.command, getattr(args, "action", None)
     if command == "init":
         return Kernel.initialize(Path(args.path).resolve(), args.profile.resolve())
-    if command == "operation" and action in {"inspect", "recover"}:
+    if command == "operation" and action in {"inspect", "recover", "unlock"}:
         # Recovery must remain possible when a partially written project cannot load.
         root = Path(args.project).resolve()
         store = Store(root)
+        if action == "unlock":
+            return store.unlock_stale()
         if action == "recover":
             return {"receipt": store.recover(args.id)}
         from .model import fingerprint
@@ -170,6 +175,12 @@ def execute(args):
                 return {"operation": read_json(store.path(relative))}
         raise ModelError("INVALID_REFERENCE", "Unknown operation", entity=args.id)
     kernel = Kernel(load_profile(Path(args.project)))
+    read_only = {"inspect", "check", "status", "list", "integrate", "product"}
+    branch_commands = {("change", "start"), ("run", "verify"), ("evidence", "record")}
+    external_output = {("change", "seal"), ("release", "prepare"), ("release", "record"), ("foundation", "check")}
+    if (command not in read_only | {"skills", "speckit"} and (command, action) not in branch_commands | external_output
+            and (command != "views" or args.write)):
+        kernel.store.guard_branch(command)
     if command == "status":
         return kernel.status()
     if command == "list":
@@ -201,10 +212,11 @@ def execute(args):
         return integration.apply(Path(args.file).resolve())
     if command == "inspect":
         need(args.at is None or args.capability is not None, "INVALID_INPUT", "--at applies only to a capability", exit_code=2)
+        need(not args.deep or args.change is not None, "INVALID_INPUT", "--deep applies only to a change", exit_code=2)
         if args.capability:
             return kernel.inspect_capability(args.capability, args.component, args.at)
         if args.change:
-            return kernel.inspect_change(args.change)
+            return kernel.inspect_change(args.change, deep=args.deep)
         if args.fut:
             return kernel.inspect_fut(args.fut)
         need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
@@ -295,6 +307,8 @@ def main(argv=None):
             if args.command == "run":
                 issues = result.pop("issues")
                 exit_code = result.pop("exit_code")
+            if args.command == "check" and "warnings" in result:
+                issues = result.pop("warnings")
             if args.command == "foundation" and args.action == "check" and result["issues"]:
                 issues = result.pop("issues")
                 exit_code = 1
@@ -318,7 +332,7 @@ def main(argv=None):
     except ConfigError as exc:
         issues, exit_code = [ModelError("INVALID_REFERENCE", str(exc)).issue], 2
     except SkillLockError as exc:
-        issues, exit_code = [ModelError("SKILL_LOCK_ERROR", str(exc)).issue], 1
+        issues, exit_code = [ModelError(exc.code, str(exc)).issue], 1
     except (OSError, subprocess.TimeoutExpired) as exc:
         issues, exit_code = [ModelError("IO_ERROR", str(exc)).issue], 4
         result = {"partial": False}
@@ -335,7 +349,7 @@ def main(argv=None):
         issues = [ModelError("INTERNAL_ERROR", "Unexpected internal error",
                              remediation="Repeat with --debug to inspect the traceback.").issue]
         exit_code = 70
-    envelope = {"model_schema": 1, "ok": exit_code == 0, "command": command,
+    envelope = {"model_schema": 2, "ok": exit_code == 0, "command": command,
                 "data": result, "issues": issues, "next_action": next_action}
     if json_mode:
         print(json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False))

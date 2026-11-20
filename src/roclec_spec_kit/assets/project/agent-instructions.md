@@ -1,6 +1,6 @@
 ## Roclec native workflow
 
-This project uses Roclec profile 2 for immutable capability contracts, explicit changes, component releases and candidate-bound evidence. Read `.roclec/workflow.md`, `.roclec/model.md`, the profile and applicable agreed consumer references. Use `./.roclec/run --json COMMAND ...`; this launcher supplies the configured project root, including in a linked code repo.
+This project uses Roclec profile 3 for immutable capability contracts, explicit changes, component releases and candidate-bound evidence. Read `.roclec/workflow.md`, `.roclec/model.md`, the profile and applicable agreed consumer references. Use `./.roclec/run --json COMMAND ...`; this launcher supplies the configured project root, including in a linked code repo.
 
 Inspect explicit IDs with exactly one canonical selector: `inspect --change CHG-ID`, `inspect --capability CAP-ID`, `inspect --fut FUT-ID`, or `inspect --release VERSION --component NAME`. Do not select by branch guesses or the newest directory. Mutations require explicit scope/component. Keep templates, principles, architecture and product/design decisions consumer-owned. Use approval and integration/publication operations, not editable done states. Current.json is the integrated vector; release.json alone owns release membership; views are generated. Do not edit immutable snapshots, approved revisions, runs, decisions, preparations or publications.
 

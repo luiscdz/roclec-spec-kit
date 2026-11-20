@@ -1,5 +1,5 @@
 {
-  "model_schema": 1,
+  "model_schema": 2,
   "capability_id": "CAP-001",
   "requirements": [
     {

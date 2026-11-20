@@ -6,10 +6,10 @@ from pathlib import Path
 import subprocess
 
 try:
-    from .c1_scenarios import tree
+    from .c1_scenarios import file_hash, put_json, tree
     from .c2_scenarios import setup, git
 except ImportError:
-    from c1_scenarios import tree
+    from c1_scenarios import file_hash, put_json, tree
     from c2_scenarios import setup, git
 
 
@@ -38,7 +38,7 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
     for host in (".agents", ".claude"):
         installed = list((root / host / "skills").glob("roclec-*/SKILL.md"))
         check("I-033 " + host + " native stages present", len(installed) == 17)
-        check("I-033 " + host + " uses profile-2 operations", "integrate prepare" in (root / host / "skills/roclec-converge/SKILL.md").read_text()
+        check("I-033 " + host + " uses profile-3 operations", "integrate prepare" in (root / host / "skills/roclec-converge/SKILL.md").read_text()
               and "run verify --release" in (root / host / "skills/roclec-release/SKILL.md").read_text())
         check("I-033 " + host + " exact FUT selector", "inspect --fut FUT-001" in (root / host / "skills/roclec-coordinator/SKILL.md").read_text())
         check("I-033 " + host + " digest preflight", "same digest" in (root / host / "skills/roclec-implement/SKILL.md").read_text())
@@ -100,3 +100,50 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
     call("I-033 install into configured linked component", "skills", "--into", "engine")
     check("I-033 linked install points to original authority", 'project_root = "../code with spaces"' in (code / ".roclec/link.toml").read_text())
     call("I-033 installed native consumer validates", "check")
+
+
+_STAGED_SKILL_INSTALLER = '''
+from pathlib import Path
+import subprocess, sys
+from unittest.mock import patch
+from roclec_spec_kit.cli import main
+from roclec_spec_kit import external_skills
+original = subprocess.run
+which = external_skills.shutil.which
+def invoke(argv, *args, **kwargs):
+    if argv[0] == "npx":
+        assert argv == ["npx", "-y", "skills@1.7.6", "experimental_install", "--frozen-lockfile"]
+        folder = Path(kwargs["cwd"]) / ".agents/skills/synthetic"
+        folder.mkdir(parents=True)
+        (folder / "SKILL.md").write_bytes(b"# Verified fixture\\n")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    return original(argv, *args, **kwargs)
+with patch.object(subprocess, "run", invoke), patch.object(external_skills.shutil, "which",
+     side_effect=lambda cmd, *a, **kw: "/synthetic/npx" if cmd == "npx" else which(cmd, *a, **kw)):
+    raise SystemExit(main(sys.argv[1:]))
+'''
+
+
+def verified_restore_scenarios(workspace, invoke, inject, check):
+    import shutil
+    if shutil.which("node") is None:
+        return
+    root, _ = setup(workspace / "verified-restore", invoke, names=("engine",))
+    lock = {"version": 1, "skills": {"synthetic": {"source": "example/skills", "sourceType": "github",
+            "skillPath": "synthetic/SKILL.md", "computedHash": "0" * 64}}}
+    lock_path = root / "skills-lock.json"
+    put_json(lock_path, lock)
+    args = ["--project", str(root), "--json", "skills", "--restore"]
+    result = inject(_STAGED_SKILL_INSTALLER, args)
+    payload = json.loads(result.stdout)
+    check("F3 mismatched external skill rejected with a specific code",
+          result.returncode == 1 and payload["issues"][0]["code"] == "SKILL_HASH_MISMATCH", result.stdout)
+    report = root / ".roclec/runtime/skills/restore.json"
+    check("F3 mismatch is recorded without adopting it",
+          json.loads(report.read_bytes())["status"] == "rejected" and not (root / ".agents/skills/synthetic").exists(), "")
+    lock["skills"]["synthetic"]["computedHash"] = file_hash(b"SKILL.md# Verified fixture\n")
+    put_json(lock_path, lock)
+    result = inject(_STAGED_SKILL_INSTALLER, args)
+    check("F3 matching external skill restored with pinned installer",
+          result.returncode == 0 and json.loads(report.read_bytes())["skills"]["synthetic"]["verified"]
+          and all((root / host / "skills/synthetic/SKILL.md").is_file() for host in (".agents", ".claude")), result.stdout)

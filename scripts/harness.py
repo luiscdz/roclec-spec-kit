@@ -26,7 +26,7 @@ def execute(command, cwd):
 
 
 def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibility=False):
-    from c1_scenarios import bundle, scenarios, tree
+    from c1_scenarios import bundle, init_trunk, scenarios, tree
 
     def check(name, condition, evidence=''):
         cases.append({'scope': 'C1-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -44,7 +44,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
         for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py'):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
-    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios
+    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios
 
     def c2_check(name, condition, evidence=''):
         cases.append({'scope': 'C2-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -52,10 +52,14 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
             raise AssertionError(f'{name}: {evidence}')
 
     c2_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    branch_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     execution_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
-    from c2_faults import scenarios as fault_scenarios
+    from c2_faults import capture_scenarios, lock_scenarios, scenarios as fault_scenarios
     fault_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
                     lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c2_check)
+    capture_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
+                      lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c2_check)
+    lock_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     def race(commands):
         clean_env = {k: v for k, v in os.environ.items() if k not in {'PYTHONPATH', 'PYTHONHOME'}}
         processes = [subprocess.Popen([str(cli), *argv], cwd=workspace, env=clean_env,
@@ -75,7 +79,9 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     c3_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_scenarios import review_scenarios
     review_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
-    from c3_installation import scenarios as install_scenarios
+    from c3_installation import scenarios as install_scenarios, verified_restore_scenarios
+    verified_restore_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
+                               lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c3_check)
     install_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check, compatibility=compatibility)
     from c3_faults import scenarios as c3_faults
     c3_faults(workspace, lambda argv: execute([cli, *argv], workspace),
@@ -84,6 +90,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     # using the unmodified public CLI in a separate process. This is test setup,
     # not a production fault-injection option or a source-tree import.
     recovery_root = workspace / 'recovery'
+    init_trunk(recovery_root)
     profile = workspace / 'profile.toml'
     result = execute([cli, '--json', 'init', recovery_root, '--profile', profile], workspace)
     check('recovery fixture initialized', result.returncode == 0, result.stdout + result.stderr)
@@ -353,7 +360,7 @@ def main():
     report = {'schema': 1, 'timestamp': datetime.now(timezone.utc).isoformat(), 'wheel': args.wheel.name,
               'wheel_sha256': hashlib.sha256(args.wheel.read_bytes()).hexdigest(),
               'kind': 'deterministic integration; no agent execution', 'spec_kit': args.spec_kit,
-              'native_adapter': 'canonical profile-2 C3 skills/aliases; Codex/Claude integration exercised with --spec-kit',
+              'native_adapter': 'canonical profile-3 C3 skills/aliases; Codex/Claude integration exercised with --spec-kit',
               'publication_scope': 'real Git operations on disposable local remotes; no package/product publication or deployment',
               'passed': failure is None, 'cases': cases, 'failure': failure}
     args.report.parent.mkdir(parents=True, exist_ok=True)

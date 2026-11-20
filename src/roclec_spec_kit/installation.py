@@ -124,17 +124,17 @@ def install(kernel, *, into=None, restore=False, adapter=False):
                     content = p.read_bytes().replace(str(stage).encode(), str(destination).encode())
                     if content != initial.get(name):
                         writes[name] = content
-    manifest = {"model_schema": 1, "version": __version__, "adapter": adapter,
+    manifest = {"model_schema": 2, "version": __version__, "adapter": adapter,
                 "files": {p: sha(b) for p, b in writes.items()}}
     writes[".roclec/installation.json"] = encoded(manifest)
     receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token)
     # Executability is installed as part of the journal's mode metadata.
     if restore:
-        from .external_skills import restore_external_skills
+        from .external_skills import SkillLockError, restore_verified_external_skills
         try:
-            restored = restore_external_skills(destination, quiet=True)
-        except (OSError, ValueError) as exc:
-            error = ModelError("IO_PARTIAL", "Native instructions installed; external skill restoration needs retry", exit_code=4, actual=str(exc), remediation="skills --restore")
+            restored = restore_verified_external_skills(destination)
+        except SkillLockError as exc:
+            error = ModelError(exc.code, str(exc), remediation="Review skills-lock.json and retry skills --restore.")
             error.operation_id, error.partial = receipt["operation_id"], True
             raise error from exc
     else:

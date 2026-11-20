@@ -1,7 +1,9 @@
-schema = 2
+schema = 3
 name = "Synthetic consumer"
+trunk_ref = "refs/heads/main"
 [components.app]
 repo = "."
+target_ref = "refs/remotes/origin/main"
 user_facing = false
 inputs = ["src/**", "tests/**"]
 generated = ["build/**"]

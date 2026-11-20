@@ -7,13 +7,18 @@ import sys
 import tempfile
 import unittest
 
-from scripts.c2_scenarios import scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit
+from scripts.c2_scenarios import scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios
 from test_kernel import invoke
-from scripts.c2_faults import scenarios as fault_scenarios
+from scripts.c2_faults import capture_scenarios, scenarios as fault_scenarios
 from scripts.c1_scenarios import bundle, snapshot, tree
 
 
 class VerificationTest(unittest.TestCase):
+    def test_branch_history_and_causal_supersession(self):
+        with tempfile.TemporaryDirectory() as directory:
+            branch_scenarios(Path(directory), invoke,
+                             lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
+
     def test_public_c2_scenarios(self):
         with tempfile.TemporaryDirectory() as directory:
             scenarios(Path(directory), invoke, lambda name, condition, evidence="": self.assertTrue(condition, f"{name}: {evidence}"))
@@ -27,7 +32,9 @@ class VerificationTest(unittest.TestCase):
         def inject(code, argv):
             return subprocess.run([sys.executable, "-c", code, *argv], env=env, capture_output=True, text=True, timeout=30)
         with tempfile.TemporaryDirectory() as directory:
-            fault_scenarios(Path(directory), invoke, inject, lambda name, condition, evidence="": self.assertTrue(condition, f"{name}: {evidence}"))
+            check = lambda name, condition, evidence="": self.assertTrue(condition, f"{name}: {evidence}")
+            fault_scenarios(Path(directory), invoke, inject, check)
+            capture_scenarios(Path(directory), invoke, inject, check)
 
     def test_competing_plans_do_not_overwrite_a_moved_base(self):
         with tempfile.TemporaryDirectory() as directory:

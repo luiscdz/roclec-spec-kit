@@ -1,10 +1,11 @@
-"""Profile-2 authorities, proposals, decisions and queries for C1/C2.
+"""Profile-3 authorities, proposals, decisions and queries for C1/C2.
 
 Verification and integration are separate services; publication belongs to C3.
 """
 from __future__ import annotations
 
 from pathlib import Path
+from collections import defaultdict
 import copy
 import re
 import subprocess
@@ -44,11 +45,12 @@ class Kernel:
             raise ModelError("INVALID_INPUT", f"Invalid TOML profile: {exc}", exit_code=2) from exc
         profile = validate_profile(root, data)
         store = Store(profile.root)
+        store.guard_branch("init", data)
         token = store.token()
         writes = {".roclec/project.toml": raw,
-                  ".roclec/current.json": encoded({"model_schema": 1, "components": {c: {} for c in sorted(profile.components)}}),
-                  ".roclec/references.json": encoded({"model_schema": 1, "references": []}),
-                  ".roclec/identities.json": encoded({"model_schema": 1, "identities": {}})}
+                  ".roclec/current.json": encoded({"model_schema": 2, "components": {c: {} for c in sorted(profile.components)}}),
+                  ".roclec/references.json": encoded({"model_schema": 2, "references": []}),
+                  ".roclec/identities.json": encoded({"model_schema": 2, "identities": {}})}
         for relative in writes:
             need(not store.path(relative).exists(), "UNMANAGED_FILE", "Initialization would overwrite an existing file", path=relative)
         ignore = store.path(".gitignore")
@@ -56,7 +58,7 @@ class Kernel:
         if b".roclec/runtime/" not in ignored.splitlines():
             writes[".gitignore"] = ignored + (b"\n" if ignored and not ignored.endswith(b"\n") else b"") + b".roclec/runtime/\n"
         receipt = store.apply("init", {"profile": data}, writes, token)
-        return {"profile_schema": 2, "components": sorted(profile.components), "receipt": receipt, "increment": "C3"}
+        return {"profile_schema": 3, "components": sorted(profile.components), "receipt": receipt, "increment": "C3"}
 
     def current(self):
         current = self.read(".roclec/current.json")
@@ -121,7 +123,7 @@ class Kernel:
         ref = {"id": ref_id, "path": path, "components": sorted(components),
                "role": role, "decision_id": None}
         refs[ref_id] = ref
-        record = {"model_schema": 1, "references": [refs[key] for key in sorted(refs)]}
+        record = {"model_schema": 2, "references": [refs[key] for key in sorted(refs)]}
         self._validate_references(record)
         source = self.store.path(path)
         need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
@@ -139,13 +141,11 @@ class Kernel:
         need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
         content = source.read_bytes()
         need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
-        decision = {"model_schema": 1, "kind": "foundation", "status": "agreed",
-                    "actor": actor, "reason": reason, "sources": {ref_id: sha(content)}}
-        decision_id = digest(decision)
-        decision["id"] = decision_id
+        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)})
+        decision_id = decision["id"]
         ref["decision_id"] = decision_id
-        writes = {".roclec/references.json": encoded({"model_schema": 1, "references": [refs[k] for k in sorted(refs)]}),
-                  f".roclec/decisions/{decision_id}.json": encoded(decision)}
+        writes = {".roclec/references.json": encoded({"model_schema": 2, "references": [refs[k] for k in sorted(refs)]}),
+                  path: encoded(decision)}
         receipt = self.store.apply("foundation-agree", {"id": ref_id}, writes, self.token)
         return {"reference": ref, "decision": decision, "receipt": receipt}
 
@@ -162,7 +162,7 @@ class Kernel:
                      "Reference has no content", path=ref["path"])
                 need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE", "Reference has no agreement", entity=ref["id"])
                 decision = self.read(f".roclec/decisions/{ref['decision_id']}.json")
-                fields(decision, ("model_schema", "id", "kind", "status", "actor", "reason", "sources"))
+                fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"))
                 need(decision["id"] == ref["decision_id"] and decision["kind"] == "foundation"
                      and decision["status"] == "agreed" and text(decision["actor"]) and text(decision["reason"]),
                      "FOUNDATION_INCOMPLETE", "Reference decision is not agreed", entity=ref["id"])
@@ -377,20 +377,29 @@ class Kernel:
         receipt = self.store.apply("change-new", {"id": change_id, "proposal_digest": record["proposal_digest"]}, writes, self.token)
         return {"change": record, "status": "draft", "receipt": receipt}
 
+    @staticmethod
+    def _decision_chain(record):
+        return (record["entity"], record.get("component") if record["kind"] == "change-start" else None)
+
     def decisions(self, entity=None):
-        result = []
+        chains = defaultdict(dict)
         directory = self.store.path(".roclec/decisions")
+        records, seen = [], set()
         for path in sorted(directory.glob("*.json")) if directory.exists() else []:
             record = self.read(path.relative_to(self.profile.root).as_posix())
-            if record.get("kind") == "foundation":
-                continue
-            fields(record, ("model_schema", "id", "kind", "entity", "sequence", "actor", "reason"),
-                   ("proposal_digest", "component", "components", "outcome", "target", "enabled"))
+            fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
+                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources"))
+            fingerprint(record["id"])
+            need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
+            seen.add(record["id"])
+            records.append((path, record))
+        for path, record in records:
             need(record["id"] == path.stem and record["id"] == digest({k: v for k, v in record.items() if k != "id"}),
                  "HASH_MISMATCH", "Decision digest does not match its record", path=path.name)
-            need(record["kind"] in {"change-approve", "change-start", "change-cancel", "fut-decide", "review-policy"}
-                 and type(record["sequence"]) is int and record["sequence"] > 0
+            need(record["kind"] in {"change-approve", "change-start", "change-cancel", "fut-decide", "review-policy", "foundation"}
                  and text(record["actor"]) and text(record["reason"]), "INVALID_INPUT", "Invalid decision record", exit_code=2)
+            if record["previous"] is not None:
+                fingerprint(record["previous"])
             if record["kind"].startswith("change-") or record["kind"] == "review-policy":
                 identifier(record["entity"], "CHG")
                 fingerprint(record.get("proposal_digest"))
@@ -401,21 +410,44 @@ class Kernel:
                 if record["kind"] == "change-cancel":
                     need(set(strings(record.get("components"), nonempty=True)) <= self.profile.components.keys(),
                          "INVALID_REFERENCE", "Unknown canceled component")
-            else:
+            elif record["kind"] == "fut-decide":
                 identifier(record["entity"], "FUT")
                 need(record.get("outcome") in {"evaluating", "promoted", "discarded", "duplicate"}
                      and ((record["outcome"] in {"promoted", "duplicate"}) == text(record.get("target"))),
                      "INVALID_REFERENCE", "FUT decision has invalid outcome/target")
-            if entity is None or record["entity"] == entity:
-                result.append(record)
-        need(len({d["sequence"] for d in result}) == len(result), "ID_COLLISION", "Duplicate decision sequence")
-        return sorted(result, key=lambda d: d["sequence"])
+            else:
+                ref = record["entity"]
+                sources = record.get("sources")
+                need(text(ref) and re.fullmatch(r"[a-z][a-z0-9-]*", ref)
+                     and record.get("status") == "agreed" and isinstance(sources, dict) and sources.keys() == {ref},
+                     "INVALID_INPUT", "Invalid foundation agreement", exit_code=2)
+                fingerprint(sources[ref])
+            chain = self._decision_chain(record)
+            previous = record["previous"]
+            existing = chains[chain].get(previous)
+            need(existing is None, "DECISION_FORK", "Two decisions have the same predecessor in a chain",
+                 entity="/".join(filter(None, chain)),
+                 expected=previous, actual=sorted([existing["id"], record["id"]]) if existing else None)
+            chains[chain][previous] = record
+        result = []
+        for chain, successors in sorted(chains.items(), key=lambda item: (item[0][0], item[0][1] or "")):
+            previous, ordered = None, []
+            while previous in successors:
+                record = successors[previous]
+                ordered.append(record)
+                previous = record["id"]
+            need(len(ordered) == len(successors), "INVALID_REFERENCE", "Decision chain has missing predecessors or a cycle",
+                 entity="/".join(filter(None, chain)))
+            if entity is None or chain[0] == entity:
+                result.extend(ordered)
+        return result
 
     def _decision(self, kind, entity, actor, reason, **extra):
         need(text(actor) and text(reason), "INVALID_INPUT", "Decision needs actor and reason", exit_code=2)
-        record = {"model_schema": 1, "kind": kind, "entity": entity,
-                  "sequence": max((d["sequence"] for d in self.decisions()), default=0) + 1,
-                  "actor": actor, "reason": reason, **extra}
+        record = {"model_schema": 2, "kind": kind, "entity": entity, "actor": actor, "reason": reason, **extra}
+        chain = self._decision_chain(record)
+        previous = [d["id"] for d in self.decisions(entity) if self._decision_chain(d) == chain]
+        record["previous"] = previous[-1] if previous else None
         record["id"] = digest(record)
         return record, f".roclec/decisions/{record['id']}.json"
 
@@ -514,7 +546,7 @@ class Kernel:
         receipt = self.store.apply("change-cancel", {"id": change_id, "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "status": "canceled" if len(pending) == len(record["semantic"]["components"]) else "partially-integrated", "receipt": receipt}
 
-    def inspect_change(self, change_id):
+    def inspect_change(self, change_id, *, deep=True):
         record, _, _ = self.change(change_id)
         approval = self.approval(record)
         valid = approval is not None and approval["proposal_digest"] == record["proposal_digest"]
@@ -543,11 +575,12 @@ class Kernel:
                         run = verifier.read_run(path.parent.name)
                         if run["change_id"] == change_id and run["component"] == component and run["candidate"]["inputs"]["proposal_digest"] == record["proposal_digest"]:
                             progress[component] = "in-progress"
-                    try:
-                        self.gate(change_id, component, "verify")
-                        progress[component] = "verified"
-                    except ModelError:
-                        pass
+                    if deep:
+                        try:
+                            self.gate(change_id, component, "verify")
+                            progress[component] = "verified"
+                        except ModelError:
+                            pass
         status = "canceled" if canceled else "draft" if not valid else "in-progress" if "in-progress" in progress.values() else "approved"
         if "integrated" in progress.values():
             status = "integrated" if all(p == "integrated" for p in progress.values()) else "partially-integrated"
@@ -778,7 +811,7 @@ class Kernel:
                                     cwd=repo, capture_output=True, text=True, timeout=15)
             need(commit.returncode == 0 and commit.stdout.strip() == base["publication"]["commit"],
                  "INVALID_REFERENCE", "Base tag does not resolve to the recorded published commit")
-        record = {"model_schema": 1, "component": component, "version": version, "kind": kind,
+        record = {"model_schema": 2, "component": component, "version": version, "kind": kind,
                   "changes": members, "base_tag": base_tag}
         if same:
             removed = [m for m in same[0]["record"]["changes"] if m not in members]
@@ -851,27 +884,45 @@ class Kernel:
                 path = self.store.path(f".roclec/changes/{member['change_id']}/revisions/{member['intent_revision']}/change.json")
                 approved = read_json(path)
                 need(approved.get("proposal_digest") == member["intent_revision"], "INVALID_REFERENCE", "Release member has no approved snapshot")
+        from .causality import scoped_heads
         from .verification import Verification
         verifier = Verification(self)
         unfinished = []
-        runs = list(self.store.path(".roclec/runs").glob("RUN-*/start.json"))
-        for path in runs:
-            started = self.read(path.relative_to(self.profile.root).as_posix())
-            Verification(self, release=started.get("release")).attempts(started["change_id"], started["component"])
+        run_paths = sorted(self.store.path(".roclec/runs").glob("RUN-*/start.json"))
+        groups, reports, runs = defaultdict(list), defaultdict(list), {}
+        warnings = []
+        def scope(record):
+            return (record["change_id"], record["component"], (record.get("release") or {}).get("version"))
+        for path in run_paths:
+            started = verifier.read_start(path)
+            groups[scope(started)].append(started)
             if (path.parent / "manifest.json").is_file():
-                verifier.read_run(path.parent.name)
+                run = verifier.read_run(path.parent.name, started=started)
+                runs[run["id"]] = run
+                warnings.extend(verifier.log_issues(run))
             else:
                 unfinished.append(path.parent.name)
-        for path in self.store.path(".roclec/evidence").glob("EVD-*.json"):
-            report = self.read(path.relative_to(self.profile.root).as_posix())
-            Verification(self, release=report.get("release")).evidence(report["change_id"], report["component"])
+        for (_, component, _), attempts in groups.items():
+            actual = {c["id"]: c["argv"] for c in self.profile.components[component]["verification"]}
+            for head in verifier.run_heads(attempts).get("run", []):
+                recorded = {c["id"]: c["argv"] for c in head["checks"]}
+                if actual != recorded:
+                    issue = ModelError("CHECK_ARGV_CHANGED", "Configured check commands changed since this run",
+                                       entity=head["id"]).issue
+                    warnings.append({**issue, "severity": "warning"})
+        for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
+            report = verifier.read_evidence(path, runs)
+            reports[scope(report)].append(report)
+        for records in reports.values():
+            scoped_heads(records, verifier.report_scopes)
         for path in self.store.path(".roclec/integrations").glob("*/*/*.json"):
             self.integration(path.parent.parent.name, path.parent.name, path.stem)
         from .releases import Releases
         for path in self.store.path(".roclec/releases").glob("*/*/preparations/*.json"):
             Releases(self).preparation(path.parent.parent.parent.name, path.parent.parent.name, path.stem)
-        return {"profile_schema": 2, "current": current, "release_count": len(releases),
-                "increment": "C3", "run_count": len(runs), "unfinished_runs": sorted(unfinished),
+        return {"profile_schema": 3, "current": current, "release_count": len(releases),
+                "increment": "C3", "run_count": len(run_paths), "unfinished_runs": sorted(unfinished),
+                "warnings": warnings,
                 "candidate_verification": "check --gate verify; checks execute only with run verify"}
 
     def integration(self, change_id, component, proposal_digest=None):
@@ -884,7 +935,11 @@ class Kernel:
         if not path.exists():
             return None
         record = self.read(path.relative_to(self.profile.root).as_posix())
-        fields(record, ("model_schema", "change_id", "component", "proposal_digest", "run_id", "candidate", "evidence", "policy_id", "contracts", "digest"), ("baseline_release",))
+        fields(record, ("model_schema", "change_id", "component", "proposal_digest", "run_id", "candidate", "evidence", "policy_id", "contracts", "digest",
+                        "target_ref", "target_commit"), ("baseline_release",))
+        need(text(record["target_ref"]) and record["target_ref"].startswith("refs/remotes/")
+             and text(record["target_commit"]) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["target_commit"]),
+             "INVALID_REFERENCE", "Integration requires a frozen target tracking ref and commit")
         need(record.get("change_id") == change_id and record.get("component") == component
              and record.get("proposal_digest") == proposal_digest
              and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),

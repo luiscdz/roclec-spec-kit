@@ -5,7 +5,7 @@ Use `evidence record --file FILE` with this schema, filling values from real ins
 
 ```json
 {
-  "model_schema": 1,
+  "model_schema": 2,
   "kind": "independent-review",
   "change_id": null,
   "release": {"component": "configured-component", "version": "v1.0.0"},

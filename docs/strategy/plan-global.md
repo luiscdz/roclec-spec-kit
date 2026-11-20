@@ -389,7 +389,7 @@ La [propuesta del 17 de noviembre](plan-mejoras-2026-11-17.md) es el diagnóstic
 - D7. La evidencia pesada permanece en copias locales verificadas mediante SHA-256. Sustituye la transferencia a almacenamiento remoto prevista en F0.3b. La comprobación de recuperación local forma parte del cierre.
 - D8. El remoto del framework es público en GitHub, bajo `luiscdz/roclec-spec-kit`, con `main` como troncal. El repositorio piloto es privado.
 
-F0 consolida el historial, el respaldo verificado y CI. F1 incorpora autoría y consultas. F2 valida ramas, precedencia e integración recuperable. F3 trata logs, restauración de skills, rendimiento y locks. F4 ejecuta un cambio real tras verificar las salidas requeridas de F0–F3, con línea base de métricas definida antes de empezar. F5 espera al resultado del piloto salvo ajustes de instalación o adaptador que lo bloqueen.
+F0 consolida el historial, el respaldo verificado y CI. F1 incorpora autoría y consultas. F2 valida ramas, precedencia e integración recuperable. F3 trata logs, restauración de skills, rendimiento y locks. Este encargo abarca Roclec Spec Kit. F4 se ejecutará con un plan separado en el repositorio privado del piloto, con alcance y línea base definidos antes de empezar. F5 espera al resultado del piloto salvo ajustes de instalación o adaptador que lo bloqueen.
 
 Cada fase técnica exige suite completa, build y harness sobre el wheel. Los cambios de assets o adaptador requieren `--spec-kit`. El cierre de 0.9.0 exige F0–F3 completas, las rupturas públicas documentadas y un recorrido real de F4. Los informes de síntesis deben registrar los resultados y sus límites.
 

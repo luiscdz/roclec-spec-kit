@@ -663,7 +663,7 @@ def legacy_main(argv: list[str] | None = None) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Public CLI: schema 2 only. The previous implementation is a regression oracle."""
+    """Public CLI: schema 3 only. The previous implementation is a regression oracle."""
     from .native_cli import main as native_main
     return native_main(argv)
 

@@ -5,7 +5,12 @@ import os
 from pathlib import Path
 
 from .model import digest, encoded, fields, need, read_json, schema, sha
-from .verification import Verification
+from .verification import Verification, git
+
+
+def target_tip(repo, ref):
+    result = git(repo, "show-ref", "--verify", "--hash", ref, check=False)
+    return result.stdout.decode("ascii").strip() if result.returncode == 0 else None
 
 
 def export_plan(kernel, plan, out):
@@ -35,6 +40,14 @@ class Integration:
         record, files, _ = self.k.change(change_id, check_base=True, check_component=component)
         self.k.preserve_integrated(record)
         verified = self.v.verify(change_id, component, run_id=run_id, final=True)
+        repo = self.k.profile.repo(component)
+        target_ref = self.k.profile.components[component]["target_ref"]
+        target_commit = target_tip(repo, target_ref)
+        need(target_commit, "INVALID_REFERENCE", "Target tracking ref is missing", entity=component, actual=target_ref,
+             remediation="Fetch the target ref before preparing integration.")
+        need(git(repo, "merge-base", "--is-ancestor", verified["candidate"]["head"], target_commit, check=False).returncode == 0,
+             "TARGET_NOT_INTEGRATED", "The candidate commit does not belong to the target history", entity=component)
+        destination_tip = {"target_ref": target_ref, "target_commit": target_commit}
         current = self.k.current()
         writes = {}
         for entry in record["semantic"]["proposed"]:
@@ -49,10 +62,10 @@ class Integration:
                     need(not path.exists() or path.read_bytes() == content, "HASH_MISMATCH", "Immutable contract destination diverged", path=destination)
                     writes[destination] = content
             current["components"][component][cap] = revision
-        integration = {"model_schema": 1, "change_id": change_id, "component": component,
+        integration = {"model_schema": 2, "change_id": change_id, "component": component,
                        "proposal_digest": record["proposal_digest"], "run_id": run_id,
                        "candidate": verified["candidate"], "evidence": verified["evidence"],
-                       "policy_id": verified["policy_id"], "contracts": current["components"][component]}
+                       "policy_id": verified["policy_id"], "contracts": current["components"][component], **destination_tip}
         if "baseline_release" in record["semantic"]:
             baseline = record["semantic"]["baseline_release"]
             integration["baseline_release"] = baseline
@@ -61,9 +74,10 @@ class Integration:
         # Snapshots first, then exactly one index replacement, then the record.
         writes[".roclec/current.json"] = encoded(current)
         writes[f".roclec/integrations/{change_id}/{component}/{record['proposal_digest']}.json"] = encoded(integration)
-        plan = {"model_schema": 1, "kind": "integrate", "target": {"change_id": change_id, "component": component},
+        plan = {"model_schema": 2, "kind": "integrate", "target": {"change_id": change_id, "component": component},
                 "expected": {"store_token": self.k.token, "bases": record["semantic"]["bases"]},
-                "inputs": {"run_id": run_id, "proposal_digest": record["proposal_digest"], "candidate": verified["candidate"]},
+                "inputs": {"run_id": run_id, "proposal_digest": record["proposal_digest"], "candidate": verified["candidate"],
+                           **destination_tip},
                 "writes": {p: sha(b) for p, b in writes.items()}, "gate_result": {"ok": True, "gate": "integrate"}}
         plan["operation_id"] = digest(plan)
         return plan, writes
@@ -73,6 +87,7 @@ class Integration:
         return export_plan(self.k, plan, out)
 
     def apply(self, file):
+        self.k.store.guard_branch("apply")
         plan = read_json(file)
         fields(plan, ("model_schema", "operation_id", "kind", "target", "expected", "inputs", "writes", "gate_result"))
         schema(plan)
@@ -91,6 +106,14 @@ class Integration:
             return Releases(self.k).apply(plan)
         target = plan["target"]
         fields(target, ("change_id", "component"))
+        destination = {key: plan["inputs"].get(key) for key in ("target_ref", "target_commit")}
+        component = target["component"]
+        repo = self.k.profile.repo(component)
+        ref = self.k.profile.components[component]["target_ref"]
+        need(destination["target_ref"] == ref and destination["target_commit"] is not None
+             and target_tip(repo, ref) == destination["target_commit"],
+             "BASE_CONFLICT", "Target ref moved after integration preparation", exit_code=3,
+             remediation="Fetch and prepare a new integration plan.")
         record, _, _ = self.k.change(target["change_id"], check_base=True, check_component=target["component"])
         need(plan["expected"]["store_token"] == self.k.token, "BASE_CONFLICT", "Project changed after preparation", exit_code=3)
         rebuilt, writes = self.build(target["change_id"], target["component"], plan["inputs"]["run_id"])
@@ -98,9 +121,13 @@ class Integration:
         candidate = plan["inputs"]["candidate"]
 
         def validate():
+            need(target_tip(repo, ref) == destination["target_commit"],
+                 "BASE_CONFLICT", "Target ref moved before integration", exit_code=3)
             now = self.v.candidate(target["change_id"], target["component"], candidate["base"], final=True)
             need(now == candidate, "BASE_CONFLICT", "Code candidate changed before application", exit_code=3)
 
-        payload = {**target, "proposal_digest": record["proposal_digest"], "candidate": candidate}
+        payload = {**target, "proposal_digest": record["proposal_digest"], "candidate": candidate, **destination}
         receipt = self.k.store.apply("integrate", payload, writes, self.k.token, validate=validate, plan=plan)
+        need(receipt.get("status") != "rolled-back", "BASE_CONFLICT",
+             "Target ref changed before confirmation and integration was rolled back", exit_code=3)
         return {"receipt": receipt, "integrated": target}

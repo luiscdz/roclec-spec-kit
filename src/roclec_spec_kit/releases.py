@@ -106,10 +106,15 @@ class Releases:
                 if fix["backport"]:
                     backport = fix["backport"]
                     commit = self.resolve(record["component"], backport["commit"], code="FIX_NOT_INCLUDED")
-                    reports = Verification(self.k, release={"component": record["component"], "version": record["version"]}).evidence(None, record["component"])
-                    report = next((r for r in reversed(reports) if (backport.get("evidence_id") is None or r["id"] == backport["evidence_id"])
-                                   and r["id"] in evidence and r["kind"] != "independent-review" and r["outcome"] == "pass" and r["checks"]
-                                   and set(fix["acceptance_ids"]) <= set(r["acceptance_ids"])), None)
+                    from .causality import one_head, scoped_heads
+                    verifier = Verification(self.k, release={"component": record["component"], "version": record["version"]})
+                    heads = scoped_heads(verifier.evidence(None, record["component"]), verifier.report_scopes)
+                    observations = [one_head(heads, ("observation", ac)) for ac in fix["acceptance_ids"]]
+                    report = observations[0] if observations else None
+                    if (not report or not all(item == report for item in observations)
+                            or backport.get("evidence_id", report["id"]) != report["id"]
+                            or report["id"] not in evidence or report["outcome"] != "pass" or not report["checks"]):
+                        report = None
                     need(report is not None,
                          "FIX_NOT_INCLUDED", "Backport requires current preservation evidence for its obligations")
                     resolved_backport = {"commit": commit, "evidence_id": report["id"]}
@@ -120,8 +125,17 @@ class Releases:
         return included
 
     def gate(self, component, version, run_id=None):
+        from .integration import target_tip
         context = self.context(component, version, unpublished=True)
         record = self.k.release(component, version)["record"]
+        repo = self.k.profile.repo(component)
+        ref = self.k.profile.components[component]["target_ref"]
+        tip = target_tip(repo, ref)
+        for member in record["changes"]:
+            integration = self.k.integration(member["change_id"], component, member["intent_revision"])
+            need(tip and git(repo, "merge-base", "--is-ancestor", integration["candidate"]["head"], tip, check=False).returncode == 0,
+                 "TARGET_NOT_INTEGRATED", "Release member is no longer in the configured target history",
+                 entity=member["change_id"], actual=ref)
         self.version(record)
         verified = Verification(self.k, release={"component": component, "version": version}).verify(None, component, run_id=run_id, final=True)
         fixes = self.fixes(record, verified["candidate"], verified["evidence"])
@@ -161,7 +175,7 @@ class Releases:
     def build_prepare(self, component, version, run_id):
         gate = self.gate(component, version, run_id)
         candidate = gate["candidate"]
-        record = {"model_schema": 1, "component": component, "version": version,
+        record = {"model_schema": 2, "component": component, "version": version,
                   "release_digest": gate["context"]["release_digest"], "contracts": gate["context"]["contracts"],
                   "candidate": candidate, "run_id": run_id, "evidence": gate["evidence"], "policy_id": gate["policy_id"], "fixes": gate["fixes"]}
         preparation = digest(record)
@@ -186,7 +200,7 @@ class Releases:
             if publication and publication["tag"] == tag and self.k.profile.repo(release["record"]["component"]) == self.k.profile.repo(component):
                 need(publication["commit"] == resolved, "TAG_MISMATCH", "Components sharing a repo/tag must publish the same commit")
         query = self.remote(component, remote, tag, resolved)
-        publication = {"model_schema": 1, "component": component, "version": version,
+        publication = {"model_schema": 2, "component": component, "version": version,
                        "release_digest": prepared["release_digest"], "contracts": prepared["contracts"], "commit": resolved,
                        "tag": tag, "remote": remote, "evidence": {"preparation": preparation, "run_id": prepared["run_id"],
                        "candidate": prepared["candidate"], "evidence_ids": prepared["evidence"], "policy_id": prepared["policy_id"],
@@ -197,7 +211,7 @@ class Releases:
         return self.plan("release-record", component, version, inputs, writes), writes
 
     def plan(self, kind, component, version, inputs, writes):
-        plan = {"model_schema": 1, "kind": kind, "target": {"component": component, "version": version},
+        plan = {"model_schema": 2, "kind": kind, "target": {"component": component, "version": version},
                 "expected": {"store_token": self.k.token}, "inputs": inputs, "writes": {p: sha(b) for p, b in writes.items()},
                 "gate_result": {"ok": True, "gate": "release"}}
         plan["operation_id"] = digest(plan)

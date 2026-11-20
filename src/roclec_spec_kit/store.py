@@ -2,19 +2,38 @@
 from __future__ import annotations
 
 import base64
+from datetime import datetime, timezone
+import fcntl
 import os
 from pathlib import Path
+import socket
+import subprocess
 import tempfile
+import tomllib
 
 from .model import ModelError, digest, encoded, fingerprint, local_path, need, read_json, sha
 
 
 class Store:
     def __init__(self, root: Path):
-        self.root = root
+        self.root = root.resolve()
 
     def path(self, relative):
         return local_path(self.root, relative)
+
+    def guard_branch(self, kind, profile=None):
+        if kind in {"change-start", "run-start", "run-verify", "evidence-record", "skills-install"}:
+            return
+        if profile is None:
+            profile = tomllib.loads(self.path(".roclec/project.toml").read_text(encoding="utf-8"))
+        expected = profile["trunk_ref"]
+        prefix = ["git", "-C", str(self.root)]
+        top = subprocess.run([*prefix, "rev-parse", "--show-toplevel"], capture_output=True, timeout=10)
+        head = subprocess.run([*prefix, "symbolic-ref", "-q", "HEAD"], capture_output=True, timeout=10)
+        actual = head.stdout.decode("utf-8", "replace").strip() if head.returncode == 0 else None
+        need(top.returncode == 0 and Path(os.fsdecode(top.stdout.rstrip(b"\n"))).resolve() == self.root
+             and actual == expected, "OFF_TRUNK", "This operation requires the configured specs trunk",
+             exit_code=3, expected=expected, actual=actual, remediation="Switch to the configured local trunk branch.")
 
     def inputs(self):
         files = {}
@@ -22,13 +41,14 @@ class Store:
         files[".gitignore"] = sha(ignore.read_bytes()) if ignore.is_file() else None
         directory = self.path(".roclec")
         if directory.exists():
-            for path in sorted(directory.rglob("*")):
-                relative = path.relative_to(self.root).as_posix()
-                if relative.startswith(".roclec/runtime/"):
-                    continue
-                self.path(relative)
-                if path.is_file():
-                    files[relative] = sha(path.read_bytes())
+            for base, folders, names in os.walk(directory):
+                if Path(base) == directory:
+                    folders[:] = [name for name in folders if name not in {"runtime", "receipts"}]
+                for name in [*folders, *names]:
+                    relative = (Path(base) / name).relative_to(self.root).as_posix()
+                    path = self.path(relative)
+                    if path.is_file():
+                        files[relative] = sha(path.read_bytes())
             references = self.path(".roclec/references.json")
             if references.exists():
                 data = read_json(references)
@@ -125,7 +145,7 @@ class Store:
             need(any(relative.startswith(r) if r.endswith("/") else relative == r for r in roots[kind]),
                  "OPERATION_CONFLICT", "Write is outside this operation's namespace", exit_code=3, path=relative)
 
-    def _lock(self):
+    def _lock(self, kind, *, profile=None):
         runtime = self.path(".roclec/runtime")
         runtime.mkdir(parents=True, exist_ok=True)
         lock = self.path(".roclec/runtime/lock")
@@ -133,10 +153,54 @@ class Store:
             lock.mkdir()
         except FileExistsError as exc:
             raise ModelError("OPERATION_CONFLICT", "Another local operation owns the project lock",
-                             exit_code=3, remediation="Wait for the operation; inspect runtime before removing a stale lock.") from exc
+                             exit_code=3, remediation="Wait for the operation or use operation unlock --if-stale.") from exc
+        owner = lock / "owner.json"
+        try:
+            with owner.open("xb") as stream:
+                stream.write(encoded({"pid": os.getpid(), "host": socket.gethostname(),
+                                      "at": datetime.now(timezone.utc).isoformat(), "operation": kind,
+                                      **({"trunk_ref": profile["trunk_ref"]} if profile else {})}))
+                stream.flush()
+                os.fsync(stream.fileno())
+        except BaseException:
+            owner.unlink(missing_ok=True)
+            lock.rmdir()
+            raise
         return lock
 
+    def _unlock(self, lock):
+        (lock / "owner.json").unlink()
+        lock.rmdir()
+
+    def unlock_stale(self):
+        lock = self.path(".roclec/runtime/lock")
+        path = self.path(".roclec/runtime/lock/owner.json")
+        need(path.is_file(), "INVALID_REFERENCE", "No verifiable lock owner")
+        with path.open("rb") as stream:
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise ModelError("OPERATION_CONFLICT", "Another process is inspecting the lock", exit_code=3) from exc
+            captured = os.fstat(stream.fileno())
+            need(path.is_file() and os.path.samestat(path.stat(), captured), "OPERATION_CONFLICT", "Lock owner changed", exit_code=3)
+            owner = read_json(path)
+            need(isinstance(owner, dict) and type(owner.get("pid")) is int and owner["pid"] > 0
+                 and isinstance(owner.get("operation"), str) and owner.get("host") == socket.gethostname(),
+                 "OPERATION_CONFLICT", "Lock ownership cannot be verified on this host", exit_code=3)
+            kind = owner["operation"]
+            profile = {"trunk_ref": owner["trunk_ref"]} if kind == "init" and "trunk_ref" in owner else None
+            self.guard_branch(kind, profile)
+            try:
+                os.kill(owner["pid"], 0)
+            except ProcessLookupError:
+                self._unlock(lock)
+                return {"unlocked": True, "owner": owner}
+            except PermissionError:
+                pass
+            raise ModelError("OPERATION_CONFLICT", "The lock owner may still be running", exit_code=3, entity=owner["pid"])
+
     def apply(self, kind, payload, writes: dict[str, bytes], expected_token: str, *, validate=None, plan=None):
+        self.guard_branch(kind, payload.get("profile") if kind == "init" else None)
         self._allowed(kind, payload, writes)
         operation_id = digest({"kind": kind, "payload": payload, "writes": {p: sha(b) for p, b in sorted(writes.items())}})
         if plan is not None:
@@ -145,7 +209,7 @@ class Store:
                  "OPERATION_CONFLICT", "Plan digest mismatch", exit_code=3)
         receipt_path = f".roclec/receipts/{operation_id}.json"
         self.path(receipt_path)
-        lock = self._lock()
+        lock = self._lock(kind, profile=payload.get("profile") if kind == "init" else None)
         try:
             self.healthy(locked=True)
             if self.path(receipt_path).is_file():
@@ -157,18 +221,21 @@ class Store:
             need(self.token() == expected_token, "BASE_CONFLICT", "Project inputs changed during validation", exit_code=3)
             if validate:
                 validate()
-            before = {p: sha(self.path(p).read_bytes()) if self.path(p).exists() else None for p in writes}
+            previous = {p: self.path(p).read_bytes() if self.path(p).exists() else None for p in writes}
+            before = {p: sha(b) if b is not None else None for p, b in previous.items()}
             guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
-            journal = {"model_schema": 1, "operation_id": operation_id, "kind": kind, "payload": payload,
+            journal = {"model_schema": 2, "operation_id": operation_id, "kind": kind, "payload": payload,
                        "before": before, "guard": guard,
                        "writes": {p: base64.b64encode(b).decode("ascii") for p, b in writes.items()}}
             if plan is not None:
                 journal["plan"] = plan
+            if kind == "integrate":
+                journal["prior"] = {p: base64.b64encode(b).decode("ascii") if b is not None else None for p, b in previous.items()}
             journal["journal_digest"] = digest(journal)
             self._atomic(f".roclec/runtime/{operation_id}.json", encoded(journal))
             return self._finish(journal)
         finally:
-            lock.rmdir()
+            self._unlock(lock)
 
     def _finish(self, journal):
         need(journal.get("journal_digest") == digest({k: v for k, v in journal.items() if k != "journal_digest"}),
@@ -187,6 +254,20 @@ class Store:
         need(expected_id == operation_id and journal["before"].keys() == writes.keys(),
              "OPERATION_CONFLICT", "Journal integrity mismatch", exit_code=3)
         receipt_path = f".roclec/receipts/{operation_id}.json"
+        journal_path = f".roclec/runtime/{operation_id}.json"
+        receipt = {"model_schema": 2, "operation_id": operation_id, "kind": journal["kind"],
+                   "payload": journal["payload"], "writes": {p: sha(b) for p, b in writes.items()}}
+        if self.path(receipt_path).is_file():
+            need(read_json(self.path(receipt_path)) == receipt and all(self._current_hash(p) == h for p, h in receipt["writes"].items()),
+                 "OPERATION_CONFLICT", "Confirmed operation diverged from its receipt", exit_code=3)
+            self.path(journal_path).unlink()
+            return receipt
+        if journal["kind"] == "integrate":
+            payload = journal["payload"]
+            need(all(journal["plan"]["inputs"].get(key) == payload[key] for key in ("candidate", "target_ref", "target_commit")),
+                 "OPERATION_CONFLICT", "Integration guard differs from prepared plan", exit_code=3)
+            if journal.get("rolling_back") or not self._target_current(payload):
+                return self._rollback(journal, writes)
         guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
         need(guard == journal["guard"], "OPERATION_CONFLICT",
              "Other project inputs changed since the operation was prepared", exit_code=3)
@@ -225,10 +306,12 @@ class Store:
                     self._atomic(relative, content)
                 if journal["kind"] == "skills-install" and relative == ".roclec/run":
                     os.chmod(path, 0o755)
-            receipt = {"model_schema": 1, "operation_id": operation_id, "kind": journal["kind"],
-                       "payload": journal["payload"], "writes": {p: sha(b) for p, b in writes.items()}}
+            need(all(self._current_hash(p) == h for p, h in receipt["writes"].items()),
+                 "OPERATION_CONFLICT", "A write diverged before receipt", exit_code=3)
+            if journal["kind"] == "integrate" and not self._target_current(journal["payload"]):
+                return self._rollback(journal, writes)
             self._atomic(f".roclec/receipts/{operation_id}.json", encoded(receipt))
-            self.path(f".roclec/runtime/{operation_id}.json").unlink()
+            self.path(journal_path).unlink()
             return receipt
         except OSError as exc:
             error = ModelError("IO_PARTIAL", "Operation interrupted; recover using its journal", exit_code=4,
@@ -236,12 +319,70 @@ class Store:
             error.operation_id, error.partial = operation_id, True
             raise error from exc
 
+    def _current_hash(self, relative):
+        path = self.path(relative)
+        return sha(path.read_bytes()) if path.is_file() else None
+
+    def _target_current(self, payload):
+        from .config import load_profile
+        from .integration import target_tip
+        profile = load_profile(self.root)
+        component = payload["component"]
+        return (profile.components[component]["target_ref"] == payload["target_ref"]
+                and target_tip(profile.repo(component), payload["target_ref"]) == payload["target_commit"])
+
+    def _rollback(self, journal, writes):
+        operation_id = journal["operation_id"]
+        path = f".roclec/runtime/{operation_id}.json"
+        prior = {p: base64.b64decode(data, validate=True) if data is not None else None for p, data in journal["prior"].items()}
+        need({p: sha(data) if data is not None else None for p, data in prior.items()} == journal["before"],
+             "OPERATION_CONFLICT", "Journal rollback bytes do not match the prior state", exit_code=3)
+        conflicts = {}
+        for relative, content in writes.items():
+            current = self._current_hash(relative)
+            expected = [journal["before"][relative], sha(content)]
+            if current not in expected:
+                conflicts[relative] = {"expected": expected, "actual": current}
+        need(not conflicts, "OPERATION_CONFLICT", "Restore divergent files to an expected state before retrying rollback",
+             actual=conflicts, exit_code=3)
+        try:
+            if not journal.get("rolling_back"):
+                journal["rolling_back"] = True
+                journal["journal_digest"] = digest({k: v for k, v in journal.items() if k != "journal_digest"})
+                self._atomic(path, encoded(journal))
+            for relative, content in reversed(tuple(prior.items())):
+                if self._current_hash(relative) != journal["before"][relative]:
+                    if content is None:
+                        destination = self.path(relative)
+                        destination.unlink()
+                        directory = os.open(destination.parent, os.O_RDONLY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                    else:
+                        self._atomic(relative, content)
+            need(all(self._current_hash(p) == h for p, h in journal["before"].items()),
+                 "OPERATION_CONFLICT", "Rollback did not restore every destination", exit_code=3)
+            self.path(path).unlink()
+        except OSError as exc:
+            error = ModelError("IO_PARTIAL", "Rollback interrupted; retry recovery", exit_code=4,
+                               entity=operation_id, remediation=f"operation recover {operation_id}")
+            error.operation_id, error.partial = operation_id, True
+            raise error from exc
+        return {"operation_id": operation_id, "status": "rolled-back"}
+
     def recover(self, operation_id):
         fingerprint(operation_id)
-        lock = self._lock()
+        journal_path = self.path(f".roclec/runtime/{operation_id}.json")
+        receipt_path = self.path(f".roclec/receipts/{operation_id}.json")
+        pending = journal_path if journal_path.is_file() else receipt_path
+        need(pending.is_file(), "INVALID_REFERENCE", "Unknown operation", entity=operation_id)
+        operation = read_json(pending)
+        self.guard_branch(operation["kind"], operation["payload"].get("profile") if operation["kind"] == "init" else None)
+        kind = operation["kind"]
+        lock = self._lock(kind, profile=operation["payload"].get("profile") if kind == "init" else None)
         try:
-            journal_path = self.path(f".roclec/runtime/{operation_id}.json")
-            receipt_path = self.path(f".roclec/receipts/{operation_id}.json")
             if not journal_path.exists():
                 need(receipt_path.is_file(), "INVALID_REFERENCE", "Unknown operation", entity=operation_id)
                 return read_json(receipt_path)
@@ -249,4 +390,4 @@ class Store:
             need(journal.get("operation_id") == operation_id, "OPERATION_CONFLICT", "Journal identity mismatch", exit_code=3)
             return self._finish(journal)
         finally:
-            lock.rmdir()
+            self._unlock(lock)

@@ -1,7 +1,7 @@
 <!-- managed by roclec-spec-kit -->
-# Native record authoring — model_schema 1, profile 2
+# Native record authoring — model_schema 2, profile 3
 
-All JSON rejects duplicate/unknown keys, non-finite values and escaping/symlink content paths. Lists of IDs/components/references are sorted and unique. IDs CAP/REQ/AC/CHG/FUT/RUN/EVD use at least three digits and are permanent. No administrative done flag is authoritative.
+All JSON rejects duplicate/unknown keys, non-finite values and escaping/symlink content paths. Lists of IDs/components/references are sorted and unique. CAP/REQ/AC/CHG/FUT use at least three digits. RUN and EVD use ULIDs and explicit supersession. The CLI fills `supersedes` per run scope, per observed AC and per reviewer. Distinct change and release scopes do not share predecessors.
 
 `change seal DIR` computes file hashes, snapshot revisions and the proposal digest. `change seal DIR --check` reports pending changes. Author new proposed snapshots under `proposed/CAP-NNN/draft/` and omit their `revision`; list extra semantic files as keys in `semantic.files`. Seal only an external bundle, then import it with `change new`.
 
@@ -27,11 +27,11 @@ contract.json contains model_schema, capability_id, requirements, acceptance, re
 
 ## Foundation and decisions
 
-references.json contains model_schema and references [{id, path, components, role, decision_id}]. Roles are context, principles, architecture, stack, engineering, verification, operations, design. Existing consumer files stay authoritative. A foundation decision file contains model_schema, id, kind="foundation", status="agreed", actor, reason and sources {reference_id: exact file SHA}. Record agreed only after the real decision. An empty template or a hash of different bytes is insufficient. Sources, not the index, own their content; decisions own agreement/provenance.
+references.json contains model_schema and references [{id, path, components, role, decision_id}]. Roles are context, principles, architecture, stack, engineering, verification, operations, design. Existing consumer files stay authoritative. Use `reference add|update` and `foundation agree` for decisions bound to source bytes. Each decision has a digest ID and a `previous` link within its entity chain. Change-start decisions have separate chains per change and component. Resolve any decision fork in the merge candidate before advancing trunk.
 
 ## Execution/evidence
 
-The profile declares inputs/generated and optional excluded patterns per component. Checks declare id, argv list, cwd, timeout_seconds and optional acceptance_ids. Files outside categories block sufficient candidates, including ignored sources. `run verify` reserves RUN and executes checks; pass is a command result, not implicit AC coverage or review.
+The profile declares inputs/generated and optional excluded patterns per component. Checks declare id, argv list, cwd, timeout_seconds and optional acceptance_ids and env. Run checks only in repositories you trust. They execute the profile's argv. Raw output is local under `.roclec/runtime/logs/` and may contain secrets. A run manifest binds the captures by path, SHA-256, size and completeness.
 
 Imported evidence contains model_schema, kind (manual|automated-import|independent-review), change_id, component, run_id, candidate_digest, actor, context, outcome, acceptance_ids, checks, limitations and findings [{id, description}]. For a release use change_id=null and add release {component, version}; its RUN covers the final combined contracts. Outcome is pass|fail|incomplete for observations or ready|changes-needed|incomplete for independent review. Review adds policy_id. Current scope/digest must match the actual run. Imported evidence always has executed_by_roclec=false. Files emitted by the CLI are immutable; subsequent observations create new EVDs.
 

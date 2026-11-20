@@ -75,13 +75,14 @@ def read_json(path: Path):
 
 
 def schema(record):
-    need(type(record.get("model_schema")) is int and record["model_schema"] == 1,
-         "UNSUPPORTED_SCHEMA", "Record requires model_schema = 1", exit_code=2)
+    need(type(record.get("model_schema")) is int and record["model_schema"] == 2,
+         "UNSUPPORTED_SCHEMA", "Record requires model_schema = 2", exit_code=2)
 
 
 def identifier(value, prefix):
-    need(isinstance(value, str) and re.fullmatch(prefix + r"-[0-9]{3,}", value),
-         "INVALID_INPUT", f"Expected {prefix}-NNN identifier", exit_code=2, actual=value)
+    pattern = r"-[0-7][0-9A-HJKMNP-TV-Z]{25}" if prefix in {"RUN", "EVD"} else r"-[0-9]{3,}"
+    need(isinstance(value, str) and re.fullmatch(prefix + pattern, value),
+         "INVALID_INPUT", f"Invalid {prefix} identifier", exit_code=2, actual=value)
     return value
 
 

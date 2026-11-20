@@ -23,21 +23,25 @@ def git(root, *args):
 def commit(root, message="fixture checkpoint"):
     git(root, "add", ".")
     git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", message)
-    return git(root, "rev-parse", "HEAD")
+    head = git(root, "rev-parse", "HEAD")
+    git(root, "update-ref", "refs/remotes/fixture/main", head)
+    return head
 
 
 def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check_code=None, timeout=5):
     workspace.mkdir(parents=True, exist_ok=True)
     root = workspace / "code with spaces"
+    root.mkdir()
+    git(root, "init", "-qb", "main")
     config = workspace / "profile.toml"
-    lines = ['schema = 2', 'name = "C2 synthetic consumer"']
+    lines = ['schema = 3', 'name = "C2 synthetic consumer"', 'trunk_ref = "refs/heads/main"']
     for name in names:
         check = {"id": "unit", "argv": [sys.executable, "src/check.py"], "cwd": ".", "timeout_seconds": timeout}
         if coverage:
             check["acceptance_ids"] = ["AC-001"]
         # TOML inline tables, with JSON strings/arrays for individual values.
         inline = "{" + ", ".join(k + "=" + json.dumps(v) for k, v in check.items()) + "}"
-        lines.extend([f'[components.{name}]', 'repo = "."', 'user_facing = false',
+        lines.extend([f'[components.{name}]', 'repo = "."', 'user_facing = false', 'target_ref = "refs/remotes/fixture/main"',
                       'inputs = ["src/**"]', 'generated = ["build/**"]', 'excluded = ["private.env"]',
                       f'verification = [{inline}]'])
     config.write_text("\n".join(lines) + "\n")
@@ -49,7 +53,6 @@ def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check
     (root / "src/check.py").write_text(check_code or 'from pathlib import Path\nassert Path("src/value.txt").read_text() == "saved\\n"\nprint("checked AC-001")\n')
     (root / "src/value.txt").write_text("saved\n")
     (root / ".gitignore").write_text(".roclec/runtime/\nbuild/\nprivate.env\n")
-    git(root, "init", "-q")
     base = commit(root)
     source = workspace / "bundle"
     record = bundle(source, components=names)
@@ -65,6 +68,87 @@ def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check
     return root, base
 
 
+def branch_scenarios(workspace, invoke, check):
+    root, base = setup(workspace / "branch-history", invoke)
+    def call(repo, *args, code=0, issue=None):
+        result = invoke(["--project", str(repo), "--json", *map(str, args)])
+        payload = json.loads(result.stdout)
+        check("F2 " + " ".join(map(str, args[:2])), result.returncode == code, result.stdout + result.stderr)
+        if issue:
+            check("F2 expected " + issue, issue in {item["code"] for item in payload["issues"]}, result.stdout)
+        return payload
+
+    def verify(repo, component="engine"):
+        return call(repo, "run", "verify", "CHG-001", "--component", component, "--base", base)["data"]["run"]
+
+    def observe(repo, run):
+        evidence = workspace / "branch-observation.json"
+        put_json(evidence, {"model_schema": 2, "kind": "manual", "change_id": "CHG-001", "component": run["component"],
+                            "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"],
+                            "actor": "Synthetic observer", "context": "Worktree merge fixture", "outcome": "pass",
+                            "acceptance_ids": ["AC-001"], "checks": ["Observed test"], "limitations": [], "findings": []})
+        return call(repo, "evidence", "record", "--file", evidence)["data"]["evidence"]
+
+    first = verify(root)
+    initial_observation = observe(root, first)
+    trunk = commit(root)
+    left, right = workspace / "left", workspace / "right"
+    git(root, "worktree", "add", "-qb", "left", str(left), trunk)
+    git(root, "worktree", "add", "-qb", "right", str(right), trunk)
+    for worktree, component in ((left, "engine"), (right, "viewer")):
+        before = tree(worktree)
+        call(worktree, "views", "--write", code=3, issue="OFF_TRUNK")
+        check("F2 off-trunk rejection has no writes", tree(worktree) == before, "")
+        call(worktree, "change", "start", "CHG-001", "--component", component, "--actor", "Synthetic maintainer")
+        after = tree(worktree)
+        check("F2 worktree start leaves current and identity registries unchanged",
+              all(before[p] == after[p] for p in (".roclec/current.json", ".roclec/identities.json")), "")
+    # A same-component start in a second worktree is a fork, unlike independent components.
+    fork = call(right, "change", "start", "CHG-001", "--component", "engine", "--actor", "Other synthetic maintainer")
+    fork_receipt = fork["data"]["receipt"]
+    fork_path = next(iter(fork_receipt["writes"]))
+    call(root, "review", "policy", "--change", "CHG-001", "--enabled", "false", "--actor", "Fixture",
+         "--reason", "Exercise independent trunk decision chain")
+    commit(root)
+    records = []
+    for worktree in (left, right):
+        run = verify(worktree)
+        observation = observe(worktree, run)
+        check("F2 branch run and observation explicitly replace original scope heads",
+              run["supersedes"] == [first["id"]] and observation["supersedes"] == [initial_observation["id"]], "")
+        records.append((run, observation))
+        commit(worktree)
+    for branch in ("left", "right"):
+        git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "--no-edit", branch)
+    call(root, "check", code=1, issue="DECISION_FORK")
+    git(root, "rm", fork_path, f".roclec/receipts/{fork_receipt['operation_id']}.json")
+    call(root, "change", "start", "CHG-001", "--component", "engine", "--actor", "Other synthetic maintainer")
+    check("F2 excluded decision stays in branch history", bool(git(root, "show", f"right:{fork_path}")), "")
+    call(root, "check")
+    gate = ("check", "--change", "CHG-001", "--component", "engine", "--gate", "verify")
+    conflict = call(root, *gate, code=1, issue="AMBIGUOUS_EVIDENCE")
+    check("F2 all concurrent run heads are reported", conflict["issues"][0]["actual"] == sorted(r["id"] for r, _ in records), "")
+    result = call(root, "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+                  code=1, issue="AMBIGUOUS_EVIDENCE")["data"]["run"]
+    check("F2 new run supersedes both heads", result["supersedes"] == sorted(r["id"] for r, _ in records), "")
+    observation = observe(root, result)
+    check("F2 new observation supersedes both heads", observation["supersedes"] == sorted(o["id"] for _, o in records), "")
+    call(root, *gate)
+    candidate = commit(root)
+    plan = workspace / "branch-plan.json"
+    git(root, "update-ref", "refs/remotes/fixture/main", trunk)
+    call(root, "integrate", "prepare", "CHG-001", "--component", "engine", "--run", result["id"], "--out", plan,
+         code=1, issue="TARGET_NOT_INTEGRATED")
+    check("F2 rejected prepare creates no output", not plan.exists(), "")
+    git(root, "update-ref", "refs/remotes/fixture/main", candidate)
+    call(root, "integrate", "prepare", "CHG-001", "--component", "engine", "--run", result["id"], "--out", plan)
+    git(root, "update-ref", "refs/remotes/fixture/main", trunk)
+    call(root, "operation", "apply", plan, code=3, issue="BASE_CONFLICT")
+    git(root, "update-ref", "refs/remotes/fixture/main", candidate)
+    call(root, "operation", "apply", plan)
+    call(root, "check")
+
+
 def scenarios(workspace, invoke, check):
     root, base = setup(workspace / "c2", invoke)
 
@@ -73,7 +157,7 @@ def scenarios(workspace, invoke, check):
         result = invoke(["--project", str(root), "--json", *map(str, args)])
         check(label, result.returncode == expect, result.stdout + result.stderr)
         payload = json.loads(result.stdout)
-        check(label + ": JSON envelope", payload["model_schema"] == 1 and payload["ok"] == (expect == 0), result.stdout)
+        check(label + ": JSON envelope", payload["model_schema"] == 2 and payload["ok"] == (expect == 0), result.stdout)
         if issue:
             check(label + ": issue", issue in [i["code"] for i in payload["issues"]], result.stdout)
         if expect in (1, 2, 3) and not recorded:
@@ -119,7 +203,7 @@ def scenarios(workspace, invoke, check):
     evidence_file = workspace / "review.json"
 
     def report(outcome, kind="independent-review"):
-        record = {"model_schema": 1, "kind": kind, "change_id": "CHG-001", "component": "engine", "run_id": run_id,
+        record = {"model_schema": 2, "kind": kind, "change_id": "CHG-001", "component": "engine", "run_id": run_id,
                   "candidate_digest": run["candidate"]["inputs_digest"], "actor": "declared fixture reviewer", "context": "synthetic harness report, no model evaluation",
                   "outcome": outcome, "acceptance_ids": ["AC-001"], "checks": ["Observed fixture output"], "limitations": ["No actual independent human review"],
                   "findings": [{"id": "F-001", "description": "Stable historical finding"}]}
@@ -219,7 +303,7 @@ def execution_scenarios(workspace, invoke, check):
             check(label + ": setup differs from product failure", not run["results"][0]["executed_by_roclec"] and "environment" in run["results"][0]["limitation"])
         if "missing coverage" in label:
             evidence_file = workspace / "coverage.json"
-            report = {"model_schema": 1, "kind": "manual", "change_id": "CHG-001", "component": "engine", "run_id": run["id"],
+            report = {"model_schema": 2, "kind": "manual", "change_id": "CHG-001", "component": "engine", "run_id": run["id"],
                       "candidate_digest": run["candidate"]["inputs_digest"], "actor": "fixture observer", "context": "Synthetic manual observation",
                       "outcome": "pass", "acceptance_ids": ["AC-001"], "checks": ["Observed output meets AC-001"], "limitations": [], "findings": []}
             put_json(evidence_file, report)
@@ -286,7 +370,7 @@ def competing_fixture(workspace, invoke):
         if run["status"] != "pass":
             raise AssertionError("Competing fixture checks must pass before attaching manual coverage")
         evidence_file = workspace / (record["id"] + "-observation.json")
-        report = {"model_schema": 1, "kind": "manual", "change_id": record["id"], "component": "engine", "run_id": run["id"],
+        report = {"model_schema": 2, "kind": "manual", "change_id": record["id"], "component": "engine", "run_id": run["id"],
                   "candidate_digest": run["candidate"]["inputs_digest"], "actor": "fixture observer", "context": "Synthetic coverage; no product evaluation",
                   "outcome": "pass", "acceptance_ids": ["AC-002" if record["id"] == "CHG-002" else "AC-003"],
                   "checks": ["Synthetic observation of this proposed AC"], "limitations": ["Structural harness fixture"], "findings": []}

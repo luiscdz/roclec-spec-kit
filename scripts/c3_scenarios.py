@@ -162,14 +162,14 @@ def combined_and_fix_scenarios(workspace, invoke, check):
             call("I-028 nonexistent, excluded or unproven backport rejects", "release", "prepare", "engine", version, "--run", run["id"], "--out", plan,
                  expect=1, issue="FIX_NOT_INCLUDED")
         if number == 7:
-            report = {"model_schema": 1, "kind": "manual", "change_id": None, "release": {"component": "engine", "version": version},
+            report = {"model_schema": 2, "kind": "manual", "change_id": None, "release": {"component": "engine", "version": version},
                       "component": "engine", "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"], "actor": "fixture observer",
                       "context": "Synthetic backport preservation observation", "outcome": "pass", "acceptance_ids": ["AC-001"],
                       "checks": ["Preservation of historical AC with the included backport"], "limitations": ["Structural fixture, no product acceptance"], "findings": []}
             file = workspace / "backport-evidence.json"
             put_json(file, report)
             evidence = call("I-028 record backport preservation", "evidence", "record", "--file", file)["evidence"]
-            check("Explicit backport links real preservation record", evidence["id"] == "EVD-001")
+            check("Explicit backport links real preservation record", evidence["id"].startswith("EVD-") and len(evidence["id"]) == 30)
             commit(root)
         if number in (6, 7):
             data = call("I-028 included implementation with preservation can prepare", "release", "prepare", "engine", version, "--run", run["id"], "--out", plan)
@@ -204,17 +204,18 @@ def review_scenarios(workspace, invoke, check):
     state = call("Inspect aggregate release review policy", "inspect", "--release", "v1.0.0", "--component", "engine")
     policy = state["review_policy"]
     check("Aggregate policy preserves explicit adoption provenance", policy["enabled"] and list(policy["members"]) == ["CHG-001"])
-    for outcome in ("changes-needed", "incomplete", "ready"):
-        report = {"model_schema": 1, "kind": "independent-review", "change_id": None,
+    for actor, outcome in (("R1", "ready"), ("R2", "changes-needed"), ("R1", "ready"),
+                           ("R2", "incomplete"), ("R2", "ready")):
+        report = {"model_schema": 2, "kind": "independent-review", "change_id": None,
                   "release": {"component": "engine", "version": "v1.0.0"}, "component": "engine", "run_id": run["id"],
-                  "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"], "actor": "declared fixture reviewer",
+                  "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"], "actor": actor,
                   "context": "Structural fixture; no actual independent human/model acceptance", "outcome": outcome, "acceptance_ids": ["AC-001"],
                   "checks": ["Synthetic observation of the final combined contract"], "limitations": ["No product acceptance"], "findings": []}
         file = workspace / "release-review.json"
         put_json(file, report)
         call("Record final release " + outcome + " review", "evidence", "record", "--file", file)
         commit(root)
-        if outcome != "ready":
+        if (actor, outcome) != ("R2", "ready") and (actor == "R2" or len(list((root / ".roclec/evidence").glob("*.json"))) > 1):
             call("D3 unfavorable release review blocks preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out, expect=1, issue="REVIEW_REQUIRED")
     call("D3 current favorable release review permits preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out)
     call("Persist release preparation with review", "operation", "apply", out)
@@ -225,4 +226,4 @@ def review_scenarios(workspace, invoke, check):
     call("D3 user disables participation with reason", "review", "policy", "--change", "CHG-001", "--enabled", "false", "--actor", "fixture user", "--reason", "End fixture participation")
     commit(root)
     call("D3 disabled release review allows gate", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")
-    check("D3 old preparations/reports remain historical", all(p.exists() for p in previous) and len(list((root / ".roclec/evidence").glob("*.json"))) == 3)
+    check("D3 old preparations/reports remain historical", all(p.exists() for p in previous) and len(list((root / ".roclec/evidence").glob("*.json"))) == 5)

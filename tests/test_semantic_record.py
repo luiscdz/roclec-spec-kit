@@ -8,7 +8,7 @@ from scripts.semantic_record import classify
 class SemanticRecordTest(unittest.TestCase):
     @staticmethod
     def envelope(ok, issues=(), next_action=None):
-        return json.dumps({"model_schema": 1, "ok": ok, "command": "check", "data": None,
+        return json.dumps({"model_schema": 2, "ok": ok, "command": "check", "data": None,
                            "issues": list(issues), "next_action": next_action}).encode()
 
     def test_classifies_success_and_domain_gate(self):

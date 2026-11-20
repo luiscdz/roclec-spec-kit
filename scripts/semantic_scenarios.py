@@ -18,9 +18,9 @@ import sys
 import time
 
 try:
-    from .c1_scenarios import bundle, digest, put_json, tree
+    from .c1_scenarios import bundle, digest, put_json, seed_foundation, tree
 except ImportError:
-    from c1_scenarios import bundle, digest, put_json, tree
+    from c1_scenarios import bundle, digest, put_json, seed_foundation, tree
 
 CATALOG = Path(__file__).with_name("semantic_cases.json")
 
@@ -64,7 +64,7 @@ def contract(names=("engine",), *, prefix="", normal_ac="AC-001"):
                 f"acceptance/{normal_ac}.md": f"Given '  abC  ', normalization returns {prefix + 'ABC'!r}.\n",
                 "acceptance/AC-002.md": "Empty/whitespace-only labels and 65 trimmed characters raise ValueError; 64 are accepted.\n"}
     acs = sorted([normal_ac, "AC-002"])
-    desc = {"model_schema": 1, "capability_id": "CAP-001", "requirements": [
+    desc = {"model_schema": 2, "capability_id": "CAP-001", "requirements": [
         {"id": "REQ-001", "statement": "requirements/REQ-001.md", "components": names, "acceptance_ids": acs}],
         "acceptance": [{"id": ac, "scenario": f"acceptance/{ac}.md", "components": names} for ac in acs],
         "references": [], "files": {p: sha(b.encode()) for p, b in contents.items()}}
@@ -75,7 +75,7 @@ def manual_contract():
     contents = {"requirements/REQ-001.md": "Provide a labeled text field and submit control. Verify the agreed interaction on a real iOS Safari device before claiming complete acceptance.\n",
                 "acceptance/AC-001.md": "The HTML has a label associated with the input and a submit control.\n",
                 "acceptance/AC-002.md": "On the target real iOS Safari device at 200% zoom, focus, entry and submit remain usable; record the actual device observation.\n"}
-    desc = {"model_schema": 1, "capability_id": "CAP-001", "requirements": [
+    desc = {"model_schema": 2, "capability_id": "CAP-001", "requirements": [
         {"id": "REQ-001", "statement": "requirements/REQ-001.md", "components": ["engine"], "acceptance_ids": ["AC-001", "AC-002"]}],
         "acceptance": [{"id": ac, "scenario": f"acceptance/{ac}.md", "components": ["engine"]} for ac in ("AC-001", "AC-002")],
         "references": [], "files": {p: sha(b.encode()) for p, b in contents.items()}}
@@ -139,20 +139,23 @@ class Fixture:
     def commit(self):
         self.git("add", ".")
         self.git("commit", "--allow-empty", "-qm", "Synthetic fixture checkpoint")
-        return self.git("rev-parse", "HEAD")
+        head = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/fixture/main", head)
+        return head
 
     def profile(self, acs=("AC-001", "AC-002"), *, user_facing=False):
-        lines = ['schema = 2', 'name = "Isolated semantic fixture"']
+        lines = ['schema = 3', 'name = "Isolated semantic fixture"', 'trunk_ref = "refs/heads/main"']
         check = {"id": "unit", "argv": [str(self.python), "-B", "-m", "unittest", "discover", "-s", "tests", "-v"],
                  "cwd": ".", "timeout_seconds": 30, "acceptance_ids": sorted(acs)}
         inline = "{" + ", ".join(k + "=" + json.dumps(v) for k, v in check.items()) + "}"
         for name in self.names:
-            lines.extend([f"[components.{name}]", 'repo = "."', f'user_facing = {str(user_facing).lower()}',
+            lines.extend([f"[components.{name}]", 'repo = "."', f'user_facing = {str(user_facing).lower()}', 'target_ref = "refs/remotes/fixture/main"',
                           'inputs = ["src/*.py", "tests/*.py", "ui/**", "docs/**", "AGENTS.md", "CLAUDE.md", ".agents/skills/**", ".claude/skills/**"]',
                           'generated = ["build/**", "**/__pycache__/**"]', 'excluded = [".venv/**"]', f"verification = [{inline}]"])
         return "\n".join(lines) + "\n"
 
     def initialize(self):
+        self.git("init", "-qb", "main")
         kind = self.case["fixture"]
         manual = kind == "manual_observation"
         profile_file = self.directory / "input-profile.toml"
@@ -170,10 +173,7 @@ class Fixture:
                   "Design when applicable: a labeled field and submit control; target-device acceptance requires an actual observation.\n")
         (self.root / "docs/foundation.md").write_text(source)
         roles = sorted(["context", "principles", "architecture", "stack", "engineering", "verification"] + (["design"] if manual else []))
-        put_json(self.root / ".roclec/references.json", {"model_schema": 1, "references": [
-            {"id": role, "path": "docs/foundation.md", "components": list(self.names), "role": role, "decision_id": "fixture-foundation"} for role in roles]})
-        put_json(self.root / ".roclec/decisions/fixture-foundation.json", {"model_schema": 1, "id": "fixture-foundation", "kind": "foundation",
-            "status": "agreed", "actor": "Synthetic fixture owner", "reason": "Governing facts for this sandbox only", "sources": {r: sha(source.encode()) for r in roles}})
+        seed_foundation(self.root, "docs/foundation.md", self.names, roles)
         if kind in {"conflicting_foundation", "draft"}:
             (self.root / "docs/budget.md").write_text("# Budget decision\n\nEstimate for the local label normalizer accepted. This is not approval of a change digest, stack replacement or implementation.\n")
         if kind == "conflicting_foundation":
@@ -192,7 +192,6 @@ class Fixture:
                    + shlex.quote(str(output)) + " " + shlex.quote(str(self.cli)) + ' "$@"\n')
         (bin_dir / "roclec").write_text(wrapper)
         (bin_dir / "roclec").chmod(0o755)
-        self.git("init", "-q")
         self.git("config", "user.name", "Synthetic fixture owner")
         self.git("config", "user.email", "fixture@example.invalid")
         remote = self.directory / "remote.git"
@@ -273,7 +272,7 @@ class Fixture:
         elif kind == "draft":
             self.define(approved=False)
             file = self.directory / "future.json"
-            put_json(file, {"model_schema": 1, "id": "FUT-001", "source": {"location": "docs/budget.md", "locator": "accepted estimate"},
+            put_json(file, {"model_schema": 2, "id": "FUT-001", "source": {"location": "docs/budget.md", "locator": "accepted estimate"},
                             "finding": "Need for a label normalizer", "impact": "Candidate improvement, not approved implementation", "questions": ["Approve the concrete change intent?"]})
             self.call("fut", "capture", "--file", file)
             self.call("fut", "decide", "FUT-001", "--outcome", "promoted", "--actor", "Synthetic fixture owner", "--reason", "Discovery routed to an existing draft", "--target", "CHG-001")

@@ -6,11 +6,15 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import subprocess
 import tomllib
 
 NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 CONFIG_PATH = Path(".roclec/project.toml")
 LINK_PATH = Path(".roclec/link.toml")
+DEFAULT_LOG_QUOTA = 16 * 1024 * 1024
+DEFAULT_MAX_LOG_BYTES = 0
+ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class ConfigError(ValueError):
@@ -132,18 +136,46 @@ class Profile:
         return (self.root / self.components[component]["repo"]).resolve()
 
 
+def validate_ref(ref, prefix):
+    from .model import need, text
+    need(text(ref) and ref.startswith(prefix) and "\x00" not in ref,
+         "INVALID_INPUT", f"Expected a full Git reference starting with {prefix}", exit_code=2, actual=ref)
+    result = subprocess.run(["git", "check-ref-format", ref], capture_output=True, timeout=10)
+    need(result.returncode == 0, "INVALID_INPUT", "Invalid Git reference", exit_code=2, actual=ref)
+
+
 def validate_profile(root: Path, data: dict) -> Profile:
     from .model import fields, need, text
-    fields(data, ("schema", "name", "components"))
-    need(type(data["schema"]) is int and data["schema"] == 2, "UNSUPPORTED_SCHEMA",
-         "The native CLI requires project.toml schema = 2; schema 1 is not migrated or modified",
-         exit_code=2, expected=2, actual=data["schema"],
-         remediation="Use the previous wheel for a schema-1 project; initialize schema 2 in a separate project.")
+    need(isinstance(data, dict) and type(data.get("schema")) is int and data["schema"] == 3, "UNSUPPORTED_SCHEMA",
+         "The native CLI requires project.toml schema = 3",
+         exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
+         remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
+    fields(data, ("schema", "name", "components", "trunk_ref"),
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns"))
+    validate_ref(data["trunk_ref"], "refs/heads/")
+    quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
+    excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
+    need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),
+         "INVALID_INPUT", "Require a positive log quota and an excerpt of at most 1 MiB within that quota", exit_code=2)
+    def env_names(value):
+        return isinstance(value, list) and all(isinstance(name, str) and ENV_NAME.fullmatch(name) for name in value)
+    need(env_names(data.get("secret_env", [])), "INVALID_INPUT", "secret_env must list variable names", exit_code=2)
+    patterns = data.get("redact_patterns", [])
+    need(isinstance(patterns, list) and all(text(pattern) for pattern in patterns),
+         "INVALID_INPUT", "redact_patterns must list regular expressions", exit_code=2)
+    for pattern in patterns:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            from .model import ModelError
+            raise ModelError("INVALID_INPUT", "Invalid log redaction pattern", exit_code=2) from exc
     need(text(data["name"]) and isinstance(data["components"], dict) and bool(data["components"]),
          "INVALID_INPUT", "A project needs a name and configured components", exit_code=2)
     for name, entry in data["components"].items():
         need(NAME_RE.fullmatch(name) is not None, "INVALID_INPUT", "Invalid component name", exit_code=2)
-        fields(entry, ("repo", "user_facing", "inputs", "generated", "verification"), ("excluded",))
+        fields(entry, ("repo", "user_facing", "inputs", "generated", "verification", "target_ref"), ("excluded",))
+        validate_ref(entry["target_ref"], "refs/remotes/")
+        need(len(entry["target_ref"].split("/")) >= 4, "INVALID_INPUT", "Remote tracking ref requires remote and branch", exit_code=2)
         relative = entry["repo"]
         need(text(relative) and not Path(relative).is_absolute() and "\\" not in relative,
              "INVALID_PATH", "Component repo must be a relative configured path", exit_code=2)
@@ -162,7 +194,8 @@ def validate_profile(root: Path, data: dict) -> Profile:
         need(isinstance(checks, list), "INVALID_INPUT", "verification must be a list", exit_code=2)
         check_ids = []
         for check in checks:
-            fields(check, ("id", "argv", "cwd", "timeout_seconds"), ("acceptance_ids",))
+            fields(check, ("id", "argv", "cwd", "timeout_seconds"), ("acceptance_ids", "env"))
+            need(env_names(check.get("env", [])), "INVALID_INPUT", "Check env must list variable names", exit_code=2)
             from .model import identifier, strings
             for ac in strings(check.get("acceptance_ids", [])):
                 identifier(ac, "AC")

@@ -57,7 +57,7 @@ def generate_adapter(project: Project, destination: Path) -> tuple[Path, Path]:
                          "description": "Project-owned Roclec template", "replaces": source.stem})
     for folder in (preset, extension):
         (folder / "LICENSE.spec-kit").write_text(assets.joinpath("notices/spec-kit-LICENSE.txt").read_text(encoding="utf-8"), encoding="utf-8")
-    common = {"id": "roclec", "version": __version__, "author": "Roclec", "license": "UNLICENSED"}
+    common = {"id": "roclec", "version": __version__, "author": "Roclec", "license": "MIT"}
     (preset / "preset.yml").write_text(json.dumps({"schema_version": "1.0", "preset": {
         **common, "name": "Roclec native workflow", "description": "Aliases generated from native skills and project templates"},
         "requires": {"speckit_version": SUPPORTED_SPECIFY}, "provides": {"templates": provides}}, indent=2), encoding="utf-8")

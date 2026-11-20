@@ -25,11 +25,15 @@ def put_json(path, value):
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def init_trunk(root):
+    subprocess.run(["git", "init", "-qb", "main", str(root)], check=True, capture_output=True)
+
+
 def profile(path, names=("engine", "viewer"), repo="."):
-    lines = ['schema = 2', 'name = "Synthetic consumer"']
+    lines = ['schema = 3', 'name = "Synthetic consumer"', 'trunk_ref = "refs/heads/main"']
     for name in names:
         lines.extend([f'[components.{name}]', f'repo = {json.dumps(repo)}', 'user_facing = false',
-                      'inputs = ["src/**", "tests/**"]', 'generated = ["build/**"]',
+                      'inputs = ["src/**", "tests/**"]', 'generated = ["build/**"]', 'target_ref = "refs/remotes/fixture/main"',
                       'verification = [{id="unit", argv=["python3", "-m", "unittest"], cwd=".", timeout_seconds=30}]'])
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -37,7 +41,7 @@ def profile(path, names=("engine", "viewer"), repo="."):
 def snapshot(components=("engine", "viewer"), *, ac="AC-001", behavior="single line", req="REQ-001"):
     contents = {f"requirements/{req}.md": f"Display the result in {behavior}.\n",
                 f"acceptance/{ac}.md": f"Given PASS and Saved, when opened, then the result uses {behavior}.\n"}
-    descriptor = {"model_schema": 1, "capability_id": "CAP-001", "requirements": [
+    descriptor = {"model_schema": 2, "capability_id": "CAP-001", "requirements": [
         {"id": req, "statement": f"requirements/{req}.md", "components": sorted(components), "acceptance_ids": [ac]}],
         "acceptance": [{"id": ac, "scenario": f"acceptance/{ac}.md", "components": sorted(components)}],
         "references": [], "files": {p: file_hash(b.encode()) for p, b in contents.items()}}
@@ -71,7 +75,7 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
         else:
             semantic["deltas"] = [{"op": "add", "capability_id": "CAP-001", "requirement_id": "REQ-001"}]
         write_snapshot(folder / "proposed" / "CAP-001" / target["revision"], target)
-    record = {"model_schema": 1, "id": change_id, "kind": kind, "semantic": semantic}
+    record = {"model_schema": 2, "id": change_id, "kind": kind, "semantic": semantic}
     record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
     put_json(folder / "change.json", record)
     (folder / "proposal.md").write_text(body, encoding="utf-8")
@@ -85,11 +89,20 @@ def foundation(root, names=("engine", "viewer")):
     body = "# Synthetic foundation\n\nContext, principles, architecture, stack, engineering and verification are fixture data.\n"
     path.write_text(body, encoding="utf-8")
     roles = ["architecture", "context", "engineering", "principles", "stack", "verification"]
-    sources = {role: file_hash(body.encode()) for role in roles}
-    put_json(root / ".roclec/references.json", {"model_schema": 1, "references": [
-        {"id": role, "path": relative, "components": sorted(names), "role": role, "decision_id": "foundation-001"} for role in roles]})
-    put_json(root / ".roclec/decisions/foundation-001.json", {"model_schema": 1, "id": "foundation-001", "kind": "foundation",
-             "status": "agreed", "actor": "synthetic fixture", "reason": "Test setup, not a human product approval", "sources": sources})
+    seed_foundation(root, relative, names, roles)
+
+
+def seed_foundation(root, relative, names, roles):
+    refs = []
+    source = file_hash((root / relative).read_bytes())
+    for role in sorted(roles):
+        decision = {"model_schema": 2, "entity": role, "previous": None, "kind": "foundation",
+                    "status": "agreed", "actor": "synthetic fixture", "reason": "Synthetic test setup",
+                    "sources": {role: source}}
+        decision["id"] = digest(decision)
+        put_json(root / f".roclec/decisions/{decision['id']}.json", decision)
+        refs.append({"id": role, "path": relative, "components": sorted(names), "role": role, "decision_id": decision["id"]})
+    put_json(root / ".roclec/references.json", {"model_schema": 2, "references": refs})
 
 
 def seed_current(root, snap, names=("engine", "viewer")):
@@ -119,7 +132,7 @@ def seed_publication(root, version, snap, *, component="engine", kind="release",
     if release_path.exists():
         release = json.loads(release_path.read_text())
     else:
-        release = {"model_schema": 1, "component": component, "version": version,
+        release = {"model_schema": 2, "component": component, "version": version,
                    "kind": kind, "changes": [], "base_tag": base_tag}
         put_json(release_path, release)
     for command in (["git", "init", "-q"], ["git", "add", "."],
@@ -127,7 +140,7 @@ def seed_publication(root, version, snap, *, component="engine", kind="release",
         subprocess.run(command, cwd=root, check=True, capture_output=True)
     commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
     subprocess.run(["git", "tag", version, commit], cwd=root, check=True, capture_output=True)
-    publication = {"model_schema": 1, "component": component, "version": version, "release_digest": digest(release),
+    publication = {"model_schema": 2, "component": component, "version": version, "release_digest": digest(release),
                    "contracts": {"CAP-001": snap["revision"]}, "commit": commit, "tag": version,
                    "remote": "synthetic-fixture-only", "evidence": {"note": "Seeded reader fixture; C3 publication not executed"}}
     put_json(directory / "publication.json", publication)
@@ -144,6 +157,7 @@ def scenarios(workspace, invoke, check):
     """invoke(argv) -> CompletedProcess; check(name, condition, detail) records or fails."""
     root = workspace / "consumer with spaces"
     root.mkdir()
+    init_trunk(root)
     (root / "AGENTS.md").write_text("# Existing consumer rules\n")
     (root / ".roclec/templates").mkdir(parents=True)
     (root / ".roclec/templates/custom.md").write_text("Project-owned template\n")
@@ -173,8 +187,9 @@ def scenarios(workspace, invoke, check):
     call("C1 empty project check", "check")
     call("I-001 refuse repeat init", "init", str(root), "--profile", str(config), initial=True, expect=1, issue="UNMANAGED_FILE")
     old_config = (root / ".roclec/project.toml").read_text()
-    (root / ".roclec/project.toml").write_text(old_config.replace("schema = 2", "schema = 1"))
-    call("I-002 reject old profile without migration", "check", expect=2, issue="UNSUPPORTED_SCHEMA")
+    for old_schema in (1, 2):
+        (root / ".roclec/project.toml").write_text(old_config.replace("schema = 3", f"schema = {old_schema}"))
+        call(f"I-002 reject profile {old_schema} without migration", "check", expect=2, issue="UNSUPPORTED_SCHEMA")
     (root / ".roclec/project.toml").write_text(old_config)
 
     first = snapshot()
@@ -265,7 +280,7 @@ def scenarios(workspace, invoke, check):
     call("I-006 content mismatch rejected", "change", "new", "--file", str(bad_folder / "change.json"), expect=1, issue="HASH_MISMATCH")
     proposal.write_bytes(original_proposal)
     original_manifest = (bad_folder / "change.json").read_text()
-    (bad_folder / "change.json").write_text(original_manifest.replace('"model_schema": 1', '"model_schema": 1, "model_schema": 1', 1))
+    (bad_folder / "change.json").write_text(original_manifest.replace('"model_schema": 2', '"model_schema": 2, "model_schema": 2', 1))
     call("I-002 duplicate JSON key rejected", "change", "new", "--file", str(bad_folder / "change.json"), expect=2, issue="INVALID_INPUT")
     (bad_folder / "change.json").write_text(original_manifest)
     outside = workspace / "outside-proposal.md"
@@ -306,7 +321,7 @@ def scenarios(workspace, invoke, check):
     call("I-029 correction rejects evolution", "release", "plan", "viewer", "v0.1.1", "--kind", "bugfix", "--base-tag", "v0.1.0", "--change", "CHG-002", expect=1, issue="VERSION_INVALID")
 
     for number in (1, 2):
-        fut = {"model_schema": 1, "id": f"FUT-{number:03}", "source": {"location": "docs/reference.md", "locator": "Synthetic context"},
+        fut = {"model_schema": 2, "id": f"FUT-{number:03}", "source": {"location": "docs/reference.md", "locator": "Synthetic context"},
                "finding": "Potential improvement", "impact": "Needs evaluation", "questions": ["Does this belong in scope?"]}
         path = workspace / f"fut-{number}.json"
         put_json(path, fut)

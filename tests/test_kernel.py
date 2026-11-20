@@ -14,7 +14,7 @@ from roclec_spec_kit.config import load_profile
 from roclec_spec_kit.kernel import Kernel
 from roclec_spec_kit.model import ModelError
 from roclec_spec_kit.store import Store
-from scripts.c1_scenarios import (bundle, digest, file_hash, foundation, profile, put_json,
+from scripts.c1_scenarios import (bundle, digest, file_hash, foundation, init_trunk, profile, put_json,
                                  scenarios, seed_current, seed_publication, snapshot, tree, write_snapshot)
 
 
@@ -31,6 +31,7 @@ class KernelTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.workspace = Path(self.temp.name)
         self.root = self.workspace / "project"
+        init_trunk(self.root)
         config = self.workspace / "profile.toml"
         profile(config)
         result = invoke(["--json", "init", str(self.root), "--profile", str(config)])
@@ -112,6 +113,7 @@ class KernelTest(unittest.TestCase):
     def test_documented_bootstrap_bundle_is_importable(self):
         example = Path(__file__).resolve().parents[1] / "docs/examples/c1"
         root = self.workspace / "documented-consumer"
+        init_trunk(root)
         result = invoke(["--json", "init", str(root), "--profile", str(example / "profile.toml")])
         self.assertEqual(result.returncode, 0, result.stdout)
         result = invoke(["--project", str(root), "--json", "change", "new", "--file", str(example / "change/change.json")])
@@ -154,7 +156,7 @@ class KernelTest(unittest.TestCase):
                     put_json(folder / "change.json", record)
                 elif case == "duplicate-json":
                     path = folder / "change.json"
-                    path.write_text(path.read_text().replace('"model_schema": 1', '"model_schema": 1, "model_schema": 1', 1))
+                    path.write_text(path.read_text().replace('"model_schema": 2', '"model_schema": 2, "model_schema": 2', 1))
                 before = tree(self.root)
                 result = invoke(["--project", str(self.root), "--json", "change", "new", "--file", str(folder / "change.json")])
                 self.assertIn(result.returncode, (1, 2), result.stdout)
@@ -232,6 +234,7 @@ class KernelTest(unittest.TestCase):
 
     def test_interrupted_initialization_recovers_without_a_readable_profile(self):
         root = self.workspace / "partial-init"
+        init_trunk(root)
         original = Store._atomic
         calls = []
 
@@ -268,7 +271,7 @@ class KernelTest(unittest.TestCase):
         seed_publication(self.root, "v1.2", base)
         data = self.call("inspect", "--capability", "CAP-001", "--component", "engine", "--at", "v1.2.0")["data"]
         self.assertEqual(data["components"]["engine"]["revision"], base["revision"])
-        record = {"model_schema": 1, "component": "engine", "version": "v1.2.0", "kind": "release", "changes": [], "base_tag": None}
+        record = {"model_schema": 2, "component": "engine", "version": "v1.2.0", "kind": "release", "changes": [], "base_tag": None}
         put_json(self.root / ".roclec/releases/engine/v1.2.0/release.json", record)
         self.call("check", expect=1, issue="VERSION_INVALID")
         (self.root / ".roclec/releases/engine/v1.2.0/release.json").unlink()

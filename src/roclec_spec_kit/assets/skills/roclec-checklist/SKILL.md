@@ -6,7 +6,7 @@ description: Review native Roclec requirement quality and record a focused check
 <!-- managed by roclec-spec-kit -->
 # Roclec checklist
 
-Read project instructions, `.roclec/project.toml` (schema 2), `.roclec/workflow.md` and applicable agreed references. Use `./.roclec/run --json ...` or `roclec --project ROOT --json ...`; the launcher supplies ROOT. Inspect the explicit CHG or CAP and select the relevant component without guessing from branches or the newest directory. Read `.roclec/model.md` when checking JSON authoring constraints.
+Read project instructions, `.roclec/project.toml` (schema 3), `.roclec/workflow.md` and applicable agreed references. Use `./.roclec/run --json ...` or `roclec --project ROOT --json ...`; the launcher supplies ROOT. Inspect the explicit CHG or CAP and select the relevant component without guessing from branches or the newest directory. Read `.roclec/model.md` when checking JSON authoring constraints.
 
 Review the authoritative requirement/AC snapshots and proposal, plan when relevant, and consumer rules. Focus the checklist on the requested question: completeness, clarity, consistency, measurable outcomes, permissions, failure/recovery, dependencies or assumptions. Do not invent requirements merely to fill a category. Cite exact REQ/AC revisions and source paths rather than copying their text into another authority.
 
