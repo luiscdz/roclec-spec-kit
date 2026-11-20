@@ -393,6 +393,14 @@ F0 consolida el historial, el respaldo verificado y CI. F1 incorpora autoría y 
 
 Cada fase técnica exige suite completa, build y harness sobre el wheel. Los cambios de assets o adaptador requieren `--spec-kit`. El cierre de 0.9.0 exige F0–F3 completas, las rupturas públicas documentadas y un recorrido real de F4. Los informes de síntesis deben registrar los resultados y sus límites.
 
+### Evidencia local de F0–F3
+
+- F0. Consolidados los cambios de 0.8.0 en Git. La matriz inicial de seis combinaciones pasó. El clon público contiene el informe semántico y el inventario SHA-256. La copia local verificó los 38 originales. [CI de consolidación](https://github.com/luiscdz/roclec-spec-kit/actions/runs/44650973679) · [Inventario](../evaluation/evidence-inventory.md)
+- F1–F3. Sobre el código `af6e9bf` pasaron 69 pruebas unitarias y 855 comprobaciones del harness con `--spec-kit`, incluida la instalación con Codex y Claude. El paquete fuente excluye los directorios de evidencia. [CI del perfil 3](https://github.com/luiscdz/roclec-spec-kit/actions/runs/44654377111)
+- El escenario de escala comprobó 250 intentos en 0,322 s frente a un límite de 25 s. La captura bajo cuota agregó 1.507.328 bytes al pico de memoria frente a un máximo de 32 MiB. Son mediciones de un consumidor sintético.
+- El wheel local `roclec_spec_kit-0.9.0.dev0-py3-none-any.whl` tiene SHA-256 `7373b0ce8468539d31c1c721b9e5d7b0ffd441a2a5032d83a4cf613d71fc68ae`. El informe `$BACKUP/hito-02-verified.json` tiene SHA-256 `4631a4900ddb57bf25004202dbcf5799604576250ce3806e6bdb927376d2adaa`.
+- Se prepararon diez fixtures semánticos con el mismo wheel y cero ejecuciones de agentes. El manifiesto local `$BACKUP/hito-02-fixtures/preparation.json` tiene SHA-256 `d0e5dc5c8b3b013bc17a4182ccb653e051298e79a218bdb52e1811acf231f4bc`.
+
 ## 14. Riesgos no funcionales
 
 - Verificar las copias locales con el inventario y mantener una copia adicional para reducir pérdida de evidencia.
