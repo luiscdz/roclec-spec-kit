@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 from scripts.c3_scenarios import scenarios, combined_and_fix_scenarios, review_scenarios
-from scripts.c3_installation import scenarios as installation_scenarios
+from scripts.c3_installation import scenarios as installation_scenarios, verified_restore_scenarios
 from scripts.c3_faults import scenarios as fault_scenarios
 from test_kernel import invoke
 
@@ -29,7 +29,10 @@ class NativeReleaseTest(unittest.TestCase):
         def inject(code, argv):
             return subprocess.run([sys.executable, "-c", code, *argv], env=env, capture_output=True, text=True, timeout=30)
         with tempfile.TemporaryDirectory() as directory:
-            fault_scenarios(Path(directory), invoke, inject, lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
+            def check(name, condition, detail=""):
+                self.assertTrue(condition, f"{name}: {detail}")
+            fault_scenarios(Path(directory), invoke, inject, check)
+            verified_restore_scenarios(Path(directory), invoke, inject, check)
 
     def test_final_release_review_policy(self):
         with tempfile.TemporaryDirectory() as directory:

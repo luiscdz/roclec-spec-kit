@@ -70,7 +70,7 @@ def restore_verified_external_skills(root: Path) -> list[str]:
     report = {"installer": INSTALLER, "status": "rejected", "skills": {}}
     try:
         with TemporaryDirectory(prefix="roclec-skills-") as directory:
-            stage = Path(directory)
+            stage = Path(directory).resolve()
             (stage / "skills-lock.json").write_bytes(lock_path.read_bytes())
             result = subprocess.run(["npx", "-y", INSTALLER, "experimental_install", "--frozen-lockfile"],
                                     cwd=stage, capture_output=True, text=True, timeout=180)
