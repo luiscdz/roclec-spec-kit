@@ -1,0 +1,31 @@
+{
+  "fixture_only": true,
+  "expected_exit_code": 3,
+  "response": {
+    "model_schema": 1,
+    "ok": false,
+    "command": "integrate prepare",
+    "data": {
+      "change_id": "CHG-001",
+      "component": "client",
+      "plan": null,
+      "recorded": false
+    },
+    "issues": [
+      {
+        "code": "BASE_CONFLICT",
+        "severity": "error",
+        "entity": "CAP-001/client",
+        "path": ".roclec/current.json",
+        "message": "The integrated revision differs from the approved base.",
+        "expected": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f",
+        "actual": "d042680f17c5ba2dde3ac42534af9de918a4d176a6a582d0ae47a2a6a9865699",
+        "remediation": "Rebase the affected proposal and obtain approval for its new digest."
+      }
+    ],
+    "next_action": {
+      "command": "inspect --change CHG-001",
+      "reason": "Inspect the conflicting base before revising the proposal."
+    }
+  }
+}

@@ -1,0 +1,182 @@
+{
+  "kind": "illustrative-design-not-runtime",
+  "decision_variant": "D1-confirmed",
+  "contracts": [
+    {
+      "descriptor": {
+        "model_schema": 1,
+        "capability_id": "CAP-001",
+        "requirements": [
+          {
+            "id": "REQ-001",
+            "statement": "requirements/REQ-001.md",
+            "components": [
+              "client"
+            ],
+            "acceptance_ids": [
+              "AC-001"
+            ]
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "AC-001",
+            "scenario": "acceptance/AC-001.md",
+            "components": [
+              "client"
+            ]
+          }
+        ],
+        "references": [],
+        "files": {
+          "requirements/REQ-001.md": "56261c066aed949437992ef58ba0f2689d0e84cdd36a2ee8d45b6900d9475357",
+          "acceptance/AC-001.md": "c6025db07cfdf22df26508ddff4a47487aa69b4ae61333f0e17f6d35368c1044"
+        }
+      },
+      "revision": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f",
+      "content": {
+        "requirements/REQ-001.md": "Display the outcome and detail of a completed check in one line.\n",
+        "acceptance/AC-001.md": "Given a completed check with outcome PASS and detail Saved, when an authorized actor opens the result, then one line displays exactly PASS: Saved.\n"
+      }
+    },
+    {
+      "descriptor": {
+        "model_schema": 1,
+        "capability_id": "CAP-001",
+        "requirements": [
+          {
+            "id": "REQ-001",
+            "statement": "requirements/REQ-001.md",
+            "components": [
+              "client"
+            ],
+            "acceptance_ids": [
+              "AC-002"
+            ]
+          }
+        ],
+        "acceptance": [
+          {
+            "id": "AC-002",
+            "scenario": "acceptance/AC-002.md",
+            "components": [
+              "client"
+            ]
+          }
+        ],
+        "references": [],
+        "files": {
+          "requirements/REQ-001.md": "f80c6a2f0d5618a947f3902781e690a9526e421c46ef1c9a1b6bc004eaf4706e",
+          "acceptance/AC-002.md": "d0f93086e94382d2daa64fa3127fc9ef212c7fa05cca41ee7ec1ca719a37e677"
+        }
+      },
+      "revision": "d042680f17c5ba2dde3ac42534af9de918a4d176a6a582d0ae47a2a6a9865699",
+      "content": {
+        "requirements/REQ-001.md": "Display the outcome and detail of a completed check in two labeled fields.\n",
+        "acceptance/AC-002.md": "Given a completed check with outcome PASS and detail Saved, when an authorized actor opens the result, then two distinct fields display Outcome: PASS and Detail: Saved.\n"
+      }
+    }
+  ],
+  "current": {
+    "model_schema": 1,
+    "components": {
+      "client": {
+        "CAP-001": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f"
+      }
+    }
+  },
+  "change": {
+    "model_schema": 1,
+    "id": "CHG-001",
+    "kind": "evolution",
+    "semantic": {
+      "intention": "proposal.md",
+      "files": {
+        "proposal.md": "99e9985d4fbf24b4b6d02bc415b9e3cef9c7b27b20cefa540cf97f5c348a5951"
+      },
+      "components": [
+        "client"
+      ],
+      "bases": [
+        {
+          "capability_id": "CAP-001",
+          "component": "client",
+          "revision": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f"
+        }
+      ],
+      "deltas": [
+        {
+          "op": "revise",
+          "capability_id": "CAP-001",
+          "requirement_id": "REQ-001",
+          "retire_acceptance_ids": [
+            "AC-001"
+          ],
+          "add_acceptance_ids": [
+            "AC-002"
+          ]
+        }
+      ],
+      "proposed": [
+        {
+          "capability_id": "CAP-001",
+          "components": [
+            "client"
+          ],
+          "revision": "d042680f17c5ba2dde3ac42534af9de918a4d176a6a582d0ae47a2a6a9865699"
+        }
+      ],
+      "dependencies": [],
+      "references": []
+    },
+    "proposal_digest": "01509f313f230ac037a22c79e790c47626b6b5f9ceb25ac7bc04822032aa6c0f"
+  },
+  "change_content": {
+    "proposal.md": "Change the presentation of the completed check result from one line to two labeled fields. Do not change authorization or the underlying outcome.\n"
+  },
+  "derived_change_status": "draft",
+  "approval": null,
+  "run": {
+    "model_schema": 1,
+    "id": "RUN-001",
+    "change_id": "CHG-001",
+    "component": "client",
+    "status": "prepared",
+    "candidate": null,
+    "checks": [],
+    "evidence_ids": []
+  },
+  "release": {
+    "model_schema": 1,
+    "component": "client",
+    "version": "v1.1.0",
+    "kind": "release",
+    "changes": [
+      {
+        "change_id": "CHG-001",
+        "intent_revision": "01509f313f230ac037a22c79e790c47626b6b5f9ceb25ac7bc04822032aa6c0f"
+      }
+    ],
+    "base_tag": null
+  },
+  "derived_release_status": "planning",
+  "historical_resolution": {
+    "component": "client",
+    "version": "v1.0.0",
+    "contracts": {
+      "CAP-001": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f"
+    },
+    "fixture_only": true
+  },
+  "expected_after_verified_integration": {
+    "current": {
+      "model_schema": 1,
+      "components": {
+        "client": {
+          "CAP-001": "d042680f17c5ba2dde3ac42534af9de918a4d176a6a582d0ae47a2a6a9865699"
+        }
+      }
+    },
+    "old_release_revision": "ed745cbe9c32ae4d328fcf9eeec31ff56bda685272784d26761f87ae09b29e9f"
+  }
+}

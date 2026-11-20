@@ -1,0 +1,40 @@
+{
+  "model_schema": 1,
+  "id": "CHG-001",
+  "kind": "evolution",
+  "semantic": {
+    "intention": "proposal.md",
+    "files": {
+      "proposal.md": "ebe8623e03c9fe20aae9994c00d38f2f632232a75905db4b9a3cd2c4ac33ae1a"
+    },
+    "components": [
+      "app"
+    ],
+    "bases": [
+      {
+        "capability_id": "CAP-001",
+        "component": "app",
+        "revision": null
+      }
+    ],
+    "deltas": [
+      {
+        "op": "add",
+        "capability_id": "CAP-001",
+        "requirement_id": "REQ-001"
+      }
+    ],
+    "proposed": [
+      {
+        "capability_id": "CAP-001",
+        "components": [
+          "app"
+        ],
+        "revision": "a5b2b8c7fa1cc4611f75963e2c39984623e3919560ce739e459859c5c6a381d9"
+      }
+    ],
+    "dependencies": [],
+    "references": []
+  },
+  "proposal_digest": "6d21db244ecc59f899272b0f39b03d0ebbe09e70645a8404da3a80053dad853c"
+}

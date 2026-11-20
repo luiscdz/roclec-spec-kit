@@ -1,0 +1,8 @@
+schema = 2
+name = "Synthetic consumer"
+[components.app]
+repo = "."
+user_facing = false
+inputs = ["src/**", "tests/**"]
+generated = ["build/**"]
+verification = [{id="unit", argv=["python3", "-m", "unittest"], cwd=".", timeout_seconds=30}]

@@ -1,0 +1,30 @@
+{
+  "model_schema": 1,
+  "capability_id": "CAP-001",
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "statement": "requirements/REQ-001.md",
+      "components": [
+        "app"
+      ],
+      "acceptance_ids": [
+        "AC-001"
+      ]
+    }
+  ],
+  "acceptance": [
+    {
+      "id": "AC-001",
+      "scenario": "acceptance/AC-001.md",
+      "components": [
+        "app"
+      ]
+    }
+  ],
+  "references": [],
+  "files": {
+    "requirements/REQ-001.md": "a72c355a73823e7e1229c7bd2189d3a9aecc380281b23f35b264ff2e894b4ce4",
+    "acceptance/AC-001.md": "a2afc0904790dbc29fd033eab9c106a56f15a7c61a1205e5819f3db800137e58"
+  }
+}
