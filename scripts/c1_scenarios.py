@@ -179,24 +179,58 @@ def scenarios(workspace, invoke, check):
 
     first = snapshot()
     draft = bundle(workspace / "draft-one", target=first)
+    bundle_dir = workspace / "draft-one"
+    manifest = bundle_dir / "change.json"
+    unsealed = json.loads(manifest.read_bytes())
+    unsealed.pop("proposal_digest")
+    unsealed["semantic"].pop("files")
+    entry = unsealed["semantic"]["proposed"][0]
+    snapshot_parent = bundle_dir / "proposed/CAP-001"
+    (snapshot_parent / entry.pop("revision")).rename(snapshot_parent / "draft")
+    descriptor_path = snapshot_parent / "draft/contract.json"
+    descriptor = json.loads(descriptor_path.read_bytes())
+    descriptor.pop("files")
+    put_json(descriptor_path, descriptor)
+    put_json(manifest, unsealed)
+    before = tree(root)
+    original = manifest.read_bytes()
+    call("F1 seal preview", "change", "seal", str(bundle_dir), "--check")
+    check("F1 seal preview preserves bundle", manifest.read_bytes() == original, "")
+    call("F1 seal generates proposal and snapshot hashes", "change", "seal", str(bundle_dir))
+    sealed = manifest.read_bytes()
+    repeated = call("F1 seal repeats", "change", "seal", str(bundle_dir))["data"]
+    check("F1 seal is idempotent and leaves project intact", not repeated["changed"] and manifest.read_bytes() == sealed and tree(root) == before, "")
     saved_index = (root / ".roclec/current.json").read_bytes()
     call("I-001 create first capability on absent base", "change", "new", "--file", str(workspace / "draft-one/change.json"))
     check("I-003 draft never advances current", (root / ".roclec/current.json").read_bytes() == saved_index, "")
     call("I-004 reject duplicate change ID", "change", "new", "--file", str(workspace / "draft-one/change.json"), expect=1, issue="ID_COLLISION")
-    call("I-009 start requires approval", "change", "start", "CHG-001", "--component", "engine", expect=1, issue="APPROVAL_STALE")
+    call("I-009 start requires approval", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="APPROVAL_STALE")
     call("I-007 reject mismatched approval digest", "change", "approve", "CHG-001", "--digest", "0" * 64,
          "--actor", "fixture user", "--reason", "synthetic", expect=1, issue="APPROVAL_STALE")
     call("approve exact intention", "change", "approve", "CHG-001", "--digest", draft["proposal_digest"],
          "--actor", "fixture user", "--reason", "synthetic")
-    call("I-009 foundation not inferred", "change", "start", "CHG-001", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
-    foundation(root)
+    call("F1 seal rejects approved snapshot", "change", "seal", str(bundle_dir), expect=3, issue="OPERATION_CONFLICT")
+    call("I-009 foundation not inferred", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
+    source = root / "docs/reference.md"
+    source.parent.mkdir(exist_ok=True)
+    original_source = b"# Synthetic foundation\n"
+    source.write_bytes(original_source)
+    for role in ("architecture", "context", "engineering", "principles", "stack", "verification"):
+        call("F1 add foundation source " + role, "reference", "add", role, "--path", "docs/reference.md",
+             "--component", "engine", "--component", "viewer", "--role", role)
+        call("F1 agree foundation source " + role, "foundation", "agree", "--ref", role,
+             "--actor", "Fixture maintainer", "--reason", "Reviewed synthetic source")
     call("agreed foundation checks", "foundation", "check", "--component", "engine", "--change", "CHG-001")
-    call("I-009 release not inferred", "change", "start", "CHG-001", "--component", "engine", expect=1, issue="RELEASE_UNASSIGNED")
+    source.write_bytes(original_source + b"Changed bytes\n")
+    call("F1 edited source invalidates agreement", "foundation", "check", "--component", "engine",
+         expect=1, issue="FOUNDATION_INCOMPLETE")
+    source.write_bytes(original_source)
+    call("I-009 release not inferred", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="RELEASE_UNASSIGNED")
     call("I-023 normal patch forbidden", "release", "plan", "engine", "v0.1.7", "--change", "CHG-001", expect=1, issue="VERSION_INVALID")
     call("plan engine independently", "release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
-    call("I-010 ambiguous start rejected", "change", "start", "CHG-001", expect=2)
-    call("start one component", "change", "start", "CHG-001", "--component", "engine")
-    call("other component remains unassigned", "change", "start", "CHG-001", "--component", "viewer", expect=1, issue="RELEASE_UNASSIGNED")
+    call("I-010 ambiguous start rejected", "change", "start", "CHG-001", "--actor", "Fixture maintainer", expect=2)
+    call("start one component", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
+    call("other component remains unassigned", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "viewer", expect=1, issue="RELEASE_UNASSIGNED")
     inspected = call("inspect per-component progress", "inspect", "--change", "CHG-001")["data"]
     check("progress is a vector", inspected["components"] == {"engine": "in-progress", "viewer": "not-started"}, "")
     (root / ".roclec/changes/CHG-001/notes.md").write_text("Administrative note only\n")
@@ -213,7 +247,7 @@ def scenarios(workspace, invoke, check):
     inspected = call("I-007 changed intention returns to draft", "inspect", "--change", "CHG-001")["data"]
     check("old approval remains historical", inspected["status"] == "draft" and not inspected["approval_current"]
           and inspected["approval"]["proposal_digest"] == draft["proposal_digest"], "")
-    call("stale intention cannot start", "change", "start", "CHG-001", "--component", "engine", expect=1, issue="APPROVAL_STALE")
+    call("stale intention cannot start", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="APPROVAL_STALE")
 
     seed_current(root, first)
     second = snapshot(ac="AC-002", behavior="two labeled fields")

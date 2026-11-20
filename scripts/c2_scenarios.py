@@ -82,11 +82,18 @@ def scenarios(workspace, invoke, check):
             check(label + ": execution persisted", payload["data"]["recorded"] and before != tree(root), result.stdout)
         return payload.get("data")
 
-    call("C2 start", "change", "start", "CHG-001", "--component", "engine")
+    def expect_status(expected):
+        state = call("F1 status reports " + expected, "status")["components"]["engine"]["changes"]
+        check("F1 engine change status " + expected, {"id": "CHG-001", "status": expected} in state)
+
+    expect_status("approved")
+    call("C2 start", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
+    expect_status("in-progress")
     # Development is explicitly allowed with uncommitted operational records.
     run = call("I-014 executed check", "run", "verify", "CHG-001", "--component", "engine", "--base", base)["run"]
     run_id = run["id"]
     check("I-014 pass has executed logs and exact inputs", run["status"] == "pass" and run["results"][0]["executed_by_roclec"] and bool(run["candidate"]["inputs_digest"]))
+    expect_status("verified")
     call("I-018 final gate rejects uncommitted metadata", "check", "--change", "CHG-001", "--component", "engine", "--gate", "integrate", expect=1, issue="CANDIDATE_DIRTY")
     (root / "src/new.py").write_text("# new relevant source\n")
     call("I-012 DEF-002 new source invalidates run", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="EVIDENCE_STALE")
@@ -151,6 +158,7 @@ def scenarios(workspace, invoke, check):
     put_json(bad_plan, tampered)
     call("I-027 recomputed malicious plan rejected", "operation", "apply", bad_plan, expect=3, issue="OPERATION_CONFLICT")
     call("I-011 apply first real integration", "operation", "apply", plan_path)
+    expect_status("integrated")
     state = call("I-011 inspect partial progress", "inspect", "--change", "CHG-001")
     check("I-011 actual partial vector", state["status"] == "partially-integrated" and state["components"]["engine"] == "integrated" and state["components"]["viewer"] != "integrated")
     current = json.loads((root / ".roclec/current.json").read_text())

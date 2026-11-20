@@ -3,7 +3,7 @@
 
 All JSON rejects duplicate/unknown keys, non-finite values and escaping/symlink content paths. Lists of IDs/components/references are sorted and unique. IDs CAP/REQ/AC/CHG/FUT/RUN/EVD use at least three digits and are permanent. No administrative done flag is authoritative.
 
-Hash exact Markdown bytes with SHA-256. A contract revision hashes its descriptor using JSON sorted keys, separators `,` and `:`, UTF-8, ensure_ascii=false, no final newline. It does not include itself. A proposal digest uses the same canonical algorithm over {id, kind, semantic}. A Python recipe is `hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()`.
+`change seal DIR` computes file hashes, snapshot revisions and the proposal digest. `change seal DIR --check` reports pending changes. Author new proposed snapshots under `proposed/CAP-NNN/draft/` and omit their `revision`; list extra semantic files as keys in `semantic.files`. Seal only an external bundle, then import it with `change new`.
 
 ## Change bundle
 

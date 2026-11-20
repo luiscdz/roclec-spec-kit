@@ -280,7 +280,7 @@ class Fixture:
         elif kind == "manual_observation":
             self.define(target=manual_contract())
             self.assign()
-            self.call("change", "start", "CHG-001", "--component", "engine")
+            self.call("change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
             run = self.run(expected=1)
             assert run["status"] == "pass"
             self.facts["missing_manual_ac"] = "AC-002"

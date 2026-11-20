@@ -8,9 +8,11 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+import traceback
 
 from . import __version__
 from .config import ConfigError, load_profile
+from .external_skills import SkillLockError
 from .kernel import Kernel
 from .model import ModelError, need, read_json
 from .store import Store
@@ -25,8 +27,12 @@ def build_parser():
     parser = Parser(prog="roclec", description="Native contract/change/release workflow, profile 2 (C3)")
     parser.add_argument("--project", default=".")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--debug", action="store_true", help="Print unexpected error tracebacks to stderr")
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("status", help="Summarize component activity and pending gates")
+    listing = sub.add_parser("list", help="List model records")
+    listing.add_argument("category", choices=("changes", "futs", "releases", "runs"))
     init = sub.add_parser("init", help="Initialize a profile-2 project; does not install old skills")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
@@ -41,10 +47,24 @@ def build_parser():
     fcheck = fsub.add_parser("check")
     fcheck.add_argument("--component", required=True)
     fcheck.add_argument("--change")
+    agree = fsub.add_parser("agree")
+    for name in ("ref", "actor", "reason"):
+        agree.add_argument(f"--{name}", required=True)
+    reference = sub.add_parser("reference")
+    rsub = reference.add_subparsers(dest="action", required=True)
+    for name in ("add", "update"):
+        editor = rsub.add_parser(name)
+        editor.add_argument("id")
+        editor.add_argument("--path", required=True)
+        editor.add_argument("--component", action="append", required=True)
+        editor.add_argument("--role", required=True)
     change = sub.add_parser("change")
     csub = change.add_subparsers(dest="action", required=True)
     new = csub.add_parser("new")
     new.add_argument("--file", required=True, type=Path)
+    seal = csub.add_parser("seal")
+    seal.add_argument("directory", type=Path)
+    seal.add_argument("--check", action="store_true")
     approve = csub.add_parser("approve")
     approve.add_argument("id")
     approve.add_argument("--digest", required=True)
@@ -56,6 +76,7 @@ def build_parser():
     start = csub.add_parser("start")
     start.add_argument("id")
     start.add_argument("--component", required=True)
+    start.add_argument("--actor", required=True)
     fut = sub.add_parser("fut")
     fsub = fut.add_subparsers(dest="action", required=True)
     capture = fsub.add_parser("capture")
@@ -149,6 +170,10 @@ def execute(args):
                 return {"operation": read_json(store.path(relative))}
         raise ModelError("INVALID_REFERENCE", "Unknown operation", entity=args.id)
     kernel = Kernel(load_profile(Path(args.project)))
+    if command == "status":
+        return kernel.status()
+    if command == "list":
+        return {args.category: kernel.list_records(args.category)}
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:
@@ -192,14 +217,21 @@ def execute(args):
                                   for p in sorted(kernel.store.path(f".roclec/releases/{args.component}/{actual_version}/preparations").glob("*.json"))]
         return result
     if command == "foundation":
+        if action == "agree":
+            return kernel.agree_foundation(args.ref, args.actor, args.reason)
         return kernel.foundation(args.component, args.change)
+    if command == "reference":
+        return kernel.write_reference(action, args.id, args.path, args.component, args.role)
     if command == "change":
+        if action == "seal":
+            from .authoring import seal
+            return seal(kernel, args.directory.resolve(), check=args.check)
         if action == "new":
             return kernel.new_change(args.file.resolve())
         if action == "approve":
             return kernel.approve(args.id, args.digest, args.actor, args.reason)
         if action == "start":
-            return kernel.start(args.id, args.component)
+            return kernel.start(args.id, args.component, args.actor)
         return kernel.cancel(args.id, args.actor, args.reason)
     if command == "fut":
         if action == "capture":
@@ -219,6 +251,26 @@ def execute(args):
             return kernel.gate(args.change, args.component, "approve")
         return kernel.check()
     raise ModelError("INVALID_INPUT", "Unknown command", exit_code=2)
+
+
+def human_output(value, depth=0):
+    indent = "  " * depth
+    if isinstance(value, dict) and value:
+        for key, item in value.items():
+            if isinstance(item, (dict, list)) and item:
+                print(f"{indent}{key}:")
+                human_output(item, depth + 1)
+            else:
+                print(f"{indent}{key}: {item if item is not None else '—'}")
+    elif isinstance(value, list) and value:
+        for item in value:
+            if isinstance(item, dict):
+                print(f"{indent}-")
+                human_output(item, depth + 1)
+            else:
+                print(f"{indent}- {item}")
+    else:
+        print(f"{indent}{value}")
 
 
 def main(argv=None):
@@ -243,25 +295,33 @@ def main(argv=None):
             if args.command == "run":
                 issues = result.pop("issues")
                 exit_code = result.pop("exit_code")
-            if args.command == "foundation" and result["issues"]:
+            if args.command == "foundation" and args.action == "check" and result["issues"]:
                 issues = result.pop("issues")
                 exit_code = 1
             if args.command == "inspect" and args.change:
                 status = result["status"]
                 if status != "canceled":
-                    next_action = {"command": "change approve" if status == "draft" else "run verify --release" if status == "integrated" else "check --gate implement",
-                                   "reason": "Review the proposal" if status == "draft" else "Verify the final release contract" if status == "integrated" else "Check the next component prerequisites"}
+                    actions = {
+                        "draft": ("change approve", "Review the proposal and approve the current digest"),
+                        "approved": ("check --gate implement", "Check foundation, dependencies and release assignment"),
+                        "in-progress": ("run verify", "Run checks for the implementation candidate"),
+                        "verified": ("integrate prepare", "Prepare integration using the current run"),
+                        "partially-integrated": ("status", "Inspect the gates remaining for other components"),
+                        "integrated": ("run verify --release", "Verify the final release contract"),
+                    }
+                    next_command, reason = actions[status]
+                    next_action = {"command": next_command, "reason": reason}
     except ModelError as exc:
         issues, exit_code = [exc.issue], exc.exit_code
         if hasattr(exc, "operation_id"):
             result = {"operation_id": exc.operation_id, "partial": exc.partial}
     except ConfigError as exc:
         issues, exit_code = [ModelError("INVALID_REFERENCE", str(exc)).issue], 2
+    except SkillLockError as exc:
+        issues, exit_code = [ModelError("SKILL_LOCK_ERROR", str(exc)).issue], 1
     except (OSError, subprocess.TimeoutExpired) as exc:
         issues, exit_code = [ModelError("IO_ERROR", str(exc)).issue], 4
         result = {"partial": False}
-    except (TypeError, KeyError, ValueError) as exc:
-        issues, exit_code = [ModelError("INVALID_INPUT", f"Malformed model input: {exc}").issue], 2
     except KeyboardInterrupt:
         issues, exit_code = [ModelError("INTERRUPTED", "Operation interrupted; inspect runtime journals before continuing").issue], 130
         parsed = locals().get("args")
@@ -269,10 +329,24 @@ def main(argv=None):
             root = Path(parsed.path if parsed.command == "init" else parsed.project).resolve()
             pending = sorted((root / ".roclec/runtime").glob("*.json"))
             result = {"partial": bool(pending), "operation_id": pending[0].stem if len(pending) == 1 else None}
+    except Exception:
+        if "--debug" in argv:
+            traceback.print_exc(file=sys.stderr)
+        issues = [ModelError("INTERNAL_ERROR", "Unexpected internal error",
+                             remediation="Repeat with --debug to inspect the traceback.").issue]
+        exit_code = 70
     envelope = {"model_schema": 1, "ok": exit_code == 0, "command": command,
                 "data": result, "issues": issues, "next_action": next_action}
     if json_mode:
         print(json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False))
     else:
-        print(json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
+        print(f"{command or 'roclec'}: {'OK' if exit_code == 0 else 'failed'}")
+        if result is not None:
+            human_output(result)
+        for issue in issues:
+            print(f"{issue['code']}: {issue['message']}")
+            if issue["remediation"]:
+                print(issue["remediation"])
+        if next_action:
+            print(f"Next: {next_action['command']} — {next_action['reason']}")
     return exit_code

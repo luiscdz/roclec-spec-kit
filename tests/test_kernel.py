@@ -59,6 +59,56 @@ class KernelTest(unittest.TestCase):
         # Same scenarios are subsequently run using only the installed wheel CLI.
         scenarios(self.workspace, invoke, self.check_case)
 
+    def test_foundation_authoring_binds_agreement_to_source_bytes(self):
+        source = self.root / "foundation.md"
+        source.write_text("# Foundation\n", encoding="utf-8")
+        for role in ("context", "principles", "architecture", "stack", "engineering", "verification"):
+            self.call("reference", "add", role, "--path", "foundation.md", "--role", role, "--component", "engine")
+            self.call("foundation", "agree", "--ref", role, "--actor", "Maintainer", "--reason", "Reviewed")
+        self.call("foundation", "check", "--component", "engine")
+        source.write_text("# Revised foundation\n", encoding="utf-8")
+        self.call("foundation", "check", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
+
+    def test_seal_generates_an_importable_bundle_without_mutating_project(self):
+        folder = self.workspace / "unsealed"
+        path = folder / "change.json"
+        record = bundle(folder)
+        record.pop("proposal_digest")
+        record["semantic"].pop("files")
+        entry = record["semantic"]["proposed"][0]
+        revision = entry.pop("revision")
+        parent = folder / "proposed/CAP-001"
+        draft = parent / "draft"
+        (parent / revision).rename(draft)
+        descriptor = json.loads((draft / "contract.json").read_bytes())
+        descriptor.pop("files")
+        put_json(draft / "contract.json", descriptor)
+        put_json(path, record)
+        before = tree(self.root)
+        preview = self.call("change", "seal", str(folder), "--check")["data"]
+        self.assertIn("change.json", preview["changed"])
+        self.assertNotIn("proposal_digest", json.loads(path.read_bytes()))
+        self.call("change", "seal", str(folder))
+        sealed = path.read_bytes()
+        self.assertEqual(self.call("change", "seal", str(folder))["data"]["changed"], [])
+        self.assertEqual(sealed, path.read_bytes())
+        self.assertEqual(before, tree(self.root))
+        self.call("change", "new", "--file", str(path))
+        self.assertEqual(self.call("status")["data"]["components"]["engine"]["changes"][0]["status"], "draft")
+        self.call("change", "approve", record["id"], "--digest", preview["proposal_digest"],
+                  "--actor", "Maintainer", "--reason", "Reviewed")
+        self.call("change", "seal", str(folder), expect=3, issue="OPERATION_CONFLICT")
+        self.assertEqual(sealed, path.read_bytes())
+
+    def test_internal_errors_have_a_distinct_code_and_opt_in_trace(self):
+        with mock.patch("roclec_spec_kit.native_cli.execute", side_effect=TypeError("test detail")):
+            args = ["--project", str(self.root), "--json"]
+            for flags in ([], ["--debug"]):
+                result = invoke([*args, *flags, "check"])
+                self.assertEqual(result.returncode, 70)
+                self.assertEqual(json.loads(result.stdout)["issues"][0]["code"], "INTERNAL_ERROR")
+                self.assertEqual("TypeError: test detail" in result.stderr, bool(flags))
+
     def test_documented_bootstrap_bundle_is_importable(self):
         example = Path(__file__).resolve().parents[1] / "docs/examples/c1"
         root = self.workspace / "documented-consumer"
@@ -256,7 +306,7 @@ class KernelTest(unittest.TestCase):
         self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic")
         self.call("release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
         foundation(self.root)
-        self.call("change", "start", "CHG-001", "--component", "engine")
+        self.call("change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
         self.call("release", "plan", "engine", "v0.1.0", "--clear", expect=1, issue="CHANGE_IN_PROGRESS")
         stored = self.root / ".roclec/changes/CHG-001"
         proposal = stored / "proposal.md"
@@ -266,7 +316,7 @@ class KernelTest(unittest.TestCase):
         put_json(stored / "change.json", record)
         self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Updated intention")
         self.call("release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
-        self.call("change", "start", "CHG-001", "--component", "engine")
+        self.call("change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
         reference = self.root / "docs/reference.md"
         reference.write_text(reference.read_text() + "Changed architecture\n")
         self.call("foundation", "check", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")

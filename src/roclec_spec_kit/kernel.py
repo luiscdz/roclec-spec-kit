@@ -93,7 +93,9 @@ class Kernel:
         return record
 
     def references(self):
-        record = self.read(".roclec/references.json")
+        return self._validate_references(self.read(".roclec/references.json"))
+
+    def _validate_references(self, record):
         fields(record, ("model_schema", "references"))
         need(isinstance(record["references"], list), "INVALID_INPUT", "references must be a list", exit_code=2)
         refs = {}
@@ -111,6 +113,41 @@ class Kernel:
                  "INVALID_INPUT", "Invalid foundation decision ID", exit_code=2)
             refs[ref["id"]] = ref
         return refs
+
+    def write_reference(self, action, ref_id, path, components, role):
+        refs = self.references()
+        need((ref_id in refs) == (action == "update"), "INVALID_REFERENCE",
+             f"Cannot {action} reference with this ID", entity=ref_id)
+        ref = {"id": ref_id, "path": path, "components": sorted(components),
+               "role": role, "decision_id": None}
+        refs[ref_id] = ref
+        record = {"model_schema": 1, "references": [refs[key] for key in sorted(refs)]}
+        self._validate_references(record)
+        source = self.store.path(path)
+        need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
+             "Reference requires an existing nonempty source", path=path)
+        receipt = self.store.apply("reference-" + action, {"id": ref_id},
+                                   {".roclec/references.json": encoded(record)}, self.token)
+        return {"reference": ref, "receipt": receipt}
+
+    def agree_foundation(self, ref_id, actor, reason):
+        need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
+        refs = self.references()
+        need(ref_id in refs, "INVALID_REFERENCE", "Unknown foundation reference", entity=ref_id)
+        ref = refs[ref_id]
+        source = self.store.path(ref["path"])
+        need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
+        content = source.read_bytes()
+        need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
+        decision = {"model_schema": 1, "kind": "foundation", "status": "agreed",
+                    "actor": actor, "reason": reason, "sources": {ref_id: sha(content)}}
+        decision_id = digest(decision)
+        decision["id"] = decision_id
+        ref["decision_id"] = decision_id
+        writes = {".roclec/references.json": encoded({"model_schema": 1, "references": [refs[k] for k in sorted(refs)]}),
+                  f".roclec/decisions/{decision_id}.json": encoded(decision)}
+        receipt = self.store.apply("foundation-agree", {"id": ref_id}, writes, self.token)
+        return {"reference": ref, "decision": decision, "receipt": receipt}
 
     def foundation(self, component, change=None):
         self.profile.repo(component)
@@ -454,10 +491,10 @@ class Kernel:
             return {**Verification(self).verify(change_id, component, final=stage == "integrate"), "gate": stage}
         return {"change": change_id, "component": component, "gate": stage, "release": assignments[0][0]["record"]["version"]}
 
-    def start(self, change_id, component):
+    def start(self, change_id, component, actor):
         result = self.gate(change_id, component, "implement")
         record, _, _ = self.change(change_id)
-        decision, path = self._decision("change-start", change_id, "cli", "Implementation prerequisites satisfied",
+        decision, path = self._decision("change-start", change_id, actor, "Implementation prerequisites satisfied",
                                         proposal_digest=record["proposal_digest"], component=component)
         receipt = self.store.apply("change-start", {"id": change_id, "component": component,
                                    "proposal_digest": record["proposal_digest"]}, {path: encoded(decision)}, self.token)
@@ -524,6 +561,51 @@ class Kernel:
         return {"change": record, "status": status, "components": progress, "approval": approval,
                 "approval_current": valid, "decisions": decisions, "issues": issues,
                 "integrations": {c: r for c, r in integrated.items() if r}}
+
+    def list_records(self, category):
+        if category == "releases":
+            return [{"component": item["record"]["component"], "version": item["record"]["version"],
+                     "status": item["status"]} for item in self.releases()]
+        if category == "changes":
+            items = (self.inspect_change(path.parent.name)
+                     for path in sorted(self.store.path(".roclec/changes").glob("*/change.json")))
+            return [{"id": item["change"]["id"], "status": item["status"], "components": item["components"],
+                     "approval_current": item["approval_current"]}
+                    for item in items]
+        if category == "futs":
+            return [{"id": path.stem, "status": self.inspect_fut(path.stem)["status"]}
+                    for path in sorted(self.store.path(".roclec/futs").glob("*.json"))]
+        from .verification import Verification
+        verifier = Verification(self)
+        result = []
+        for path in sorted(self.store.path(".roclec/runs").glob("RUN-*/start.json")):
+            run_id = path.parent.name
+            relative = path.relative_to(self.profile.root).as_posix()
+            completed = self.store.path(f".roclec/runs/{run_id}/manifest.json").is_file()
+            run = verifier.read_run(run_id) if completed else self.read(relative)
+            result.append({"id": run_id, "component": run["component"], "change_id": run["change_id"],
+                           "release": run.get("release"), "status": run["status"] if completed else "unfinished"})
+        return result
+
+    def status(self):
+        components = {name: {"changes": [], "pending_gates": [], "unfinished_runs": [], "planning_releases": []}
+                      for name in sorted(self.profile.components)}
+        gates = {"not-started": "implement", "in-progress": "verify", "verified": "integrate"}
+        for change in self.list_records("changes"):
+            for component, progress in change["components"].items():
+                summary = components[component]
+                status = progress if progress != "not-started" else "approved" if change["approval_current"] else "draft"
+                summary["changes"].append({"id": change["id"], "status": status})
+                gate = "approve" if status == "draft" else gates.get(progress)
+                if gate:
+                    summary["pending_gates"].append({"id": change["id"], "gate": gate})
+        for run in self.list_records("runs"):
+            if run["status"] == "unfinished":
+                components[run["component"]]["unfinished_runs"].append(run["id"])
+        for release in self.list_records("releases"):
+            if release["status"] == "planning":
+                components[release["component"]]["planning_releases"].append(release["version"])
+        return {"project": self.profile.data["name"], "components": components}
 
     def _fut_record(self, record):
         fields(record, ("model_schema", "id", "source", "finding", "impact", "questions"))
