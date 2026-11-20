@@ -1,133 +1,51 @@
 # roclec-spec-kit
 
-Framework configurable para gestionar specs, tareas y releases de proyectos de software. El paquete proporciona la CLI y dos skills de agentes; cada proyecto conserva su configuración, producto, decisiones, specs y versiones en Git.
+Framework local para contratos por capacidad, cambios trazables y releases por componente. El consumidor mantiene sus archivos en Git; Roclec comprueba relaciones, revisiones y decisiones sin imponer su stack ni depender de spec-kit.
 
-**Estado:** versión inicial `0.2.0` para uso interno. Requiere Python 3.11 o posterior. El núcleo Python no tiene dependencias de ejecución externas; spec-kit requiere `specify` y la restauración de skills externas requiere Node.js con `npx`.
+**Estado:** desarrollo local **0.8.0 — C1 + C2 + C3**, sin publicación del paquete. Requiere Python >=3.11 y no tiene dependencias de runtime. La CLI pública usa **perfil 2**. Los proyectos 0.7/perfil 1 se rechazan sin migración automática. La [documentación 0.7](docs/workflow-0.7.md), su código y assets históricos se conservan como oráculo explícito de regresión, no como otra modalidad pública del motor nuevo.
 
-## Instalar dentro de un proyecto
+## Qué funciona
 
-En un entorno virtual del proyecto consumidor:
+- Perfil, referencias de fundación e índice de contratos por componente/capacidad.
+- Validación de snapshots y contenido Markdown con SHA-256; consulta vigente e histórica.
+- Borradores con bases/deltas explícitos, aprobación de intención, asignación e inicio por componente y cancelación.
+- Identidades permanentes: mismo REQ con revisión inmutable; AC nuevos ante cambio de conducta. Los IDs reservados no se reciclan.
+- FUT con origen, decisiones, promoción y duplicados sin convertir descubrimiento en aprobación.
+- Planificación de releases normales/hotfix/bugfix con pertenencia única y reglas numéricas.
+- Vistas de contratos, protección de archivos propios, recibos, detección de conflictos y recuperación de escrituras locales interrumpidas.
+- Salida JSON y errores estructurados para automatización.
+- Candidatos por entradas, clasificación de rutas, ejecuciones reales sin shell, logs inmutables y cobertura explícita por AC.
+- Observaciones manuales/externas y revisión independiente opcional con gate por componente; un run pass no sustituye el informe requerido.
+- Integración por componente con candidato final limpio, planes reconstruidos, recibos idempotentes y recuperación ante interrupciones.
+
+- RUN de release para el contrato final del conjunto, preparación inmutable y comprobación de inclusión de fixes/backports.
+- Registro de publicación Git con commit/tag local y remoto comprobados, incluido tag anotado; sin crear tags, push ni despliegue.
+- Instalación/refresh de skills nativas y aliases opcionales para Codex/Claude, preservando plantillas y principios del consumidor.
+
+## Empezar en un proyecto nuevo
 
 ```bash
 python3 -m venv .venv
-.venv/bin/python -m pip install -e /ruta/a/roclec-spec-kit
-.venv/bin/roclec init . --name "Mi proyecto" --component app=.
-.venv/bin/roclec check
+.venv/bin/python -m pip install /ruta/al/wheel/roclec_spec_kit-0.8.0-py3-none-any.whl
+.venv/bin/roclec --json init . --profile /ruta/a/roclec-spec-kit/docs/examples/c1/profile.toml
+.venv/bin/roclec --json check
+.venv/bin/roclec --json change new --file /ruta/a/roclec-spec-kit/docs/examples/c1/change/change.json
+.venv/bin/roclec --json inspect --change CHG-001
 ```
 
-La instalación editable sirve para desarrollar el kit. Para un equipo, fija una versión del paquete desde un tag Git privado en las dependencias del proyecto y usa esa misma versión en CI. El proyecto consumidor guarda `.roclec/project.toml`, `specs/`, `roadmap/`, `FUTURE.md` y las skills instaladas bajo `.agents/skills/` y `.claude/skills/`. `init` conserva los archivos existentes y se niega a sobrescribir un perfil ya creado.
+El ejemplo es genérico y debe adaptarse al alcance real. `repo` del perfil se interpreta respecto del consumidor, no respecto del archivo de ejemplo. `init` no instala las antiguas skills ni escribe reglas del producto. Conserva archivos existentes y añade `.roclec/runtime/` a `.gitignore` para diarios/locks locales.
 
-Si usas [spec-kit](https://github.com/github/spec-kit), inicialízalo en el proyecto y luego instala el preset y la extensión que vienen dentro del paquete. En un proyecto nuevo, ejecuta `specify init` antes de `roclec init`; en uno existente, revisa la combinación de archivos que propone spec-kit:
+La [guía C1](docs/c1.md) explica definición/consulta; la [guía C2](docs/c2.md), verificación e integración; [C3](docs/c3.md), cierre e instalación. Las [interfaces](docs/definition/interfaces-primer-corte.md), [D1–D3](docs/decisions/004-first-cut-interface-decisions.md), [verificación conjunta](docs/decisions/005-final-release-verification.md) y [aceptación](docs/definition/aceptacion-interfaces.md) gobiernan el primer corte completo. El [plan global](docs/strategy/plan-global.md) conserva los hitos posteriores y la separación respecto del piloto.
+
+## Validación del paquete
 
 ```bash
-specify init --here --integration codex
-roclec speckit
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+uv build
+python3 scripts/harness.py --wheel dist/roclec_spec_kit-0.8.0-py3-none-any.whl --report /tmp/roclec-c3.json
+python3 scripts/harness.py --wheel dist/roclec_spec_kit-0.8.0-py3-none-any.whl --report /tmp/roclec-c3-compat.json --spec-kit
 ```
 
-El preset aporta plantillas genéricas de spec, plan y tareas. La extensión añade sincronización, UX, prototipo, ready gate y releases. Tras actualizar `roclec-spec-kit`, vuelve a ejecutar `roclec speckit` para actualizar esos comandos instalados.
+El harness instala el wheel en un entorno aislado, elimina `PYTHONPATH/PYTHONHOME` de sus subprocesses y recorre operaciones/rechazos reales, con [evidencia C3](docs/implementation/c3.md). `--spec-kit` comprueba el adaptador nativo en Codex/Claude y conserva por separado la regresión anterior. Ejecuta publicaciones Git contra remotos desechables; no publica el paquete ni un producto, ejecuta agentes, despliega o restaura skills externas. Los datos y observaciones de consumidor son sintéticos.
 
-Para varios componentes o repositorios:
-
-```bash
-roclec init . --name "Mi producto" \
-  --component api=../mi-api \
-  --component web=../mi-web --user-facing web
-```
-
-Las rutas `repo` son relativas a la raíz que contiene `.roclec/project.toml`. El repositorio de specs puede ser el mismo repositorio de código o uno hermano. Desde otro directorio, pasa `--project` antes del subcomando:
-
-```bash
-roclec --project ../mi-producto-specs check --release-gate 001
-```
-
-El perfil creado es TOML estándar:
-
-```toml
-schema = 1
-name = "Mi producto"
-
-[components.api]
-repo = "../mi-api"
-user_facing = false
-
-[components.web]
-repo = "../mi-web"
-user_facing = true
-```
-
-`user_facing = true` exige `ux.md` y un prototipo HTML antes de que una spec esté `ready`. Cada componente se versiona de forma independiente. Las reglas de dominio, seguridad y contratos se escriben en la constitución del proyecto; no están codificadas en el kit.
-
-## Flujo
-
-```text
-idea → draft spec → aclaración/UX → ready gate → plan y tareas
-     → asignación de release por componente → release gate
-     → implementación y pruebas → done → publicación → cierre del release
-```
-
-Comandos principales, ejecutados desde la raíz del proyecto:
-
-```bash
-roclec new 001-mi-funcion --title "Mi función" --component api
-roclec check --gate 001
-roclec release plan api v0.1 001 --title "Primer release"
-roclec check --release-gate 001
-roclec check --write
-roclec check --coverage
-roclec release close api v0.1
-roclec skills
-```
-
-`new` crea un borrador; se editan sus criterios y artefactos antes de cambiarlo a `ready`. `release plan` selecciona explícitamente las specs para una versión. La pertenencia al release solo vive en `roadmap/releases/<component>/vX.Y.md`; el roadmap y cada `INDEX.md` se regeneran con `check --write`. `in-progress` y `done` requieren plan, tareas y una asignación por cada componente. `done` requiere tareas cerradas. `release close` requiere todas las specs en `done` y notas de release escritas; el archivo publicado queda inmutable y debe protegerse en CI.
-
-Las ideas aún no comprometidas viven en `FUTURE.md` con encabezados `## FUT-NNN`. Al promover o descartar una idea, retírala de allí y registra su ID en `roadmap/fut-archive.md`; no reutilices IDs. La spec promovida conserva `origin: FUT-NNN`.
-
-Para verificar la inmutabilidad frente a la rama base:
-
-```bash
-roclec check --immutable-base origin/main
-```
-
-La cobertura busca referencias `[NNN/AC-NN]` en archivos de pruebas de los repositorios configurados. Usa `roclec check --coverage` cuando estén presentes. No sustituye la ejecución de las pruebas propias de cada componente.
-
-## Agentes y CI
-
-`roclec init` instala `roclec-coordinator` y `roclec-implement` en `.agents/skills/` y `.claude/skills/`. Tras actualizar el paquete, `roclec skills` sincroniza únicamente esos archivos administrados. Las skills leen el perfil y las instrucciones propias del proyecto.
-
-Si declaras algún componente `--user-facing`, `init` crea o completa `skills-lock.json` con cuatro skills de diseño fijadas: `ui-ux-pro-max`, `frontend-design`, `impeccable` y `web-design-guidelines`. Los archivos se descargan únicamente al ejecutar:
-
-```bash
-roclec skills --restore
-```
-
-La restauración usa `npx -y skills experimental_install`, respeta las versiones/hashes del lock y comprueba que cada skill aparezca instalada. Roclec expone después las skills en `.agents/skills/` y `.claude/skills/`, mediante un enlace relativo cuando el instalador solo crea una de esas rutas. Si ya hay un lock, Roclec conserva las versiones elegidas y añade solo las skills de diseño que falten.
-
-En un repositorio de código separado, puedes instalar las mismas skills allí sin duplicar las specs:
-
-```bash
-roclec --project ../mi-producto-specs skills --into ../mi-api
-```
-
-Esto crea `.roclec/link.toml` en el repo de código, apuntando al perfil del repositorio de specs. Desde allí, `roclec check` encuentra el proyecto sin pasar `--project`. El link y las skills pueden guardarse en Git; no duplican las specs. La carpeta de specs necesita estar accesible para los cambios de tareas y estados que produzca la implementación.
-
-Cada repo de código declara sus propias dependencias de agente en su `skills-lock.json` (por ejemplo, React Native o TanStack Query). Para instalar **todas** las skills fijadas allí junto con las skills de Roclec:
-
-```bash
-roclec --project ../mi-producto-specs skills --into ../mi-api --restore
-```
-
-El paquete no adivina skills según el framework del código: el lock de cada repo es la lista completa y versionada. Skills opcionales vendorizadas por un proyecto también pueden permanecer en ese proyecto; no se descargan como dependencias del núcleo.
-El ejecutable `roclec` debe estar disponible en el entorno desde el que trabaje cada agente; las skills y el link de proyecto no instalan la CLI.
-
-Ejemplo mínimo de CI desde la raíz del proyecto, después de instalar su versión fijada del paquete:
-
-```bash
-roclec check
-roclec check --immutable-base "$BASE_REF"
-```
-
-Usa `roclec check --write` localmente y confirma los archivos generados antes de la PR. `check` sin `--write` falla si están desactualizados.
-
-## Alcance de esta primera versión
-
-El kit aporta validación, proyecciones, skills y un preset/extensión de spec-kit. Los comandos de agentes guían las etapas de redacción, UX e implementación; la CLI no genera por sí sola esos entregables. Cada proyecto consumidor mantiene sus propias reglas de dominio y puede migrar sus datos por separado.
+El paquete, preset y extensión obtienen su versión de 0.8.0; no se crean tags ni se publica el wheel al construirlo. Las releases normales aumentan X o Y, reiniciando subordinados y con Z=0. Hotfix/bugfix aumentan exclusivamente Z y contienen fixes. Los métodos adaptados de GitHub spec-kit conservan MIT y procedencia en [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) y los assets distribuidos.

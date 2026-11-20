@@ -1,0 +1,7 @@
+## Roclec lifecycle
+
+This project uses Roclec for ideas, specs, UX, prototypes, plans, tasks, component releases and implementation tracking. Read `.roclec/workflow.md` and `.roclec/project.toml` before changing lifecycle files. Use the project-local `./.roclec/run` launcher for checks and release operations. From a linked code repository, its own `./.roclec/run` resolves the same project.
+
+Use one Roclec stage per user message. Use `roclec-coordinator` to resume or inspect state; invoke its recommended stage in a later message. Codex uses `$roclec-<stage>` and Claude Code uses `/roclec-<stage>`. Respect existing project instructions and any constitution. Do not edit generated `roadmap/ROADMAP.md` or release `INDEX.md`; run `./.roclec/run check --write` after editing specs or releases. A spec needs a planned release for every configured component before implementation. Released version files are immutable.
+
+Select a feature with `./.roclec/run use NNN`; inspect it with `./.roclec/run inspect NNN --json` to find the authoritative project and artifact paths. Use `transition NNN <status>` instead of unchecked status edits. Respect the project-owned constitution and shared templates under `.roclec/`. User-facing prototypes need actual user approval recorded in `prototype/review.md`; agents must not fabricate it. Test citations are traceability, not evidence that tests passed. `roclec-constitution` manages principles and `roclec-checklist` reviews requirement quality.

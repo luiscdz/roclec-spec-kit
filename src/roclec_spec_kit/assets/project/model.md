@@ -1,0 +1,42 @@
+<!-- managed by roclec-spec-kit -->
+# Native record authoring — model_schema 1, profile 2
+
+All JSON rejects duplicate/unknown keys, non-finite values and escaping/symlink content paths. Lists of IDs/components/references are sorted and unique. IDs CAP/REQ/AC/CHG/FUT/RUN/EVD use at least three digits and are permanent. No administrative done flag is authoritative.
+
+Hash exact Markdown bytes with SHA-256. A contract revision hashes its descriptor using JSON sorted keys, separators `,` and `:`, UTF-8, ensure_ascii=false, no final newline. It does not include itself. A proposal digest uses the same canonical algorithm over {id, kind, semantic}. A Python recipe is `hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'), ensure_ascii=False, allow_nan=False).encode('utf-8')).hexdigest()`.
+
+## Change bundle
+
+`change new --file /input/change.json` imports validated content inside that input directory. change.json contains model_schema, id, kind (`evolution|fix|refactor`), semantic and proposal_digest. Semantic contains:
+
+- intention: Markdown path, normally proposal.md; files: {path: exact sha256} of intention/supporting semantic files.
+- components: explicit configured names.
+- bases: [{capability_id, component, revision}]. Revision null means expected absence; otherwise an exact immutable contract SHA. Each affected pair is explicit.
+- deltas: add/retire {op, capability_id, requirement_id}; revise adds retire_acceptance_ids and add_acceptance_ids (optional editorial=true only when behavior truly stays identical); replace uses old_requirement/new_requirement.
+- proposed: [{capability_id, components, revision}]; import a complete snapshot under proposed/CAP-NNN/SHA/.
+- dependencies: [{component, capability_id, revision}] or [{component, release}]. Empty lists are explicit.
+- references: [{id, sha256}] pinned to agreed reference bytes.
+
+Evolution has explicit normative deltas. Same obligation retains REQ and gains a new immutable revision; changed behavior needs new ACs. Another obligation uses replace/retire. Fix/refactor has empty deltas/proposed and preserves exact bases. A historical fix adds baseline_release {component, version}. A fix may add fixes [{component, commit, requirement_ids, acceptance_ids, backport}]; commit is an immutable full Git SHA (40 or 64 lowercase hex digits) and must resolve locally at the final gate, and the requirement/AC IDs belong to that exact baseline. Backport is null or {commit}, with optional evidence_id when an exact report is already selected. Preparation checks the included commit and current release-scoped preservation observation, then freezes the resolved evidence ID; no future EVD ID must be guessed during approval. A PR URL or SHA-shaped string alone is insufficient. Capture implementation references before approving the fix; the kernel never guesses them from Git messages.
+
+Approving freezes the imported snapshot and intention under revisions/<proposal_digest>. Editing semantic content creates another digest and requires another explicit approval. For pending participants, preserve completed component obligations; change already integrated behavior with another CHG. Supporting work notes need not become another normative source.
+
+## Contract snapshot
+
+contract.json contains model_schema, capability_id, requirements, acceptance, references and files. Requirements are [{id, statement, components, acceptance_ids}]; statement is a Markdown path. Acceptance entries are [{id, scenario, components}]; scenario is a Markdown path. Files is {each referenced Markdown path: sha256}; texts live only in those files. References are [{id, sha256}]. AC applicability must be a subset of its owner's component applicability. The contract revision resolves its original content forever.
+
+## Foundation and decisions
+
+references.json contains model_schema and references [{id, path, components, role, decision_id}]. Roles are context, principles, architecture, stack, engineering, verification, operations, design. Existing consumer files stay authoritative. A foundation decision file contains model_schema, id, kind="foundation", status="agreed", actor, reason and sources {reference_id: exact file SHA}. Record agreed only after the real decision. An empty template or a hash of different bytes is insufficient. Sources, not the index, own their content; decisions own agreement/provenance.
+
+## Execution/evidence
+
+The profile declares inputs/generated and optional excluded patterns per component. Checks declare id, argv list, cwd, timeout_seconds and optional acceptance_ids. Files outside categories block sufficient candidates, including ignored sources. `run verify` reserves RUN and executes checks; pass is a command result, not implicit AC coverage or review.
+
+Imported evidence contains model_schema, kind (manual|automated-import|independent-review), change_id, component, run_id, candidate_digest, actor, context, outcome, acceptance_ids, checks, limitations and findings [{id, description}]. For a release use change_id=null and add release {component, version}; its RUN covers the final combined contracts. Outcome is pass|fail|incomplete for observations or ready|changes-needed|incomplete for independent review. Review adds policy_id. Current scope/digest must match the actual run. Imported evidence always has executed_by_roclec=false. Files emitted by the CLI are immutable; subsequent observations create new EVDs.
+
+## Releases and plans
+
+release.json is the sole membership authority: component/version/kind/base_tag and changes [{change_id, intent_revision}], with model_schema. Plan membership through the CLI. Final release verification covers all current integrated contracts (or the declared historical correction baseline), not superseded criteria from earlier member proposals. Ready requires actual tests/observations and current adopted review.
+
+Prepare/apply creates immutable preparations/<SHA>.json. Record/apply checks an existing local and remote tag against the prepared commit and creates publication.json; publication freezes membership/contracts/candidate/evidence. The remote query is read-only. Metadata-only descendant commits may carry operational records without changing tested inputs; they do not change the prepared shipped commit. No command creates tags, pushes or deploys.

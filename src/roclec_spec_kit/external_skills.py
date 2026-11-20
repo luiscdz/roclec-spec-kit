@@ -54,7 +54,7 @@ def ensure_design_lock(root: Path) -> list[str]:
     return added
 
 
-def restore_external_skills(root: Path) -> list[str]:
+def restore_external_skills(root: Path, *, quiet=False) -> list[str]:
     """Install exactly the dependencies declared in this repository's lock."""
     data = read_lock(root)
     names = list(data["skills"])
@@ -62,7 +62,12 @@ def restore_external_skills(root: Path) -> list[str]:
         return []
     if shutil.which("npx") is None:
         raise SkillLockError("npx is required to restore skills-lock.json (install Node.js first)")
-    result = subprocess.run(["npx", "-y", "skills", "experimental_install"], cwd=root, check=False)
+    output = {"capture_output": True, "text": True} if quiet else {}
+    result = subprocess.run(["npx", "-y", "skills", "experimental_install"], cwd=root, check=False, **output)
+    if quiet:
+        import sys
+        sys.stderr.write(result.stdout or "")
+        sys.stderr.write(result.stderr or "")
     if result.returncode:
         raise SkillLockError(f"skills installer failed in {root} (exit {result.returncode})")
     missing = [name for name in names if not any((root / host / "skills" / name / "SKILL.md").is_file() for host in (".agents", ".claude"))]

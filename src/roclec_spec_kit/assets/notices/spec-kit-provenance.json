@@ -1,0 +1,22 @@
+{
+  "project": "github/spec-kit",
+  "source": "https://github.com/github/spec-kit",
+  "distribution": "specify-cli",
+  "version": "0.13.4",
+  "license": "MIT",
+  "mode": "Selected methods adapted; no runtime dependency or full upstream prompt copies.",
+  "sources": {
+    "commands/specify.md": "03ab95b02f171e63eb0f24e6e911d02257acd2a03e7c00937458e44e1bf1f3dc",
+    "commands/clarify.md": "ecbfca3c314bb0afd52cb13f88b36720718c2a79700dac497909fd749971b912",
+    "commands/plan.md": "4b093a68007c70bc91ca1e321224bfb38b5e19d2b8706395fcc4b5373284e240",
+    "commands/tasks.md": "1fd56d4eacb510f0bd57acb85cdfec96a23755458fcca42fcfa1e837ed45d0bc",
+    "commands/analyze.md": "79f5334bce9b249d4c1a5e6949dee3f3532db89a0a97f3d2eb55c1a1c2fe06f6",
+    "commands/constitution.md": "e0d1d7c237d4657914dcccb6ea0c3a3a10d8d1d9a36b198282e22b3d0b9a55e5",
+    "commands/checklist.md": "0a862264b9b358138d6049590d42b392ee4dadb69d32811d460620f077924d4e",
+    "templates/spec-template.md": "3945437fc35cd30a5b2bf7beea680337c3516826d3efa5a6b92c4a7eca1ba28e",
+    "templates/plan-template.md": "dfba43da2b2a207ff8c177a0fba03af074fd45e261696b4b64172041fad2e992",
+    "templates/tasks-template.md": "1e448e9153462e8c5b5a55231a54c756d870a82950d4dd9425a2bf5b7008a0d9",
+    "templates/checklist-template.md": "78aaf1d4b43c0e1d2340421fb090214daa0e97e779ab213b322b5b6e23c73038",
+    "templates/constitution-template.md": "ce7549540fa45543cca797a150201d868e64495fdff39dc38246fb17bd4024b3"
+  }
+}

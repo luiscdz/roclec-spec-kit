@@ -1,0 +1,7 @@
+include THIRD_PARTY_NOTICES.md AGENTS.md
+recursive-include scripts *.py *.json
+recursive-include docs *.md *.json *.toml
+include docs/evaluation/evidence.sha256
+prune docs/definition/evidence
+prune docs/evaluation/evidence
+prune docs/implementation/evidence

@@ -1,0 +1,278 @@
+"""The public schema-2 CLI. Legacy feature folders are never auto-dispatched."""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import io
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from . import __version__
+from .config import ConfigError, load_profile
+from .kernel import Kernel
+from .model import ModelError, need, read_json
+from .store import Store
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise ModelError("INVALID_INPUT", message, exit_code=2, remediation=self.format_usage().strip())
+
+
+def build_parser():
+    parser = Parser(prog="roclec", description="Native contract/change/release workflow, profile 2 (C3)")
+    parser.add_argument("--project", default=".")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--version", action="version", version=__version__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    init = sub.add_parser("init", help="Initialize a profile-2 project; does not install old skills")
+    init.add_argument("path")
+    init.add_argument("--profile", required=True, type=Path)
+    inspect = sub.add_parser("inspect", help="Read integrated, proposed or historical state")
+    selectors = inspect.add_mutually_exclusive_group(required=True)
+    for name in ("capability", "change", "fut", "release"):
+        selectors.add_argument(f"--{name}")
+    inspect.add_argument("--component")
+    inspect.add_argument("--at")
+    foundation = sub.add_parser("foundation")
+    fsub = foundation.add_subparsers(dest="action", required=True)
+    fcheck = fsub.add_parser("check")
+    fcheck.add_argument("--component", required=True)
+    fcheck.add_argument("--change")
+    change = sub.add_parser("change")
+    csub = change.add_subparsers(dest="action", required=True)
+    new = csub.add_parser("new")
+    new.add_argument("--file", required=True, type=Path)
+    approve = csub.add_parser("approve")
+    approve.add_argument("id")
+    approve.add_argument("--digest", required=True)
+    for command in (approve, csub.add_parser("cancel")):
+        if command is not approve:
+            command.add_argument("id")
+        command.add_argument("--actor", required=True)
+        command.add_argument("--reason", required=True)
+    start = csub.add_parser("start")
+    start.add_argument("id")
+    start.add_argument("--component", required=True)
+    fut = sub.add_parser("fut")
+    fsub = fut.add_subparsers(dest="action", required=True)
+    capture = fsub.add_parser("capture")
+    capture.add_argument("--file", required=True, type=Path)
+    decide = fsub.add_parser("decide")
+    decide.add_argument("id")
+    decide.add_argument("--outcome", choices=("evaluating", "promoted", "discarded", "duplicate"), required=True)
+    decide.add_argument("--actor", required=True)
+    decide.add_argument("--reason", required=True)
+    decide.add_argument("--target")
+    release = sub.add_parser("release")
+    rsub = release.add_subparsers(dest="action", required=True)
+    plan = rsub.add_parser("plan")
+    plan.add_argument("component")
+    plan.add_argument("version")
+    plan.add_argument("--kind", choices=("release", "hotfix", "bugfix"), default="release")
+    plan.add_argument("--base-tag")
+    members = plan.add_mutually_exclusive_group(required=True)
+    members.add_argument("--change", action="append", default=[])
+    members.add_argument("--clear", action="store_true", help="Explicitly clear a planning release's membership")
+    prepare_release = rsub.add_parser("prepare")
+    prepare_release.add_argument("component")
+    prepare_release.add_argument("version")
+    prepare_release.add_argument("--run", required=True)
+    prepare_release.add_argument("--out", required=True, type=Path)
+    record_release = rsub.add_parser("record")
+    record_release.add_argument("component")
+    record_release.add_argument("version")
+    for flag in ("preparation", "commit", "tag", "remote", "actor", "reason"):
+        record_release.add_argument("--" + flag, required=True)
+    record_release.add_argument("--out", required=True, type=Path)
+    check = sub.add_parser("check")
+    check.add_argument("--change")
+    check.add_argument("--component")
+    check.add_argument("--gate", choices=("approve", "implement", "verify", "integrate", "release"))
+    check.add_argument("--release")
+    views = sub.add_parser("views")
+    views.add_argument("--write", action="store_true")
+    operation = sub.add_parser("operation")
+    osub = operation.add_subparsers(dest="action", required=True)
+    for name in ("inspect", "recover"):
+        command = osub.add_parser(name)
+        command.add_argument("id")
+    apply = osub.add_parser("apply")
+    apply.add_argument("file")
+    run = sub.add_parser("run")
+    verify = run.add_subparsers(dest="action", required=True).add_parser("verify")
+    verify.add_argument("id", nargs="?")
+    verify.add_argument("--release")
+    verify.add_argument("--component", required=True)
+    verify.add_argument("--base", required=True)
+    evidence = sub.add_parser("evidence")
+    record = evidence.add_subparsers(dest="action", required=True).add_parser("record")
+    record.add_argument("--file", required=True, type=Path)
+    review = sub.add_parser("review")
+    policy = review.add_subparsers(dest="action", required=True).add_parser("policy")
+    policy.add_argument("--change", required=True)
+    policy.add_argument("--enabled", choices=("true", "false"), required=True)
+    policy.add_argument("--actor", required=True)
+    policy.add_argument("--reason", required=True)
+    integrate = sub.add_parser("integrate")
+    prepare = integrate.add_subparsers(dest="action", required=True).add_parser("prepare")
+    prepare.add_argument("id")
+    prepare.add_argument("--component", required=True)
+    prepare.add_argument("--run", required=True)
+    prepare.add_argument("--out", required=True, type=Path)
+    skills = sub.add_parser("skills")
+    skills.add_argument("--into")
+    skills.add_argument("--restore", action="store_true")
+    sub.add_parser("speckit")
+    for name in ("product",):
+        unavailable = sub.add_parser(name, help="Consumer-specific views; no schema-1 fallback")
+        unavailable.add_argument("arguments", nargs=argparse.REMAINDER)
+    return parser
+
+
+def execute(args):
+    command, action = args.command, getattr(args, "action", None)
+    if command == "init":
+        return Kernel.initialize(Path(args.path).resolve(), args.profile.resolve())
+    if command == "operation" and action in {"inspect", "recover"}:
+        # Recovery must remain possible when a partially written project cannot load.
+        root = Path(args.project).resolve()
+        store = Store(root)
+        if action == "recover":
+            return {"receipt": store.recover(args.id)}
+        from .model import fingerprint
+        fingerprint(args.id)
+        for relative in (f".roclec/runtime/{args.id}.json", f".roclec/receipts/{args.id}.json"):
+            if store.path(relative).is_file():
+                return {"operation": read_json(store.path(relative))}
+        raise ModelError("INVALID_REFERENCE", "Unknown operation", entity=args.id)
+    kernel = Kernel(load_profile(Path(args.project)))
+    if command == "product":
+        raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
+    if command in {"skills", "speckit"}:
+        from .installation import install
+        return install(kernel, into=getattr(args, "into", None), restore=getattr(args, "restore", False), adapter=command == "speckit")
+    if command == "release" and action != "plan":
+        from .releases import Releases
+        inputs = ({"run_id": args.run} if action == "prepare" else
+                  {k: getattr(args, k) for k in ("preparation", "commit", "tag", "remote", "actor", "reason")})
+        return Releases(kernel).export("release-" + action, args.component, args.version, args.out, **inputs)
+    if command in {"run", "evidence", "review"}:
+        from .verification import Verification
+        verification = Verification(kernel, release={"component": args.component, "version": args.release} if command == "run" and args.release else None)
+        if command == "run":
+            need((args.id is None) != (args.release is None), "INVALID_INPUT", "Select a change or --release, exclusively", exit_code=2)
+            return verification.run(args.id, args.component, args.base)
+        if command == "evidence":
+            return verification.record_evidence(args.file.resolve())
+        return verification.set_policy(args.change, args.enabled == "true", args.actor, args.reason)
+    if command == "integrate" or (command == "operation" and action == "apply"):
+        from .integration import Integration
+        integration = Integration(kernel)
+        if command == "integrate":
+            return integration.prepare(args.id, args.component, args.run, args.out)
+        return integration.apply(Path(args.file).resolve())
+    if command == "inspect":
+        need(args.at is None or args.capability is not None, "INVALID_INPUT", "--at applies only to a capability", exit_code=2)
+        if args.capability:
+            return kernel.inspect_capability(args.capability, args.component, args.at)
+        if args.change:
+            return kernel.inspect_change(args.change)
+        if args.fut:
+            return kernel.inspect_fut(args.fut)
+        need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
+        result = kernel.release(args.component, args.release)
+        from .verification import Verification
+        from .releases import Releases
+        actual_version = result["record"]["version"]
+        result["review_policy"] = Verification(kernel, release={"component": args.component, "version": actual_version}).policy(None)
+        result["preparations"] = [{"id": p.stem, "record": Releases(kernel).preparation(args.component, actual_version, p.stem)}
+                                  for p in sorted(kernel.store.path(f".roclec/releases/{args.component}/{actual_version}/preparations").glob("*.json"))]
+        return result
+    if command == "foundation":
+        return kernel.foundation(args.component, args.change)
+    if command == "change":
+        if action == "new":
+            return kernel.new_change(args.file.resolve())
+        if action == "approve":
+            return kernel.approve(args.id, args.digest, args.actor, args.reason)
+        if action == "start":
+            return kernel.start(args.id, args.component)
+        return kernel.cancel(args.id, args.actor, args.reason)
+    if command == "fut":
+        if action == "capture":
+            return kernel.capture(args.file.resolve())
+        return kernel.decide_fut(args.id, args.outcome, args.actor, args.reason, args.target)
+    if command == "release":
+        return kernel.release_plan(args.component, args.version, args.kind, args.change, args.base_tag)
+    if command == "views":
+        return kernel.views(args.write)
+    if command == "check":
+        need(args.gate is None or args.change is not None or args.gate == "release", "INVALID_INPUT", "--gate requires --change except release", exit_code=2)
+        need(args.gate != "release" or args.release is not None, "INVALID_INPUT", "Release gate needs --release", exit_code=2)
+        need(args.release is None or args.gate == "release", "INVALID_INPUT", "--release requires the release gate", exit_code=2)
+        if args.gate:
+            return kernel.gate(args.change, args.component, args.gate, args.release)
+        if args.change:
+            return kernel.gate(args.change, args.component, "approve")
+        return kernel.check()
+    raise ModelError("INVALID_INPUT", "Unknown command", exit_code=2)
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    json_mode = "--json" in argv
+    command = None
+    result, issues, next_action, exit_code = None, [], None, 0
+    try:
+        parser = build_parser()
+        captured = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(captured) if json_mode else contextlib.nullcontext():
+                args = parser.parse_args(argv)
+        except SystemExit as exc:
+            if not json_mode:
+                return int(exc.code)
+            result = {"help": captured.getvalue()}
+            args = None
+        if args is not None:
+            command = args.command + (" " + args.action if hasattr(args, "action") else "")
+            result = execute(args)
+            if args.command == "run":
+                issues = result.pop("issues")
+                exit_code = result.pop("exit_code")
+            if args.command == "foundation" and result["issues"]:
+                issues = result.pop("issues")
+                exit_code = 1
+            if args.command == "inspect" and args.change:
+                status = result["status"]
+                if status != "canceled":
+                    next_action = {"command": "change approve" if status == "draft" else "run verify --release" if status == "integrated" else "check --gate implement",
+                                   "reason": "Review the proposal" if status == "draft" else "Verify the final release contract" if status == "integrated" else "Check the next component prerequisites"}
+    except ModelError as exc:
+        issues, exit_code = [exc.issue], exc.exit_code
+        if hasattr(exc, "operation_id"):
+            result = {"operation_id": exc.operation_id, "partial": exc.partial}
+    except ConfigError as exc:
+        issues, exit_code = [ModelError("INVALID_REFERENCE", str(exc)).issue], 2
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        issues, exit_code = [ModelError("IO_ERROR", str(exc)).issue], 4
+        result = {"partial": False}
+    except (TypeError, KeyError, ValueError) as exc:
+        issues, exit_code = [ModelError("INVALID_INPUT", f"Malformed model input: {exc}").issue], 2
+    except KeyboardInterrupt:
+        issues, exit_code = [ModelError("INTERRUPTED", "Operation interrupted; inspect runtime journals before continuing").issue], 130
+        parsed = locals().get("args")
+        if parsed is not None:
+            root = Path(parsed.path if parsed.command == "init" else parsed.project).resolve()
+            pending = sorted((root / ".roclec/runtime").glob("*.json"))
+            result = {"partial": bool(pending), "operation_id": pending[0].stem if len(pending) == 1 else None}
+    envelope = {"model_schema": 1, "ok": exit_code == 0, "command": command,
+                "data": result, "issues": issues, "next_action": next_action}
+    if json_mode:
+        print(json.dumps(envelope, ensure_ascii=False, sort_keys=True, allow_nan=False))
+    else:
+        print(json.dumps(envelope, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False))
+    return exit_code
