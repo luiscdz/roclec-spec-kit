@@ -14,11 +14,11 @@ import subprocess
 
 try:
     from .c1_scenarios import digest, put_json, tree
-    from .c2_scenarios import PRODUCER, commit, git, setup
+    from .c2_scenarios import PRODUCER, commit, finding, git, setup
     from .c3_scenarios import combined_and_fix_scenarios
 except ImportError:
     from c1_scenarios import digest, put_json, tree
-    from c2_scenarios import PRODUCER, commit, git, setup
+    from c2_scenarios import PRODUCER, commit, finding, git, setup
     from c3_scenarios import combined_and_fix_scenarios
 
 CAP = "CAP-001"
@@ -31,7 +31,7 @@ def cli(invoke, root, *args, expect=0):
     return json.loads(result.stdout)
 
 
-def planning_fixture(workspace, invoke, *, docs=None):
+def planning_fixture(workspace, invoke, *, docs=None, finding_decision=False):
     """Two components share REQ-001; every member of engine v1.0.0 is integrated, the final gate is blocked.
 
     Engine's final run exists, a manual observation was superseded, and an independent review
@@ -66,10 +66,19 @@ def planning_fixture(workspace, invoke, *, docs=None):
                   "context": "Structural fixture; no product acceptance", "outcome": outcome, "acceptance_ids": ["AC-001"],
                   "checks": ["Synthetic observation"], "limitations": ["Fixture only"], "findings": []}
         if kind == "independent-review":
-            report.update(policy_id=policy["id"], role="reviewer")
+            report.update(policy_id=policy["id"], role="reviewer", resolutions=[])
+        if finding_decision and actor == "R2":
+            report["findings"] = [finding("F-1", "minor")]
         file = workspace / f"report-{len(reports)}.json"
         put_json(file, report)
         reports.append(cli(invoke, root, "evidence", "record", "--file", file)["data"]["evidence"]["id"])
+        commit(root)
+    if finding_decision:
+        file = workspace / "finding-decision.json"
+        put_json(file, {"model_schema": 2, "kind": "finding-decision", "change_id": None, "component": "engine",
+                        "release": {"component": "engine", "version": "v1.0.0"}, "actor": "Fixture user",
+                        "reason": "Accept minor synthetic risk", "status": "accepted", "findings": [reports[-1] + "#F-1"]})
+        cli(invoke, root, "evidence", "record", "--file", file)
         commit(root)
     return root, base, final, reports
 
@@ -92,7 +101,7 @@ def tracked_state(root):
 
 def scenarios(workspace, invoke, check, fetch):
     """Planning, comparison with CLI, read-only behavior, evidence states and reading scope."""
-    root, base, final, reports = planning_fixture(workspace / "viewer-planning", invoke)
+    root, base, final, reports = planning_fixture(workspace / "viewer-planning", invoke, finding_decision=True)
 
     def get(path, expect=200):
         status, payload = fetch(root, path)
@@ -131,6 +140,7 @@ def scenarios(workspace, invoke, check, fetch):
     check("V-006 required review is a separate unfavorable condition, gate not approved",
           engine["review"]["required"] is True and engine["review"]["state"] == "changes-needed" and gate["ok"] is False)
     states = {r["id"]: r["state"] for r in engine["reports"]}
+    check("FH finding decisions do not masquerade as run observations", set(states) == set(reports), str(states))
     check("V-006 replaced evidence is distinguished from the current one", states[reports[0]] == "superseded" and states[reports[1]] == "applicable", json.dumps(states))
     report = get(f"/api/v1/evidence/{reports[0]}")
     check("V-006 report names its replacement and is not executed by Roclec", report["state"] == "superseded" and report["superseded_by"] == [reports[1]]
@@ -243,7 +253,7 @@ def review_attribution_scenarios(workspace, invoke, check, fetch):
     favorable = {"model_schema": 2, "kind": "independent-review", "change_id": None, "release": {"component": "engine", "version": "v1.0.0"},
                  "component": "engine", "run_id": final["id"], "candidate_digest": final["candidate"]["inputs_digest"], "actor": "R2",
                  "context": "Reviewer session B", "outcome": "ready", "acceptance_ids": ["AC-001"], "checks": ["Synthetic observation"],
-                 "limitations": ["Fixture only"], "findings": [], "policy_id": policy["id"], "role": "reviewer"}
+                 "limitations": ["Fixture only"], "findings": [], "resolutions": [], "policy_id": policy["id"], "role": "reviewer"}
     put_json(workspace / "favorable.json", favorable)
     cli(invoke, root, "evidence", "record", "--file", workspace / "favorable.json")
     commit(root)

@@ -6,10 +6,10 @@ from pathlib import Path
 
 try:
     from .c1_scenarios import tree, bundle, snapshot, digest, put_json
-    from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture
+    from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
 except ImportError:
     from c1_scenarios import tree, bundle, snapshot, digest, put_json
-    from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture
+    from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
 
 
 def scenarios(workspace, invoke, check):
@@ -36,6 +36,15 @@ def scenarios(workspace, invoke, check):
     call("I-031 unfinished participant cannot prepare", "run", "verify", "--release", "v1.0.0", "--component", "viewer", "--base", base, *PRODUCER, expect=1, issue="INVALID_REFERENCE")
     run = call("I-031 final combined release run", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER)["run"]
     check("Release run is distinct from change scope", run["change_id"] is None and run["release"] == {"component": "engine", "version": "v1.0.0"})
+    release_scope = {"model_schema": 2, "change_id": None, "component": "engine", "release": run["release"]}
+    policy = call("Inspect final release policy", "inspect", "--release", "v1.0.0", "--component", "engine")["review_policy"]
+    report_file = workspace / "publication-observation.json"
+    put_json(report_file, {**release_scope, "kind": "independent-review", "run_id": run["id"],
+                           "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"],
+                           "actor": "fixture reviewer", "context": "Synthetic reviewer session", "role": "reviewer",
+                           "outcome": "ready", "acceptance_ids": ["AC-001"], "checks": ["Synthetic observation"],
+                           "limitations": [], "findings": [finding("F-1", "info")], "resolutions": []})
+    report = call("FH record a finding before publication", "evidence", "record", "--file", report_file)["evidence"]
     commit(root)
     call("C3 final release gate", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")
     prepare_plan = workspace / "c3-release-prepare.json"
@@ -72,6 +81,14 @@ def scenarios(workspace, invoke, check):
     check("I-031 component publication independent", release["status"] == "published" and not (root / ".roclec/releases/viewer/v1.0.0/publication.json").exists())
     check("I-032 exact shipped candidate frozen", release["publication"]["commit"] == shipped and release["publication"]["evidence"]["preparation"] == preparation)
     call("I-032 published membership immutable", "release", "plan", "engine", "v1.0.0", "--clear", expect=1, issue="VERSION_INVALID")
+    decision_file = workspace / "published-finding-decision.json"
+    put_json(decision_file, {**release_scope, "kind": "finding-decision", "status": "accepted",
+                             "findings": [report["id"] + "#F-1"], "actor": "fixture user",
+                             "reason": "Attempt to change the published finding state"})
+    call("FH published findings state is immutable", "evidence", "record", "--file", decision_file,
+         expect=1, issue="VERSION_INVALID")
+    call("FH published findings reject new review transitions", "evidence", "record", "--file", report_file,
+         expect=1, issue="VERSION_INVALID")
     before = tree(root)
     call("C3 publication apply repeats without effects", "operation", "apply", record_plan)
     check("Historical publication receipt never rewrites records", before == tree(root))
@@ -178,7 +195,7 @@ def combined_and_fix_scenarios(workspace, invoke, check):
 
 
 def review_scenarios(workspace, invoke, check):
-    root, base, integration = prepared_fixture(workspace / "release-review", invoke)
+    root, base, integration = prepared_fixture(workspace / "release-review", invoke, member_finding=True)
     prefix = ["--project", str(root), "--json"]
 
     def call(label, *args, expect=0, issue=None, recorded=False):
@@ -210,20 +227,54 @@ def review_scenarios(workspace, invoke, check):
                   "release": {"component": "engine", "version": "v1.0.0"}, "component": "engine", "run_id": run["id"],
                   "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"], "actor": actor, "role": "reviewer",
                   "context": "Structural fixture; no actual independent human/model acceptance", "outcome": outcome, "acceptance_ids": ["AC-001"],
-                  "checks": ["Synthetic observation of the final combined contract"], "limitations": ["No product acceptance"], "findings": []}
+                  "checks": ["Synthetic observation of the final combined contract"], "limitations": ["No product acceptance"], "findings": [], "resolutions": []}
         file = workspace / "release-review.json"
         put_json(file, {**report, **changes})
         return file
     call("M-28 release self-review is rejected without writes", "evidence", "record", "--file",
          review("R1", "ready", context="SYNTHETIC implementer session"), expect=1, issue="SELF_REVIEW_DECLARED")
-    for actor, outcome in (("R1", "ready"), ("R2", "changes-needed"), ("R1", "ready"),
-                           ("R2", "incomplete"), ("R2", "ready")):
+    for index, (actor, outcome) in enumerate((("R1", "ready"), ("R2", "changes-needed"), ("R1", "ready"),
+                                               ("R2", "incomplete"), ("R2", "ready"))):
         call("Record final release " + outcome + " review", "evidence", "record", "--file", review(actor, outcome))
         commit(root)
-        if (actor, outcome) != ("R2", "ready") and (actor == "R2" or len(list((root / ".roclec/evidence").glob("*.json"))) > 1):
+        if index in (1, 2, 3):
             call("D3 unfavorable release review blocks preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out, expect=1, issue="REVIEW_REQUIRED")
+    past = call("FH member findings are visible in release queries", "list", "findings", "--change", "CHG-001")["findings"][0]
+    introduced = call("FH favorable release review records findings", "evidence", "record", "--file",
+                      review("R2", "ready", findings=[finding("F-1", "minor"), finding("F-2", "major"), finding("F-3", "info")]))["evidence"]
+    commit(root)
+    major = introduced["id"] + "#F-2"
+    call("FH material release finding blocks preparation", "release", "prepare", "engine", "v1.0.0",
+         "--run", run["id"], "--out", out, expect=1)
+    fut_file = workspace / "release-fut.json"
+    put_json(fut_file, {"model_schema": 2, "id": "FUT-001", "source": {"location": "docs/reference.md", "locator": "Fixture"},
+                        "finding": "Follow-up", "impact": "Fixture only", "questions": []})
+    call("FH capture release follow-up", "fut", "capture", "--file", fut_file)
+    decision_file = workspace / "release-decision.json"
+    deferred = introduced["id"] + "#F-3"
+    for key, status, extra in ((major, "accepted", {}), (deferred, "deferred", {"fut_id": "FUT-001"})):
+        put_json(decision_file, {"model_schema": 2, "kind": "finding-decision", "change_id": None,
+                                 "component": "engine", "release": {"component": "engine", "version": "v1.0.0"},
+                                 "status": status, "findings": [key], "actor": "fixture user",
+                                 "reason": "User disposition of the synthetic finding", **extra})
+        call("FH release disposition " + status, "evidence", "record", "--file", decision_file)
+    commit(root)
+    gate = call("FH release gate lists open, accepted and deferred", "check", "--gate", "release", "--release", "v1.0.0", "--component", "engine")
+    listed = call("FH query includes member and release scopes", "list", "findings", "--release", "v1.0.0", "--component", "engine")["findings"]
+    expected = {past["key"]: "open", introduced["id"] + "#F-1": "open", major: "accepted", deferred: "deferred"}
+    check("FH release includes member and release findings", {row["key"]: row["status"] for row in listed} == expected, str(listed))
+    check("FH final gate lists all dispositions", {row["key"]: row["status"] for row in gate["findings"]} == expected, str(gate))
     call("D3 current favorable release review permits preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out)
-    call("Persist release preparation with review", "operation", "apply", out)
+    preparation = call("Persist release preparation with review", "operation", "apply", out)["preparation"]
+    put_json(decision_file, {"model_schema": 2, "kind": "finding-decision", "change_id": None,
+                             "component": "engine", "release": {"component": "engine", "version": "v1.0.0"},
+                             "status": "accepted", "findings": [introduced["id"] + "#F-1"], "actor": "fixture user",
+                             "reason": "Accept the remaining synthetic observation"})
+    call("FH record changed disposition after preparation", "evidence", "record", "--file", decision_file)
+    commit(root)
+    call("FH publication rejects a preparation with different finding state", "release", "record", "engine", "v1.0.0",
+         "--preparation", preparation, "--commit", "HEAD", "--tag", "v1.0.0", "--remote", "fixture",
+         "--actor", "fixture user", "--reason", "Structural fixture", "--out", out, expect=1, issue="EVIDENCE_STALE")
     previous = list((root / ".roclec/releases/engine/v1.0.0/preparations").glob("*.json"))
     call("New adoption decision invalidates previous aggregate review", "review", "policy", "--change", "CHG-001", "--enabled", "true", "--actor", "fixture user", "--reason", "Fresh policy decision")
     commit(root)
@@ -231,4 +282,4 @@ def review_scenarios(workspace, invoke, check):
     call("D3 user disables participation with reason", "review", "policy", "--change", "CHG-001", "--enabled", "false", "--actor", "fixture user", "--reason", "End fixture participation")
     commit(root)
     call("D3 disabled release review allows gate", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")
-    check("D3 old preparations/reports remain historical", all(p.exists() for p in previous) and len(list((root / ".roclec/evidence").glob("*.json"))) == 5)
+    check("D3 old preparations/reports remain historical", all(p.exists() for p in previous) and len(list((root / ".roclec/evidence").glob("*.json"))) == 10)

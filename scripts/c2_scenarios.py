@@ -32,7 +32,7 @@ def commit(root, message="fixture checkpoint"):
     return head
 
 
-def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check_code=None, timeout=5):
+def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check_code=None, timeout=5, review=None):
     workspace.mkdir(parents=True, exist_ok=True)
     root = workspace / "code with spaces"
     root.mkdir()
@@ -48,6 +48,13 @@ def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check
         lines.extend([f'[components.{name}]', 'repo = "."', 'user_facing = false', 'target_ref = "refs/remotes/fixture/main"',
                       'inputs = ["src/**"]', 'generated = ["build/**"]', 'excluded = ["private.env"]',
                       f'verification = [{inline}]'])
+    # Existing synthetic scenarios isolate their own gates. FH scenarios leave the
+    # profile field absent when exercising the framework default.
+    if review is None:
+        review = {"enabled": False}
+    if review:
+        lines.append("[review]")
+        lines.extend(f"{key} = {json.dumps(value)}" for key, value in review.items())
     config.write_text("\n".join(lines) + "\n")
     result = invoke(["--json", "init", str(root), "--profile", str(config)])
     if result.returncode:
@@ -216,9 +223,9 @@ def scenarios(workspace, invoke, check):
         record = {"model_schema": 2, "kind": kind, "change_id": "CHG-001", "component": "engine", "run_id": run_id,
                   "candidate_digest": run["candidate"]["inputs_digest"], "actor": "declared fixture reviewer", "context": "synthetic harness report, no model evaluation",
                   "outcome": outcome, "acceptance_ids": ["AC-001"], "checks": ["Observed fixture output"], "limitations": ["No actual independent human review"],
-                  "findings": [{"id": "F-001", "description": "Stable historical finding"}]}
+                  "findings": []}
         if kind == "independent-review":
-            record.update(policy_id=policy["id"], role="reviewer")
+            record.update(policy_id=policy["id"], role="reviewer", resolutions=[])
         record.update(changes)
         record = {k: v for k, v in record.items() if v is not None}
         put_json(evidence_file, record)
@@ -235,7 +242,7 @@ def scenarios(workspace, invoke, check):
         call("I-017 unfavorable review blocks", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="REVIEW_REQUIRED")
     manual = report("pass", "manual")
     check("I-016 manual report never claims execution", manual["executed_by_roclec"] is False and "argv" not in manual)
-    report("ready")
+    report("ready", findings=[finding("F-001", "minor")])
     call("I-017 current ready permits verify", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify")
     (root / "src/new.py").write_text("# relevant source\n")
     call("I-017 ready report becomes stale", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="EVIDENCE_STALE")
@@ -343,13 +350,27 @@ def execution_scenarios(workspace, invoke, check):
             check("I-020 evidence of foreign AC rejected without mutation", result.returncode == 1 and tree(root) == before, result.stdout)
 
 
-def prepared_fixture(workspace, invoke):
+def prepared_fixture(workspace, invoke, *, member_finding=False):
     root, base = setup(workspace, invoke, names=("engine",))
     prefix = ["--project", str(root), "--json"]
     result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     if result.returncode:
         raise AssertionError(result.stdout + result.stderr)
     run = json.loads(result.stdout)["data"]["run"]
+    if member_finding:
+        result = invoke([*prefix, "inspect", "--change", "CHG-001"])
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+        policy = json.loads(result.stdout)["data"]["review_policy"]
+        file = workspace / "member-review.json"
+        put_json(file, {"model_schema": 2, "kind": "independent-review", "change_id": "CHG-001", "component": "engine",
+                        "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"], "actor": "fixture reviewer",
+                        "context": "Synthetic reviewer session", "role": "reviewer", "policy_id": policy["id"],
+                        "outcome": "ready", "acceptance_ids": ["AC-001"], "checks": ["Synthetic observation"],
+                        "limitations": [], "findings": [finding("F-1", "major")], "resolutions": []})
+        result = invoke([*prefix, "evidence", "record", "--file", str(file)])
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
     commit(root)
     path = workspace / "plan.json"
     result = invoke([*prefix, "integrate", "prepare", "CHG-001", "--component", "engine", "--run", run["id"], "--out", str(path)])
@@ -491,3 +512,212 @@ def edge_scenarios(workspace, invoke, check):
     integration = json.loads(next((root / ".roclec/integrations/CHG-002/engine").glob("*.json")).read_text())
     check("C2 historical fix preserves newer current pointer", current["components"]["engine"]["CAP-001"] == newer["revision"])
     check("C2 historical fix records the historical contract it actually verifies", integration["contracts"]["CAP-001"] == old["revision"])
+
+
+def finding(identifier, severity):
+    return {"id": identifier, "severity": severity, "location": {"path": "src/check.py", "line": 1},
+            "acceptance_ids": ["AC-001"], "condition": "On the synthetic path",
+            "impact": "The fixture exposes the recorded behavior", "description": "Synthetic finding"}
+
+
+def findings_scenarios(workspace, invoke, check):
+    workspace = workspace / "findings"
+    root, base = setup(workspace, invoke, names=("engine",), review={})
+    report_file = workspace / "report.json"
+    decision_file = workspace / "decision.json"
+    change = "CHG-001"
+    scope = {"model_schema": 2, "change_id": change, "component": "engine"}
+
+    def call(repo, *args, failure=False, issue=None, writes=False):
+        before = tree(repo) if failure and not writes else None
+        result = invoke(["--project", str(repo), "--json", *map(str, args)])
+        payload = json.loads(result.stdout)
+        label = "FH " + " ".join(map(str, args))
+        check(label, (result.returncode in {1, 2}) if failure else result.returncode == 0, result.stdout + result.stderr)
+        if issue:
+            check(label + " issue", issue in {detail["code"] for detail in payload["issues"]}, result.stdout)
+        if before is not None:
+            check(label + " rejected without changes", tree(repo) == before, result.stdout)
+        return payload
+
+    def record_run(repo, *, blocked=True):
+        return call(repo, "run", "verify", change, "--component", "engine", "--base", base, *PRODUCER,
+                    failure=blocked, writes=True)["data"]["run"]
+
+    profile_file = root / ".roclec/project.toml"
+    profile_text = profile_file.read_text()
+    for bad_settings in ('enabled = "false"', 'material_severity = "urgent"', 'unknown = true'):
+        profile_file.write_text(profile_text + "\n[review]\n" + bad_settings + "\n")
+        call(root, "check", failure=True, issue="INVALID_INPUT")
+    profile_file.write_text(profile_text)
+
+    policy = call(root, "inspect", "--change", change)["data"]["review_policy"]
+    check("FH a profile without review settings enables review", policy["enabled"])
+    initial = record_run(root)
+
+    def review(repo, run, *, findings=(), resolutions=None, context="Synthetic reviewer session",
+               actor="fixture reviewer", failure=False, issue=None):
+        candidate = run["candidate"]["inputs_digest"]
+        resolutions = [{"finding": key, "status": status, "candidate_digest": candidate, "note": "Verified the synthetic candidate"}
+                       for key, status in (resolutions or {}).items()]
+        report = {**scope, "kind": "independent-review", "run_id": run["id"], "candidate_digest": candidate,
+                  "actor": actor, "role": "reviewer", "context": context, "policy_id": policy["id"],
+                  "outcome": "ready", "acceptance_ids": ["AC-001"], "checks": ["Observed synthetic behavior"],
+                  "limitations": ["Fixture only"], "findings": list(findings), "resolutions": resolutions}
+        put_json(report_file, report)
+        payload = call(repo, "evidence", "record", "--file", report_file, failure=failure, issue=issue)
+        return payload if failure else payload["data"]["evidence"]
+
+    def findings(repo, *flags):
+        return call(repo, "list", "findings", "--change", change, *flags)["data"]["findings"]
+
+    def check_gate(repo, gate="verify", **kwargs):
+        return call(repo, "check", "--change", change, "--component", "engine", "--gate", gate, **kwargs)
+
+    bad = finding("F-1", "distinctive")
+    review(root, initial, findings=[bad], failure=True, issue="INVALID_INPUT")
+    del bad["severity"]
+    review(root, initial, findings=[bad], failure=True, issue="INVALID_INPUT")
+
+    first = review(root, initial, findings=[finding("F-1", "major"), finding("F-2", "minor")])
+    major, minor = (first["id"] + "#" + identifier for identifier in ("F-1", "F-2"))
+    human = invoke(["--project", str(root), "list", "findings", "--change", change, "--open"])
+    check("FH the human-readable list shows identity, location and state record",
+          human.returncode == 0 and all(part in human.stdout for part in (major, "src/check.py:1", "State record")), human.stdout)
+    blocked = check_gate(root, failure=True, issue="FINDINGS_OPEN")
+    check("FH default threshold blocks the major and lists its key", major in blocked["issues"][0]["actual"], str(blocked))
+    (root / "src/second.py").write_text("# synthetic new candidate\n")
+    replacement = record_run(root)
+    missing = review(root, replacement, resolutions={minor: "still-open"}, failure=True, issue="FINDING_RESOLUTION_REQUIRED")
+    check("FH omission lists the finding from the previous candidate", major in missing["issues"][0]["actual"], str(missing))
+    review(root, replacement, resolutions={major: "fixed", minor: "still-open", first["id"] + "#F-99": "fixed"},
+           failure=True, issue="INVALID_REFERENCE")
+    review(root, replacement, resolutions={major: "fixed", minor: "still-open"},
+           context="  SYNTHETIC IMPLEMENTER SESSION  ", failure=True, issue="SELF_REVIEW_DECLARED")
+    ready = review(root, replacement, resolutions={major: "still-open", minor: "still-open"})
+    trunk = commit(root)
+    check("FH predecessor finding survives a favorable review of a new candidate",
+          {row["key"]: row["status"] for row in findings(root, "--open")} == {major: "still-open", minor: "still-open"})
+    check("FH inspect and list show the state-producing review",
+          call(root, "inspect", "--change", change)["data"]["findings"] == findings(root)
+          and all(row["state_record"] == ready["id"] for row in findings(root)))
+    check_gate(root, "integrate", failure=True, issue="FINDINGS_OPEN")
+
+    branches = {}
+    for name, status in (("fixed", "fixed"), ("open", "still-open"), ("second-fix", "fixed")):
+        branch = "fh-" + name
+        worktree = workspace / branch
+        git(root, "worktree", "add", "-qb", branch, str(worktree), trunk)
+        actor = "second fixture reviewer" if name == "second-fix" else "fixture reviewer"
+        review(worktree, replacement, resolutions={major: status, minor: "still-open"}, actor=actor)
+        commit(worktree)
+        branches[name] = branch
+    dispositions = {}
+    for status in ("accepted", "invalid"):
+        branch = workspace / f"fh-user-{status}"
+        git(root, "worktree", "add", "-qb", branch.name, str(branch), trunk)
+        put_json(decision_file, {**scope, "kind": "finding-decision", "status": status, "findings": [major],
+                                 "actor": "fixture user", "reason": "Disposition of the synthetic finding"})
+        dispositions[status] = call(branch, "evidence", "record", "--file", decision_file)["data"]["evidence"]
+        commit(branch)
+        branches[status] = branch.name
+
+    def merge_reviews(label, *order):
+        worktree = workspace / label
+        git(root, "worktree", "add", "-qb", "fh-" + label, str(worktree), trunk)
+        for name in order:
+            git(worktree, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "merge", "--no-ff", "--no-edit", branches[name])
+        return worktree
+
+    agreed = merge_reviews("agreed", "fixed", "second-fix")
+    resolved = next(row for row in findings(agreed) if row["key"] == major)
+    check("FH concurrent matching fixes remain fixed", resolved["status"] == "fixed"
+          and not resolved["ambiguous"] and len(resolved["state_records"]) == 2, str(resolved))
+    check_gate(agreed)
+
+    human_priority = merge_reviews("human-priority", "accepted", "open")
+    resolved = next(row for row in findings(human_priority) if row["key"] == major)
+    check("FH a human disposition survives a concurrent reviewer observation",
+          resolved["status"] == "accepted" and resolved["state_record"] == dispositions["accepted"]["id"], str(resolved))
+    review(human_priority, replacement, resolutions={major: "still-open", minor: "still-open"},
+           failure=True, issue="INVALID_REFERENCE")
+    check_gate(human_priority)
+
+    contested = merge_reviews("human-conflict", "accepted", "invalid")
+    resolved = next(row for row in findings(contested) if row["key"] == major)
+    check("FH conflicting human decisions require a human reconciliation",
+          resolved["status"] == "still-open" and resolved["ambiguous"] and resolved["requires_human"], str(resolved))
+    review(contested, replacement, resolutions={major: "fixed", minor: "still-open"},
+           failure=True, issue="FINDING_DECISION_REQUIRED")
+    call(contested, "evidence", "record", "--file", decision_file)
+    check_gate(contested)
+
+    outcomes = []
+    for index, order in enumerate((("fixed", "open"), ("open", "fixed"))):
+        worktree = merge_reviews(f"merge-{index}", *order)
+        outcomes.append(findings(worktree))
+        check_gate(worktree, failure=True, issue="FINDINGS_OPEN")
+    check("FH both merge orders retain the same open conflict", outcomes[0] == outcomes[1]
+          and {row["key"]: row["status"] for row in outcomes[0]}[major] == "still-open", str(outcomes))
+
+    merged = workspace / "merge-0"
+    review(merged, replacement, resolutions={major: "still-open", minor: "still-open"},
+           failure=True, issue="INVALID_REFERENCE")
+    result = review(merged, replacement, resolutions={major: "fixed", minor: "still-open"},
+                    findings=[finding("F-3", "info"), finding("F-4", "minor"), finding("F-5", "info")])
+    passed = check_gate(merged)["data"]
+    check("FH minor findings remain visible while verify passes", minor in json.dumps(passed), str(passed))
+
+    fut_file = workspace / "future.json"
+    put_json(fut_file, {"model_schema": 2, "id": "FUT-001", "source": {"location": "docs/reference.md", "locator": "Fixture"},
+                        "finding": "Follow-up", "impact": "Fixture only", "questions": []})
+    call(root, "fut", "capture", "--file", fut_file)
+    fut_commit = commit(root)
+    git(merged, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-edit", fut_commit)
+
+    def decide(identifier, status, *, failure=False, **extra):
+        key = result["id"] + "#" + identifier
+        put_json(decision_file, {**scope, "kind": "finding-decision", "status": status, "findings": [key],
+                                 "actor": "fixture user", "reason": "Recorded user disposition", **extra})
+        payload = call(merged, "evidence", "record", "--file", decision_file, failure=failure)
+        return key, payload
+
+    decide("F-3", "accepted", actor="", failure=True)
+    decide("F-5", "deferred", failure=True)
+    decide("F-5", "deferred", fut_id="FUT-999", failure=True)
+    for identifier, status, extra in (("F-3", "accepted", {}), ("F-4", "invalid", {}), ("F-5", "deferred", {"fut_id": "FUT-001"})):
+        key, decision = decide(identifier, status, **extra)
+        row = next(row for row in findings(merged) if row["key"] == key)
+        check("FH human disposition is derived in a worktree", row["status"] == status
+              and row["state_record"] == decision["data"]["evidence"]["id"], str(row))
+    call(merged, "check")
+    check("FH --open filters out all closed states", [row["key"] for row in findings(merged, "--open")] == [minor])
+    review(merged, replacement, resolutions={major: "still-open", minor: "still-open"},
+           failure=True, issue="INVALID_REFERENCE")
+    repeated = review(merged, replacement, resolutions={minor: "still-open"},
+                      findings=[{**finding("F-1", "info"), "recurs_from": major}])
+    rows = {row["key"]: row for row in findings(merged)}
+    check("FH recurrence keeps the original finding fixed",
+          rows[major]["status"] == "fixed" and rows[repeated["id"] + "#F-1"]["recurs_from"] == major)
+    config = merged / ".roclec/project.toml"
+    config.write_text(config.read_text() + '\n[review]\nmaterial_severity = "minor"\n')
+    record_run(merged)
+    blocked = check_gate(merged, failure=True, issue="FINDINGS_OPEN")
+    check("FH the configured material threshold blocks the previously nonmaterial finding",
+          blocked["issues"][0]["actual"] == [minor], str(blocked))
+    call(root, "review", "policy", "--change", change, "--enabled", "false", "--actor", "",
+         "--reason", "Fixture waiver", failure=True)
+    call(root, "review", "policy", "--change", change, "--enabled", "false", "--actor", "fixture user",
+         "--reason", "Fixture waiver")
+    check_gate(root)
+    corrupted = root / f".roclec/evidence/{first['id']}.json"
+    original = corrupted.read_bytes()
+    corrupted.write_text("{}")
+    call(root, "status")
+    call(root, "list", "changes")
+    inspected = call(root, "inspect", "--change", change)["data"]
+    check("FH inspect preserves the change and reports evidence corruption",
+          inspected["change"]["id"] == change and "UNSUPPORTED_SCHEMA" in {issue["code"] for issue in inspected["issues"]})
+    call(root, "list", "findings", "--change", change, failure=True, issue="UNSUPPORTED_SCHEMA")
+    corrupted.write_bytes(original)

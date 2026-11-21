@@ -65,7 +65,8 @@ class Integration:
         integration = {"model_schema": 2, "change_id": change_id, "component": component,
                        "proposal_digest": record["proposal_digest"], "run_id": run_id,
                        "candidate": verified["candidate"], "evidence": verified["evidence"],
-                       "policy_id": verified["policy_id"], "contracts": current["components"][component], **destination_tip}
+                       "policy_id": verified["policy_id"], "finding_state": verified["finding_state"],
+                       "contracts": current["components"][component], **destination_tip}
         if "baseline_release" in record["semantic"]:
             baseline = record["semantic"]["baseline_release"]
             integration["baseline_release"] = baseline

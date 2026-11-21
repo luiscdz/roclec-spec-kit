@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios
+from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios, findings_scenarios
 from test_kernel import invoke
 from scripts.c2_faults import capture_scenarios, scenarios as fault_scenarios
 from scripts.c1_scenarios import bundle, digest, put_json, snapshot, tree
@@ -20,6 +20,11 @@ class VerificationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             branch_scenarios(Path(directory), invoke,
                              lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
+
+    def test_findings_lifecycle_through_candidate_changes_and_merges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            findings_scenarios(Path(directory), invoke,
+                               lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
 
     def test_public_c2_scenarios(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -103,11 +108,11 @@ class DeclaredReviewContextTest(unittest.TestCase):
         return self.call("run", "verify", "CHG-001", "--component", "engine", "--base", self.base,
                          "--role", role, "--context", context, expect=expect, issue=issue)["data"]["run"]
 
-    def review(self, run, context, *, role="reviewer", actor="R1", expect=0, issue=None):
+    def review(self, run, context, *, role="reviewer", actor="R1", resolutions=(), expect=0, issue=None):
         record = {"model_schema": 2, "kind": "independent-review", "change_id": "CHG-001", "component": "engine",
                   "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": self.policy["id"],
                   "actor": actor, "role": role, "context": context, "outcome": "ready", "acceptance_ids": ["AC-001"],
-                  "checks": ["Synthetic observation"], "limitations": ["Fixture only"], "findings": []}
+                  "checks": ["Synthetic observation"], "limitations": ["Fixture only"], "findings": [], "resolutions": list(resolutions)}
         file = self.workspace / "review.json"
         put_json(file, {k: v for k, v in record.items() if v is not None})
         before = tree(self.root)
@@ -159,6 +164,24 @@ class DeclaredReviewContextTest(unittest.TestCase):
         self.gate(expect=1, issue="SELF_REVIEW_DECLARED")
         self.run_verify("implementer", "session-c", expect=0, issue=None)
         self.gate()
+
+    def test_historical_finding_with_original_id_can_be_resolved(self):
+        run = self.run_verify("implementer", "session-a")
+        previous = self.review(run, "session-b")["data"]["evidence"]
+        path = self.root / f".roclec/evidence/{previous['id']}.json"
+        for field in ("resolutions", "finding_parents", "digest"):
+            previous.pop(field, None)
+        previous["findings"] = [{"id": "historical-observation", "description": "Fixture from before FH"}]
+        previous["digest"] = digest(previous)
+        put_json(path, previous)
+        key = previous["id"] + "#historical-observation"
+        blocked = self.gate(expect=1, issue="FINDINGS_OPEN")
+        self.assertEqual(blocked["issues"][0]["actual"], [key])
+        self.review(run, "session-b", resolutions=[{"finding": key, "status": "fixed", "note": "Observed the fix",
+                                                    "candidate_digest": run["candidate"]["inputs_digest"]}])
+        row = self.gate()["data"]["findings"][0]
+        self.assertEqual((row["key"], row["severity"], row["status"]), (key, "major", "fixed"))
+        self.call("check")
 
     def test_unattributed_history_does_not_satisfy_review_policy(self):
         run = self.run_verify("implementer", "session-a")
