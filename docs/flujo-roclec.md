@@ -14,10 +14,27 @@ Esta guía describe el flujo nativo del perfil 3 después de [instalar las skill
 | --- | --- | --- |
 | Definir | Busca cambios relacionados, consulta el contrato vigente y prepara la propuesta. Aclara las decisiones que afecten el comportamiento, los permisos o el alcance. | ID del cambio, propuesta y criterios de aceptación. |
 | Aprobar y preparar | Registra la aprobación explícita de esa propuesta. Reúne las referencias de fundación, incorpora diseño cuando aplica y prepara el plan y las tareas proporcionales al cambio. Asigna la versión acordada o la que determine la política del proyecto. | Propuesta aprobada, referencias aplicables y release asignada por componente. |
-| Implementar y verificar | Comprueba los prerrequisitos, implementa en el repositorio del componente y ejecuta las pruebas del perfil. Vincula la evidencia al candidato y obtiene revisión independiente si la política la exige. | Código, resultados de comprobación y cobertura de los criterios aplicables. |
+| Implementar y verificar | Comprueba los prerrequisitos, implementa en el repositorio del componente y ejecuta las pruebas del perfil, registrando qué rol y qué contexto produjeron el run. Vincula la evidencia al candidato y, si la política la exige, obtiene la revisión independiente en un contexto distinto. | Código, resultados de comprobación y cobertura de los criterios aplicables. |
 | Integrar | Sigue el proceso Git autorizado. Con el repositorio de código limpio y el candidato presente en la rama destino configurada, prepara y aplica la integración desde la troncal de specs. | Registro de integración del componente y revisión vigente del contrato. |
 
 Si tienes una idea que todavía quieres investigar, pide «Roclec, registra esta idea para evaluarla». Se puede capturar como FUT con su fuente y sus preguntas. Si luego se promueve, el coordinador sigue el destino registrado y comprueba si el cambio ya tiene aprobación. [Autoría y descubrimiento](c1.md)
+
+## Roles que intervienen
+
+El coordinador es tu propia sesión. Cuando el host admite subagentes, delega etapas acotadas en los roles que instala Roclec y vuelve a inspeccionar el estado registrado después de cada resultado:
+
+| Rol | Etapas | Lo que no puede hacer |
+| --- | --- | --- |
+| `roclec-specifier` | Definir, aclarar y analizar la propuesta | Aprobar; tocar código o snapshots aprobados |
+| `roclec-implementer` | Planificar, desglosar e implementar un componente | Cambiar la intención aprobada; editar otros componentes |
+| `roclec-reviewer` | Revisar el candidato y registrar la evidencia | Editar código o specs; revisar su propio trabajo |
+
+- **Decisiones.** Siguen siendo tuyas. Un rol no puede preguntarte: devuelve sus preguntas abiertas al coordinador, que te las presenta.
+- **Proporcionalidad.** Un cambio pequeño lo hace el coordinador solo, porque el traspaso costaría más que el trabajo. La revisión independiente nunca la hace él.
+- **Sin subagentes.** Si el host no los admite, o Codex no carga los roles porque el proyecto no es de confianza, el coordinador sigue en secuencia y lo declara. Sin un contexto separado, la revisión queda `incomplete`.
+- **Independencia declarada.** El gate rechaza una revisión que declara el mismo contexto que el run revisado. Roclec comprueba lo declarado, no la independencia real.
+
+[Roles, archivos y modelo por rol](c3.md#roles-de-agente)
 
 ## Retomar o consultar
 

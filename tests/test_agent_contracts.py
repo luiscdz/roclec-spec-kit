@@ -95,6 +95,36 @@ class CoordinatorDelegationTests(unittest.TestCase):
         self.assertIn("never present a self-review as independent", self.skill)
 
 
+class RoleDocumentationTests(unittest.TestCase):
+    """Role tables in README and docs match the shipped contracts (TR.5)."""
+
+    DOCS = Path(__file__).resolve().parents[1]
+
+    def rows(self, relative):
+        text = (self.DOCS / relative).read_text(encoding="utf-8")
+        return {role: next((line for line in text.splitlines() if line.startswith(f"| `roclec-{role}` |")), None)
+                for role in subagent_roles()}
+
+    def test_role_tables_list_each_role_with_its_skills(self):
+        for relative in ("README.md", "docs/c3.md"):
+            for role, row in self.rows(relative).items():
+                with self.subTest(doc=relative, role=role):
+                    self.assertIsNotNone(row)
+                    after_role = "|".join(row.split("|")[2:])
+                    self.assertEqual(re.findall(r"`(roclec-[a-z-]+)`", after_role), contract(role)[0]["skills"])
+
+    def test_flow_guide_lists_each_role(self):
+        for role, row in self.rows("docs/flujo-roclec.md").items():
+            with self.subTest(role=role):
+                self.assertIsNotNone(row)
+
+    def test_role_links_resolve(self):
+        c3 = (self.DOCS / "docs/c3.md").read_text(encoding="utf-8")
+        self.assertIn("### Roles de agente", c3)
+        for relative in ("README.md", "docs/flujo-roclec.md"):
+            self.assertIn("c3.md#roles-de-agente", (self.DOCS / relative).read_text(encoding="utf-8"))
+
+
 class AgentProfileTests(unittest.TestCase):
     """Optional [agents.<role>] host models in profile 3 (D10, TR.7)."""
 
