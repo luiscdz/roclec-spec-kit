@@ -2,7 +2,9 @@
 
 Use explicit CHG/CAP/REQ/AC IDs and complete immutable snapshots, not front-matter status. Read `.roclec/model.md` for the JSON bundle schema. This project-owned guide is preserved by refreshes.
 
-## Context and provenance
+## Origin and coverage
+
+Refer to `semantic.origins` and `semantic.coverage` in `change.json` for the captured sources and their mapping to acceptance criteria. Keep the captured source text in the bundle and link it here without duplicating those records.
 
 ## Approved scope and exclusions
 

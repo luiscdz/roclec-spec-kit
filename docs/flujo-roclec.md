@@ -17,6 +17,8 @@ Esta guía describe el flujo nativo del perfil 3 después de [instalar las skill
 | Implementar y verificar | Comprueba los prerrequisitos, implementa en el repositorio del componente y ejecuta las pruebas del perfil, registrando qué rol y qué contexto produjeron el run. Vincula la evidencia al candidato y, si la política la exige, obtiene la revisión independiente en un contexto distinto. | Código, resultados de comprobación y cobertura de los criterios aplicables. |
 | Integrar | Sigue el proceso Git autorizado. Con el repositorio de código limpio y el candidato presente en la rama destino configurada, prepara y aplica la integración desde la troncal de specs. | Registro de integración del componente y revisión vigente del contrato. |
 
+La propuesta conserva una copia Markdown de cada origen y relaciona sus criterios con los criterios de aceptación, exclusiones o diferimientos. El coordinador presenta las exclusiones y diferimientos antes de aprobar. Captura solo el texto necesario y redacta datos personales antes de sellar. Si la fuente cambia, incorporar su texto actualizado crea otra revisión que requiere aprobación. Puedes consultar la cobertura con `inspect --change CHG-001` y buscar cambios con `list changes --origin ID`.
+
 Si tienes una idea que todavía quieres investigar, pide «Roclec, registra esta idea para evaluarla». Se puede capturar como FUT con su fuente y sus preguntas. Si luego se promueve, el coordinador sigue el destino registrado y comprueba si el cambio ya tiene aprobación. [Autoría y descubrimiento](c1.md)
 
 ## Roles que intervienen

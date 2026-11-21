@@ -75,6 +75,21 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
         else:
             semantic["deltas"] = [{"op": "add", "capability_id": "CAP-001", "requirement_id": "REQ-001"}]
         write_snapshot(folder / "proposed" / "CAP-001" / target["revision"], target)
+    source_text = "Synthetic request: present the agreed result.\n"
+    source_path = "origins/request.md"
+    applicable = target if kind == "evolution" else base
+    acceptance_ids = sorted({item["id"] for item in applicable["descriptor"]["acceptance"]
+                             if set(item["components"]) & set(scopes)}) if applicable else []
+    semantic["files"][source_path] = file_hash(source_text.encode())
+    semantic["origins"] = [{"kind": "request", "id": f"request-{change_id}", "actor": "fixture user",
+                            "locator": "synthetic fixture", "captured": source_path, "criteria": ["criterion-1"]}]
+    semantic["coverage"] = {"criteria": [{"origin": f"request-{change_id}", "criterion": "criterion-1",
+                                           "status": "covered", "acceptance_ids": acceptance_ids}], "derived": []}
+    if not acceptance_ids:
+        semantic["origins"][0]["criteria"] = []
+        semantic["coverage"]["criteria"] = []
+    (folder / "origins").mkdir(exist_ok=True)
+    (folder / source_path).write_text(source_text, encoding="utf-8")
     record = {"model_schema": 2, "id": change_id, "kind": kind, "semantic": semantic}
     record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
     put_json(folder / "change.json", record)
@@ -213,6 +228,7 @@ def scenarios(workspace, invoke, check):
     check("F1 seal preview preserves bundle", manifest.read_bytes() == original, "")
     call("F1 seal generates proposal and snapshot hashes", "change", "seal", str(bundle_dir))
     sealed = manifest.read_bytes()
+    check("FO seal includes captured source", "origins/request.md" in json.loads(sealed)["semantic"]["files"], "")
     repeated = call("F1 seal repeats", "change", "seal", str(bundle_dir))["data"]
     check("F1 seal is idempotent and leaves project intact", not repeated["changed"] and manifest.read_bytes() == sealed and tree(root) == before, "")
     saved_index = (root / ".roclec/current.json").read_bytes()
@@ -338,6 +354,157 @@ def scenarios(workspace, invoke, check):
     call("record valid duplicate", "fut", "decide", "FUT-002", "--outcome", "duplicate", "--target", "FUT-001", "--actor", "fixture user", "--reason", "same discovery")
     call("reevaluate promoted discovery explicitly", "fut", "decide", "FUT-001", "--outcome", "evaluating", "--actor", "fixture user", "--reason", "new information")
     call("reject a two-discovery duplicate cycle", "fut", "decide", "FUT-001", "--outcome", "duplicate", "--target", "FUT-002", "--actor", "fixture user", "--reason", "synthetic", expect=1, issue="INVALID_REFERENCE")
+
+    # FO uses a preservation change so it can exercise approval independently of
+    # the normative delta scenarios above.
+    origin_folder = workspace / "origin-fixture"
+    origin_record = bundle(origin_folder, change_id="CHG-100", base=first, components=("viewer",), kind="fix")
+    origin_file = origin_folder / "change.json"
+    call("FO import origin-bearing change", "change", "new", "--file", str(origin_file))
+    stored_folder = root / ".roclec/changes/CHG-100"
+    stored_manifest = stored_folder / "change.json"
+
+    def edit_origin_record(record):
+        record["proposal_digest"] = digest({key: record[key] for key in ("id", "kind", "semantic")})
+        put_json(stored_manifest, record)
+        return record["proposal_digest"]
+
+    def approve_origin(name, record, *, expect=0, issue=None):
+        revision = edit_origin_record(record)
+        return call(name, "change", "approve", "CHG-100", "--digest", revision,
+                    "--actor", "fixture user", "--reason", "synthetic source review", expect=expect, issue=issue)
+
+    legacy = json.loads(json.dumps(origin_record))
+    del legacy["semantic"]["origins"]
+    del legacy["semantic"]["coverage"]
+    approve_origin("FO origin required for approval", legacy, expect=1, issue="ORIGIN_REQUIRED")
+    missing_file = json.loads(json.dumps(origin_record))
+    del missing_file["semantic"]["files"]["origins/request.md"]
+    approve_origin("FO captured source must be in manifest", missing_file, expect=1, issue="INVALID_ORIGIN")
+    gap = json.loads(json.dumps(origin_record))
+    gap["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                        "status": "gap", "question": "What should happen?"}
+    edit_origin_record(gap)
+    result = call("FO open gap blocks approval", "check", "--change", "CHG-100", "--gate", "approve", expect=1, issue="ORIGIN_GAP")
+    check("FO gap identifies criterion", "criterion-1" in json.dumps(result["issues"]), str(result))
+    approve_origin("FO open gap blocks actual approval", gap, expect=1, issue="ORIGIN_GAP")
+    no_coverage = json.loads(json.dumps(origin_record))
+    no_coverage["semantic"]["coverage"]["criteria"] = []
+    approve_origin("FO every source criterion needs coverage", no_coverage, expect=1, issue="INVALID_COVERAGE")
+    excluded = json.loads(json.dumps(origin_record))
+    excluded["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                             "status": "excluded", "reason": ""}
+    approve_origin("FO exclusion needs a reason", excluded, expect=1, issue="INVALID_COVERAGE")
+    unknown_fut = json.loads(json.dumps(excluded))
+    unknown_fut["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                                "status": "deferred", "fut": "FUT-999"}
+    approve_origin("FO deferral needs an existing FUT", unknown_fut, expect=1, issue="INVALID_REFERENCE")
+    missing_capture = stored_folder / "origins/request.md"
+    capture_bytes = missing_capture.read_bytes()
+    missing_capture.unlink()
+    approve_origin("FO missing captured file is rejected", origin_record, expect=1, issue="INVALID_REFERENCE")
+    missing_capture.write_bytes(capture_bytes)
+    for number in (3, 4, 5, 6, 7):
+        discovery = {"model_schema": 2, "id": f"FUT-{number:03}",
+                     "source": {"location": "docs/reference.md", "locator": "Synthetic context"},
+                     "finding": "Potential improvement", "impact": "Needs evaluation", "questions": []}
+        discovery_path = workspace / f"fo-fut-{number}.json"
+        put_json(discovery_path, discovery)
+        call("FO capture discovery " + str(number), "fut", "capture", "--file", str(discovery_path))
+    fut_origin = json.loads(json.dumps(origin_record))
+    fut_origin["semantic"]["origins"][0] = {"kind": "fut", "id": "FUT-003", "locator": "synthetic finding",
+                                               "captured": "origins/request.md", "criteria": ["criterion-1"]}
+    fut_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-003"
+    approve_origin("FO unpromoted FUT cannot approve", fut_origin, expect=1, issue="INVALID_ORIGIN")
+    # The FUT promotion resolves against the current imported draft.
+    edit_origin_record(fut_origin)
+    call("FO promote FUT to draft", "fut", "decide", "FUT-003", "--outcome", "promoted", "--target", "CHG-100",
+         "--actor", "fixture user", "--reason", "Requested work")
+    approve_origin("FO promoted FUT approves", fut_origin)
+    duplicate_origin = json.loads(json.dumps(fut_origin))
+    duplicate_origin["semantic"]["origins"][0]["id"] = "FUT-004"
+    duplicate_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-004"
+    edit_origin_record(duplicate_origin)
+    call("FO mark FUT duplicate of change", "fut", "decide", "FUT-004", "--outcome", "duplicate", "--target", "CHG-100",
+         "--actor", "fixture user", "--reason", "Same work")
+    approve_origin("FO duplicate FUT approves", duplicate_origin)
+    chained_origin = json.loads(json.dumps(fut_origin))
+    chained_origin["semantic"]["origins"][0]["id"] = "FUT-005"
+    chained_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-005"
+    edit_origin_record(chained_origin)
+    call("FO duplicate FUT can resolve through another FUT", "fut", "decide", "FUT-005", "--outcome", "duplicate", "--target", "FUT-003",
+         "--actor", "fixture user", "--reason", "Same finding")
+    approve_origin("FO FUT duplicate chain approves", chained_origin)
+    excluded["semantic"]["coverage"]["criteria"][0]["reason"] = "Outside scope by user decision"
+    approve_origin("FO excluded criterion on preservation change approves", excluded)
+    deferred = json.loads(json.dumps(excluded))
+    deferred["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                              "status": "deferred", "fut": "FUT-006"}
+    approve_origin("FO deferred criterion names existing FUT", deferred)
+    approve_origin("FO approve complete coverage", origin_record)
+    approved_revision = origin_record["proposal_digest"]
+    frozen = stored_folder / "revisions" / approved_revision / "origins/request.md"
+    captured_before = frozen.read_bytes()
+    captured = stored_folder / "origins/request.md"
+    captured.write_bytes(captured.read_bytes() + b"A revised request.\n")
+    changed_origin = json.loads(json.dumps(origin_record))
+    changed_origin["semantic"]["files"]["origins/request.md"] = file_hash(captured.read_bytes())
+    new_revision = edit_origin_record(changed_origin)
+    inspected_origin = call("FO changed source requires a new approval", "inspect", "--change", "CHG-100")["data"]
+    check("FO source snapshot stays frozen", new_revision != approved_revision and not inspected_origin["approval_current"]
+          and frozen.read_bytes() == captured_before, str(inspected_origin))
+    approve_origin("FO approve revised captured source", changed_origin)
+    second_folder = workspace / "shared-origin-fixture"
+    shared = bundle(second_folder, change_id="CHG-101", base=first, components=("viewer",), kind="fix")
+    shared["semantic"]["origins"][0]["id"] = "request-CHG-100"
+    shared["semantic"]["coverage"]["criteria"][0]["origin"] = "request-CHG-100"
+    shared["semantic"]["origins"].append({"kind": "issue", "id": "issue-extra", "locator": "synthetic issue",
+                                             "captured": "origins/request.md", "criteria": []})
+    shared["proposal_digest"] = digest({key: shared[key] for key in ("id", "kind", "semantic")})
+    put_json(second_folder / "change.json", shared)
+    call("FO import change with two origins", "change", "new", "--file", str(second_folder / "change.json"))
+    listed = call("FO inverse origin query", "list", "changes", "--origin", "request-CHG-100")["data"]["changes"]
+    check("FO inverse query returns both changes", {item["id"] for item in listed} == {"CHG-100", "CHG-101"}, str(listed))
+    displayed = call("FO inspect origins and coverage", "inspect", "--change", "CHG-101")["data"]
+    check("FO inspection exposes both origins and coverage", len(displayed["origins"]) == 2
+          and displayed["coverage"] == shared["semantic"]["coverage"], str(displayed))
+    call("FO promote FUT to a different change", "fut", "decide", "FUT-007", "--outcome", "promoted", "--target", "CHG-101",
+         "--actor", "fixture user", "--reason", "Different work")
+    wrong_target = json.loads(json.dumps(changed_origin))
+    wrong_target["semantic"]["origins"][0] = {"kind": "fut", "id": "FUT-007", "locator": "synthetic finding",
+                                                  "captured": "origins/request.md", "criteria": ["criterion-1"]}
+    wrong_target["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-007"
+    approve_origin("FO FUT promoted to another change is rejected", wrong_target, expect=1, issue="INVALID_ORIGIN")
+    edit_origin_record(changed_origin)
+
+    # An evolution retains AC-001 and introduces AC-102. Coverage is required
+    # for the new AC without reclassifying the existing obligation as derived.
+    evolution_target = snapshot(("viewer",), ac="AC-102")
+    evolution_target["content"]["acceptance/AC-001.md"] = first["content"]["acceptance/AC-001.md"]
+    descriptor = evolution_target["descriptor"]
+    descriptor["requirements"][0]["acceptance_ids"] = ["AC-001", "AC-102"]
+    descriptor["acceptance"].insert(0, {"id": "AC-001", "scenario": "acceptance/AC-001.md", "components": ["viewer"]})
+    descriptor["files"]["acceptance/AC-001.md"] = file_hash(evolution_target["content"]["acceptance/AC-001.md"].encode())
+    evolution_target["revision"] = digest(descriptor)
+    evolution_folder = workspace / "origin-evolution"
+    evolution = bundle(evolution_folder, change_id="CHG-102", base=first, target=evolution_target, components=("viewer",))
+    evolution["semantic"]["coverage"]["criteria"][0]["acceptance_ids"] = ["AC-102"]
+    evolution["proposal_digest"] = digest({key: evolution[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_folder / "change.json", evolution)
+    call("FO import evolution covering only new AC", "change", "new", "--file", str(evolution_folder / "change.json"))
+    evolution_manifest = root / ".roclec/changes/CHG-102/change.json"
+    uncovered = json.loads(json.dumps(evolution))
+    uncovered["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-102", "criterion": "criterion-1",
+                                                            "status": "excluded", "reason": "Out of scope"}
+    uncovered["proposal_digest"] = digest({key: uncovered[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_manifest, uncovered)
+    call("FO new AC needs coverage or a derived reason", "change", "approve", "CHG-102", "--digest", uncovered["proposal_digest"],
+         "--actor", "fixture user", "--reason", "synthetic review", expect=1, issue="INVALID_COVERAGE")
+    uncovered["semantic"]["coverage"]["derived"] = [{"id": "AC-102", "reason": "Gap identified during specification"}]
+    uncovered["proposal_digest"] = digest({key: uncovered[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_manifest, uncovered)
+    call("FO new derived AC approves without mapping unchanged AC", "change", "approve", "CHG-102", "--digest", uncovered["proposal_digest"],
+         "--actor", "fixture user", "--reason", "synthetic review")
 
     seed_current(root, second, names=("engine",))
     vector = call("I-011 read synthetic partial integration vector", "inspect", "--capability", "CAP-001")["data"]["components"]

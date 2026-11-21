@@ -5,7 +5,8 @@
   "semantic": {
     "intention": "proposal.md",
     "files": {
-      "proposal.md": "ebe8623e03c9fe20aae9994c00d38f2f632232a75905db4b9a3cd2c4ac33ae1a"
+      "proposal.md": "ebe8623e03c9fe20aae9994c00d38f2f632232a75905db4b9a3cd2c4ac33ae1a",
+      "origins/REQUEST-001.md": "5805ff64fb6008c805adf1f0c739902cdb9c3c41aea5fb0bf9f2f94f324de1f6"
     },
     "components": [
       "app"
@@ -34,7 +35,32 @@
       }
     ],
     "dependencies": [],
-    "references": []
+    "references": [],
+    "origins": [
+      {
+        "kind": "request",
+        "id": "REQUEST-001",
+        "actor": "Example maintainer",
+        "locator": "chat:example/REQUEST-001",
+        "captured": "origins/REQUEST-001.md",
+        "criteria": [
+          "LINE-1"
+        ]
+      }
+    ],
+    "coverage": {
+      "criteria": [
+        {
+          "origin": "REQUEST-001",
+          "criterion": "LINE-1",
+          "status": "covered",
+          "acceptance_ids": [
+            "AC-001"
+          ]
+        }
+      ],
+      "derived": []
+    }
   },
-  "proposal_digest": "b8a6fcb14224803d24dfd58c176962574f17b68fcec5e851899ee39bea7b8d79"
+  "proposal_digest": "3b63f54bc7bd183f2df549ff26ffd0b8648cc1d9ac0472658eeb4b21846483a1"
 }

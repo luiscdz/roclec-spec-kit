@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from .model import canonical, digest, encoded, fields, fingerprint, identifier, local_path, need, read_json, sha, text
+from .origins import captured_paths
 from .store import Store
 
 
@@ -40,10 +41,11 @@ def seal(kernel, folder, *, check=False):
          "ID_COLLISION", "Change ID already exists", entity=change_id)
     semantic = record["semantic"]
     fields(semantic, ("intention", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-           ("files", "baseline_release", "fixes"))
+           ("files", "baseline_release", "fixes", "origins", "coverage"))
     manifest = semantic.get("files", {})
     need(isinstance(manifest, dict), "INVALID_INPUT", "files must be an object", exit_code=2)
-    files = contents(folder, [semantic["intention"], *manifest])
+    captures = captured_paths(semantic["origins"], entity=change_id) if "origins" in semantic else ()
+    files = contents(folder, [semantic["intention"], *manifest, *captures])
     semantic["files"] = {p: sha(b) for p, b in files.items()}
     generated = {}
     for key in ("components", "deltas", "dependencies", "fixes"):
