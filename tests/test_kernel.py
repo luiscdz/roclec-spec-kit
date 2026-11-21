@@ -291,6 +291,7 @@ class KernelTest(unittest.TestCase):
         write_snapshot(stored / "proposed/CAP-001" / target["revision"], target)
         record["semantic"]["proposed"][0]["revision"] = target["revision"]
         record["semantic"]["deltas"][0]["add_acceptance_ids"] = ["AC-003"]
+        record["semantic"]["coverage"]["criteria"][0]["acceptance_ids"] = ["AC-003"]
         record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
         put_json(stored / "change.json", record)
         self.call("change", "approve", "CHG-010", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "edited scope")

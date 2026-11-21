@@ -114,6 +114,7 @@ For direct CLI use, see [definition and queries](docs/c1.md), [verification and 
 
 - Foundation references and a contract index by component and capability. Query current and historical revisions, with SHA-256 validation of snapshots and Markdown.
 - Draft changes with explicit bases and deltas, approval of intent, per-component release assignment and start, and cancellation. Requirement IDs keep immutable revisions, and changes in behavior get new acceptance criteria IDs. Reserved IDs are permanent.
+- Change origins with captured source text and structural coverage of source criteria by acceptance criteria. Capture only necessary text and redact personal data before sealing. `inspect --change ID` shows the records and `list changes --origin ID` finds related changes.
 - Discovery items (FUTs) with provenance, decisions, promotion, and duplicate tracking. Release planning enforces unique membership and versioning rules.
 - Generated contract views, protection of project-owned files, operation receipts, conflict detection, and recovery from interrupted local writes. JSON output and structured errors support automation.
 - Input-based candidates, path classification, direct command execution, bounded local logs, and explicit coverage by acceptance criterion. Manual or external observations and optional independent review support per-component verification gates. When review is required, a passing run must be accompanied by a current favorable report.
@@ -251,6 +252,7 @@ Para usar la CLI directamente, consulta las guías de [definición y consulta](d
 
 - Referencias de fundación e índice de contratos por componente y capacidad. Consulta de revisiones vigentes e históricas con validación SHA-256 de snapshots y contenido Markdown.
 - Borradores con bases y deltas explícitos, aprobación de intención, asignación a release e inicio por componente, y cancelación. Los IDs de requisitos conservan revisiones inmutables y los cambios de conducta reciben IDs de criterios de aceptación nuevos. Los IDs reservados son permanentes.
+- Orígenes de cambio con texto capturado y cobertura estructural de criterios del origen por criterios de aceptación. Captura solo el texto necesario y redacta datos personales antes de sellar. `inspect --change ID` muestra los registros y `list changes --origin ID` encuentra cambios relacionados.
 - FUTs con procedencia, decisiones, promoción y seguimiento de duplicados. La planificación de releases aplica pertenencia única y reglas de versionado.
 - Vistas de contratos generadas, protección de archivos propios, recibos de operaciones, detección de conflictos y recuperación de escrituras locales interrumpidas. Salida JSON y errores estructurados para automatización.
 - Candidatos por entradas, clasificación de rutas, ejecución directa de comandos, logs locales acotados y cobertura explícita por criterio de aceptación. Observaciones manuales o externas y revisión independiente opcional para los controles de verificación por componente. Cuando se exige revisión, un run favorable debe ir acompañado de un informe favorable vigente.

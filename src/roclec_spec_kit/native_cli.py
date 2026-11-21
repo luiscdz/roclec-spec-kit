@@ -33,6 +33,7 @@ def build_parser():
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
     listing.add_argument("category", choices=("adrs", "changes", "futs", "releases", "runs"))
+    listing.add_argument("--origin", help="Filter changes by source identifier")
     init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
@@ -195,7 +196,7 @@ def execute(args):
     if command == "status":
         return kernel.status()
     if command == "list":
-        return {args.category: kernel.list_records(args.category)}
+        return {args.category: kernel.list_records(args.category, origin=args.origin)}
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:

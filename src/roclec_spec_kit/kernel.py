@@ -16,6 +16,7 @@ from .model import (ModelError, checked_files, digest, encoded, fields, fingerpr
                     identities, local_path, need, read_json, schema, sha, strings, text,
                     validate_contract, validate_delta, version_key)
 from .store import Store
+from .origins import captured_paths, validate_coverage
 
 FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design"}
 REFERENCE_ID = r"[a-z][a-z0-9-]*"
@@ -229,7 +230,7 @@ class Kernel:
              "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2)
         semantic = record["semantic"]
         fields(semantic, ("intention", "files", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-               ("baseline_release", "fixes", "architecture_decisions"))
+               ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions"))
         scope = strings(semantic["components"], nonempty=True)
         if "architecture_decisions" in semantic:
             cited = declaration(semantic["architecture_decisions"]).get("adrs", [])
@@ -244,6 +245,18 @@ class Kernel:
         fingerprint(record["proposal_digest"])
         need(record["proposal_digest"] == digest({k: record[k] for k in ("id", "kind", "semantic")}),
              "HASH_MISMATCH", "Proposal digest is stale", entity=change_id)
+        has_origins = "origins" in semantic or "coverage" in semantic
+        if has_origins:
+            need("origins" in semantic and "coverage" in semantic, "ORIGIN_REQUIRED",
+                 "Declare origins and coverage together", entity=change_id,
+                 remediation="Capture the origins and map their criteria to ACs")
+            paths = captured_paths(semantic["origins"], entity=change_id)
+            need(isinstance(semantic["files"], dict), "INVALID_INPUT", "files must be an object", exit_code=2)
+            for origin, path in zip(semantic["origins"], paths):
+                need(path in semantic["files"], "INVALID_ORIGIN", "Captured origin must be included in semantic.files",
+                     entity=origin["id"], path=path, remediation="Add the captured Markdown to semantic.files and seal again")
+                need(local_path(folder, path).is_file(), "INVALID_REFERENCE", "Captured origin file is missing",
+                     entity=origin["id"], path=path, remediation="Restore the captured Markdown before sealing or approving")
         content = checked_files(folder, semantic["files"])
         need(not any(Path(p).parts[0] in {"proposed", "revisions"} for p in content),
              "INVALID_PATH", "Proposal documents cannot occupy snapshot namespaces", exit_code=2)
@@ -374,6 +387,35 @@ class Kernel:
                          "INVALID_INPUT", "Backport needs an immutable Git commit SHA", exit_code=2)
                     if fix["backport"].get("evidence_id") is not None:
                         identifier(fix["backport"]["evidence_id"], "EVD")
+        if has_origins:
+            effective = dict(bases)
+            changed_acs = set()
+            for cap, (entry, desc) in proposed.items():
+                for component in entry["components"]:
+                    base = bases[(cap, component)]
+                    before = {a["id"]: base["files"][a["scenario"]]
+                              for a in base["acceptance"] if component in a["components"]} if base else {}
+                    changed_acs.update(a["id"] for a in desc["acceptance"]
+                                       if component in a["components"]
+                                       and before.get(a["id"]) != desc["files"][a["scenario"]])
+                    effective[(cap, component)] = desc
+            acs = {a["id"] for (_, component), desc in effective.items() if desc
+                   for a in desc["acceptance"] if component in a["components"]}
+            validate_coverage(semantic["origins"], semantic["coverage"], acs, changed_acs, entity=change_id)
+            if not historical:
+                for origin in semantic["origins"]:
+                    if origin["kind"] == "fut":
+                        need(self.store.path(f".roclec/futs/{origin['id']}.json").is_file(), "INVALID_REFERENCE",
+                             "FUT origin does not exist", entity=origin["id"],
+                             remediation="Capture the FUT before importing the change")
+                        self.inspect_fut(origin["id"])
+                for row in semantic["coverage"]["criteria"]:
+                    if row["status"] == "deferred":
+                        need(self.store.path(f".roclec/futs/{row['fut']}.json").is_file(), "INVALID_REFERENCE",
+                             "Deferred criterion cites a FUT that does not exist",
+                             entity=f"{row['origin']}/{row['criterion']}", actual=row["fut"],
+                             remediation="Capture the deferred work as a FUT and cite its ID")
+                        self.inspect_fut(row["fut"])
         registry = self.registry()
         for name, meta in base_ids.items():
             existing = registry["identities"].get(name)
@@ -491,12 +533,39 @@ class Kernel:
         approvals = [d for d in self.decisions(change["id"]) if d["kind"] == "change-approve"]
         return approvals[-1] if approvals else None
 
+    def _origin_approval(self, record):
+        semantic = record["semantic"]
+        need("origins" in semantic and "coverage" in semantic, "ORIGIN_REQUIRED",
+             "Approval requires captured origins and coverage", entity=record["id"],
+             remediation="Add origins and coverage to the proposal and seal it again")
+        for row in semantic["coverage"]["criteria"]:
+            need(row["status"] != "gap", "ORIGIN_GAP", "Resolve the origin criterion before approval",
+                 entity=f"{row['origin']}/{row['criterion']}",
+                 remediation="Answer the question and mark the criterion covered, excluded or deferred")
+        for origin in semantic["origins"]:
+            if origin["kind"] != "fut":
+                continue
+            pointer, visited = origin["id"], set()
+            while pointer.startswith("FUT-"):
+                need(pointer not in visited, "INVALID_ORIGIN", "FUT origin has a duplicate cycle", entity=origin["id"])
+                visited.add(pointer)
+                fut = self.inspect_fut(pointer)
+                need(fut["status"] in {"promoted", "duplicate"}, "INVALID_ORIGIN",
+                     "FUT origin must be promoted or duplicate toward this change", entity=origin["id"],
+                     remediation=f"Promote the FUT to {record['id']} or mark it as a duplicate toward that change")
+                pointer = fut["decisions"][-1]["target"]
+                if fut["status"] == "promoted":
+                    break
+            need(pointer == record["id"], "INVALID_ORIGIN", "FUT origin resolves to another target", entity=origin["id"],
+                 expected=record["id"], actual=pointer, remediation="Use a FUT promoted or duplicate toward this change")
+
     def approve(self, change_id, proposal_digest, actor, reason):
         record, files, new_ids = self.change(change_id, check_base=True)
         self.preserve_integrated(record)
         need(not any(d["kind"] == "change-cancel" for d in self.decisions(change_id)),
              "CHANGE_CANCELED", "Canceled work requires a new change", entity=change_id)
         need(proposal_digest == record["proposal_digest"], "APPROVAL_STALE", "Approval must cite the exact proposal digest")
+        self._origin_approval(record)
         Adrs(self).approvable(record)
         decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest)
         writes = {path: encoded(decision)}
@@ -536,6 +605,7 @@ class Kernel:
             return Releases(self).gate(component, release)
         record, _, _ = self.change(change_id, check_base=True, check_component=component)
         if stage == "approve":
+            self._origin_approval(record)
             Adrs(self).approvable(record)
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
@@ -634,10 +704,14 @@ class Kernel:
             issues.append(exc.issue)
         return {"change": record, "status": status, "components": progress, "approval": approval,
                 "approval_current": valid, "decisions": decisions, "issues": issues,
+                "origins": record["semantic"].get("origins", []),
+                "coverage": record["semantic"].get("coverage", {"criteria": [], "derived": []}),
                 "integrations": {c: r for c, r in integrated.items() if r},
                 "architecture_decisions": Adrs(self).declared(record)}
 
-    def list_records(self, category):
+    def list_records(self, category, *, origin=None):
+        need(origin is None or (category == "changes" and text(origin)), "INVALID_INPUT",
+             "Origin filtering requires a change list and an origin ID", exit_code=2)
         if category == "releases":
             return [{"component": item["record"]["component"], "version": item["record"]["version"],
                      "status": item["status"]} for item in self.releases()]
@@ -646,7 +720,7 @@ class Kernel:
                      for path in sorted(self.store.path(".roclec/changes").glob("*/change.json")))
             return [{"id": item["change"]["id"], "status": item["status"], "components": item["components"],
                      "approval_current": item["approval_current"]}
-                    for item in items]
+                    for item in items if origin is None or any(o["id"] == origin for o in item["origins"])]
         if category == "adrs":
             return Adrs(self).list()
         if category == "futs":
@@ -717,7 +791,9 @@ class Kernel:
         need(outcome in {"evaluating", "promoted", "discarded", "duplicate"}, "INVALID_INPUT", "Unknown FUT outcome", exit_code=2)
         need((outcome in {"promoted", "duplicate"}) == (target is not None), "INVALID_REFERENCE",
              "Only promoted/duplicate require a target")
-        if outcome == "duplicate":
+        if outcome == "duplicate" and target.startswith("CHG-"):
+            self.change(target)
+        elif outcome == "duplicate":
             identifier(target, "FUT")
             visited = {fut_id}
             pointer = target
@@ -726,6 +802,9 @@ class Kernel:
                 visited.add(pointer)
                 other = self.inspect_fut(pointer)
                 pointer = other["decisions"][-1]["target"] if other["status"] == "duplicate" else None
+                if pointer and pointer.startswith("CHG-"):
+                    self.change(pointer)
+                    pointer = None
         elif outcome == "promoted":
             if target.startswith("CHG-"):
                 self.change(target)

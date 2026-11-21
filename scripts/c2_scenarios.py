@@ -265,6 +265,13 @@ def scenarios(workspace, invoke, check):
     expect_status("integrated")
     state = call("I-011 inspect partial progress", "inspect", "--change", "CHG-001")
     check("I-011 actual partial vector", state["status"] == "partially-integrated" and state["components"]["engine"] == "integrated" and state["components"]["viewer"] != "integrated")
+    integrated_revision = state["integrations"]["engine"]["proposal_digest"]
+    snapshot_root = root / ".roclec/changes/CHG-001/revisions" / integrated_revision
+    snapshot_record = json.loads((snapshot_root / "change.json").read_text())
+    origin = snapshot_record["semantic"]["origins"][0]
+    check("FO real integration retains approved source and criterion coverage",
+          (snapshot_root / origin["captured"]).is_file()
+          and snapshot_record["semantic"]["coverage"]["criteria"][0]["acceptance_ids"] == ["AC-001"])
     current = json.loads((root / ".roclec/current.json").read_text())
     check("I-011 only selected component advances", bool(current["components"]["engine"]) and not current["components"]["viewer"])
     before = tree(root)

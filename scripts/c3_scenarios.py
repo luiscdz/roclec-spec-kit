@@ -71,6 +71,10 @@ def scenarios(workspace, invoke, check):
     release = call("I-032 read frozen publication", "inspect", "--release", "v1.0.0", "--component", "engine")
     check("I-031 component publication independent", release["status"] == "published" and not (root / ".roclec/releases/viewer/v1.0.0/publication.json").exists())
     check("I-032 exact shipped candidate frozen", release["publication"]["commit"] == shipped and release["publication"]["evidence"]["preparation"] == preparation)
+    release_member = release["record"]["changes"][0]
+    frozen_source = root / ".roclec/changes/CHG-001/revisions" / release_member["intent_revision"] / "origins/request.md"
+    check("FO published release retains the captured approved origin", frozen_source.read_text(encoding="utf-8")
+          == "Synthetic request: present the agreed result.\n")
     call("I-032 published membership immutable", "release", "plan", "engine", "v1.0.0", "--clear", expect=1, issue="VERSION_INVALID")
     before = tree(root)
     call("C3 publication apply repeats without effects", "operation", "apply", record_plan)

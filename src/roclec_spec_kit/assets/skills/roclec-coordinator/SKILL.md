@@ -48,6 +48,7 @@ Work through requested components in dependency order. Preserve integrated and c
 
 ## Continue until a decision or a real blocker
 
+- Ask the user about ambiguous origins, and present source criterion exclusions and deferrals before approval. The specifier may prepare them but cannot approve them on the user’s behalf.
 - Place ADR drafts returned by a delegated role under the `[adr]` folder and register them with `reference add ADR-NNN ... --role decision` before the bundle that cites them is sealed. Present each proposed ADR to the user with its alternatives and consequences. Only the user accepts one, recorded with `foundation agree --ref ADR-NNN` and the user's real actor; a delegated role never does. Before implementation, `inspect --change` must show every cited ADR as accepted.
 - Reuse existing authorizations. Record explicit decisions with their real actor, scope, digest and provenance as applicable. A draft, a successful gate, a budget or a FUT promotion gives no approval of intent. If intent changes, an approval for an earlier digest cannot authorize its replacement.
 - Handle routine work within scope, including path discovery, JSON authoring, correcting CLI usage, running trusted checks, fixing implementation defects and recovering interrupted writes when native recovery confirms the state. Respect the configured branch boundaries, project Git policy, existing work and permissions. Avoid stashing, discarding or committing unrelated changes. Keep retrying only when the relevant precondition has changed.
