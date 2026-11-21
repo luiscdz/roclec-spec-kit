@@ -135,6 +135,31 @@ class Profile:
         need(component in self.components, "INVALID_REFERENCE", "Unknown component", entity=component)
         return (self.root / self.components[component]["repo"]).resolve()
 
+    def agent_model(self, role: str, host: str) -> str | None:
+        """Model pinned for a role's host binding, or None to inherit the host session's model."""
+        return self.data.get("agents", {}).get(role, {}).get(host)
+
+
+def validate_agents(agents):
+    """Optional ``[agents.<role>]`` tables: one model name per host, passed to the host uninterpreted (D10)."""
+    from .agents import HOSTS, subagent_roles
+    from .model import need, text
+    roles = subagent_roles()
+    need(isinstance(agents, dict), "INVALID_INPUT", "agents must be a table of roles", exit_code=2,
+         remediation="Use [agents.<role>] tables, or remove agents to inherit each host session's model.")
+    for role, hosts in agents.items():
+        need(role in roles, "INVALID_INPUT", "Unknown agent role", exit_code=2, entity=role,
+             expected=list(roles), actual=role,
+             remediation=f"Use one of {', '.join(roles)}; the coordinator runs in the user's session and uses its model.")
+        need(isinstance(hosts, dict), "INVALID_INPUT", "An agent role must be a table of hosts", exit_code=2, entity=role,
+             remediation=f"Write [agents.{role}] with host = \"model\" entries.")
+        for host, model in hosts.items():
+            need(host in HOSTS, "INVALID_INPUT", "Unsupported agent host", exit_code=2, entity=f"{role}.{host}",
+                 expected=list(HOSTS), actual=host, remediation=f"Use one of {', '.join(HOSTS)} under [agents.{role}].")
+            need(text(model) and model == model.strip() and not any(ord(c) < 32 or c in "\"'\\" for c in model),
+                 "INVALID_INPUT", "Agent model must be a single-line name", exit_code=2, entity=f"{role}.{host}",
+                 remediation="Write the host's model name, or remove the entry to inherit the session's model.")
+
 
 def validate_ref(ref, prefix):
     from .model import need, text
@@ -151,8 +176,10 @@ def validate_profile(root: Path, data: dict) -> Profile:
          exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
          remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
     fields(data, ("schema", "name", "components", "trunk_ref"),
-           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns"))
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents"))
     validate_ref(data["trunk_ref"], "refs/heads/")
+    if "agents" in data:
+        validate_agents(data["agents"])
     quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
     excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),
