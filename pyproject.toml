@@ -27,6 +27,7 @@ version = {attr = "roclec_spec_kit.__version__"}
 
 [tool.setuptools.package-data]
 roclec_spec_kit = [
+  "assets/agents/*.md",
   "assets/skills/*/SKILL.md",
   "assets/skills/*/references/*.md",
   "assets/project/*.md",

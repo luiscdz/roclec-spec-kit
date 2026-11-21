@@ -6,10 +6,10 @@ from pathlib import Path
 
 try:
     from .c1_scenarios import tree, bundle, snapshot, digest, put_json
-    from .c2_scenarios import setup, commit, git, prepared_fixture
+    from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture
 except ImportError:
     from c1_scenarios import tree, bundle, snapshot, digest, put_json
-    from c2_scenarios import setup, commit, git, prepared_fixture
+    from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture
 
 
 def scenarios(workspace, invoke, check):
@@ -28,13 +28,13 @@ def scenarios(workspace, invoke, check):
             check(label + ": rejection preserves bytes/modes", before == tree(root), result.stdout)
         return payload.get("data")
 
-    run = call("C3 first component executes change checks", "run", "verify", "CHG-001", "--component", "engine", "--base", base)["run"]
+    run = call("C3 first component executes change checks", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER)["run"]
     commit(root)
     plan = workspace / "c3-integration.json"
     call("C3 first component prepare integration", "integrate", "prepare", "CHG-001", "--component", "engine", "--run", run["id"], "--out", plan)
     call("C3 first component integrate", "operation", "apply", plan)
-    call("I-031 unfinished participant cannot prepare", "run", "verify", "--release", "v1.0.0", "--component", "viewer", "--base", base, expect=1, issue="INVALID_REFERENCE")
-    run = call("I-031 final combined release run", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base)["run"]
+    call("I-031 unfinished participant cannot prepare", "run", "verify", "--release", "v1.0.0", "--component", "viewer", "--base", base, *PRODUCER, expect=1, issue="INVALID_REFERENCE")
+    run = call("I-031 final combined release run", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER)["run"]
     check("Release run is distinct from change scope", run["change_id"] is None and run["release"] == {"component": "engine", "version": "v1.0.0"})
     commit(root)
     call("C3 final release gate", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")
@@ -105,13 +105,13 @@ def combined_and_fix_scenarios(workspace, invoke, check):
         call("Combined release membership", "release", "plan", "engine", "v1.1.0", *members)
         config = root / ".roclec/project.toml"
         config.write_text(config.read_text().replace(f'acceptance_ids=["AC-{number-1:03}"]', f'acceptance_ids=["AC-{number:03}"]'))
-        run = call("Execute evolved change checks", "run", "verify", record["id"], "--component", "engine", "--base", base)["run"]
+        run = call("Execute evolved change checks", "run", "verify", record["id"], "--component", "engine", "--base", base, *PRODUCER)["run"]
         commit(root)
         plan = workspace / f"evolution-integration-{number}.json"
         call("Prepare later integration", "integrate", "prepare", record["id"], "--component", "engine", "--run", run["id"], "--out", plan)
         call("Apply later integration", "operation", "apply", plan)
         previous = target
-    run = call("Combined release verifies final contract", "run", "verify", "--release", "v1.1.0", "--component", "engine", "--base", base)["run"]
+    run = call("Combined release verifies final contract", "run", "verify", "--release", "v1.1.0", "--component", "engine", "--base", base, *PRODUCER)["run"]
     check("Superseded member criteria do not block final release", run["results"][0]["acceptance_ids"] == ["AC-003"]
           and len(run["candidate"]["inputs"]["release"]["contracts"]) == 1)
     commit(root)
@@ -150,12 +150,12 @@ def combined_and_fix_scenarios(workspace, invoke, check):
         call("I-028 define fix provenance", "change", "new", "--file", source / "change.json")
         call("I-028 approve fix provenance", "change", "approve", change_id, "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Restore historical obligation")
         call("I-028 plan historical correction", "release", "plan", "engine", version, "--kind", "bugfix", "--base-tag", "v1.0.0", "--change", change_id)
-        run = call("Execute historical fix checks", "run", "verify", change_id, "--component", "engine", "--base", base)["run"]
+        run = call("Execute historical fix checks", "run", "verify", change_id, "--component", "engine", "--base", base, *PRODUCER)["run"]
         commit(root)
         plan = workspace / f"fix-integration-{number}.json"
         call("Prepare historical fix integration", "integrate", "prepare", change_id, "--component", "engine", "--run", run["id"], "--out", plan)
         call("Integrate historical fix", "operation", "apply", plan)
-        run = call("Verify historical correction release", "run", "verify", "--release", version, "--component", "engine", "--base", base)["run"]
+        run = call("Verify historical correction release", "run", "verify", "--release", version, "--component", "engine", "--base", base, *PRODUCER)["run"]
         commit(root)
         plan = workspace / f"fix-preparation-{number}.json"
         if number in (4, 5, 7):
@@ -196,7 +196,7 @@ def review_scenarios(workspace, invoke, check):
 
     call("Release review fixture integrates", "operation", "apply", integration)
     call("Release adopts member's review policy", "review", "policy", "--change", "CHG-001", "--enabled", "true", "--actor", "fixture user", "--reason", "Review final release")
-    run = call("D3 final release tests execute before review", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base,
+    run = call("D3 final release tests execute before review", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER,
                expect=1, issue="REVIEW_REQUIRED", recorded=True)["run"]
     commit(root)
     out = workspace / "review-preparation.json"
@@ -204,16 +204,21 @@ def review_scenarios(workspace, invoke, check):
     state = call("Inspect aggregate release review policy", "inspect", "--release", "v1.0.0", "--component", "engine")
     policy = state["review_policy"]
     check("Aggregate policy preserves explicit adoption provenance", policy["enabled"] and list(policy["members"]) == ["CHG-001"])
-    for actor, outcome in (("R1", "ready"), ("R2", "changes-needed"), ("R1", "ready"),
-                           ("R2", "incomplete"), ("R2", "ready")):
+    check("M-28 release run records its declared producer", run["producer"] == {"role": "implementer", "context": "synthetic implementer session"})
+    def review(actor, outcome, **changes):
         report = {"model_schema": 2, "kind": "independent-review", "change_id": None,
                   "release": {"component": "engine", "version": "v1.0.0"}, "component": "engine", "run_id": run["id"],
-                  "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"], "actor": actor,
+                  "candidate_digest": run["candidate"]["inputs_digest"], "policy_id": policy["id"], "actor": actor, "role": "reviewer",
                   "context": "Structural fixture; no actual independent human/model acceptance", "outcome": outcome, "acceptance_ids": ["AC-001"],
                   "checks": ["Synthetic observation of the final combined contract"], "limitations": ["No product acceptance"], "findings": []}
         file = workspace / "release-review.json"
-        put_json(file, report)
-        call("Record final release " + outcome + " review", "evidence", "record", "--file", file)
+        put_json(file, {**report, **changes})
+        return file
+    call("M-28 release self-review is rejected without writes", "evidence", "record", "--file",
+         review("R1", "ready", context="SYNTHETIC implementer session"), expect=1, issue="SELF_REVIEW_DECLARED")
+    for actor, outcome in (("R1", "ready"), ("R2", "changes-needed"), ("R1", "ready"),
+                           ("R2", "incomplete"), ("R2", "ready")):
+        call("Record final release " + outcome + " review", "evidence", "record", "--file", review(actor, outcome))
         commit(root)
         if (actor, outcome) != ("R2", "ready") and (actor == "R2" or len(list((root / ".roclec/evidence").glob("*.json"))) > 1):
             call("D3 unfavorable release review blocks preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out, expect=1, issue="REVIEW_REQUIRED")

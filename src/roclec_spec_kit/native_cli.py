@@ -131,6 +131,8 @@ def build_parser():
     verify.add_argument("--release")
     verify.add_argument("--component", required=True)
     verify.add_argument("--base", required=True)
+    verify.add_argument("--role", required=True, help="Declared producer role: implementer, coordinator or human")
+    verify.add_argument("--context", required=True, help="Actual session or tool identity that produced the run")
     evidence = sub.add_parser("evidence")
     record = evidence.add_subparsers(dest="action", required=True).add_parser("record")
     record.add_argument("--file", required=True, type=Path)
@@ -207,7 +209,7 @@ def execute(args):
         verification = Verification(kernel, release={"component": args.component, "version": args.release} if command == "run" and args.release else None)
         if command == "run":
             need((args.id is None) != (args.release is None), "INVALID_INPUT", "Select a change or --release, exclusively", exit_code=2)
-            return verification.run(args.id, args.component, args.base)
+            return verification.run(args.id, args.component, args.base, args.role, args.context)
         if command == "evidence":
             return verification.record_evidence(args.file.resolve())
         return verification.set_policy(args.change, args.enabled == "true", args.actor, args.reason)

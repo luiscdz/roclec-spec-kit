@@ -14,11 +14,11 @@ import subprocess
 
 try:
     from .c1_scenarios import digest, put_json, tree
-    from .c2_scenarios import commit, git, setup
+    from .c2_scenarios import PRODUCER, commit, git, setup
     from .c3_scenarios import combined_and_fix_scenarios
 except ImportError:
     from c1_scenarios import digest, put_json, tree
-    from c2_scenarios import commit, git, setup
+    from c2_scenarios import PRODUCER, commit, git, setup
     from c3_scenarios import combined_and_fix_scenarios
 
 CAP = "CAP-001"
@@ -47,7 +47,7 @@ def planning_fixture(workspace, invoke, *, docs=None):
             (root / relative).write_text(body, encoding="utf-8")
         base = commit(root)
     for component in ("engine", "viewer"):
-        run = cli(invoke, root, "run", "verify", "CHG-001", "--component", component, "--base", base)["data"]["run"]
+        run = cli(invoke, root, "run", "verify", "CHG-001", "--component", component, "--base", base, *PRODUCER)["data"]["run"]
         commit(root)
         plan = workspace / f"integrate-{component}.json"
         cli(invoke, root, "integrate", "prepare", "CHG-001", "--component", component, "--run", run["id"], "--out", plan)
@@ -55,7 +55,7 @@ def planning_fixture(workspace, invoke, *, docs=None):
         commit(root)
     cli(invoke, root, "review", "policy", "--change", "CHG-001", "--enabled", "true", "--actor", "fixture user", "--reason", "Review final release")
     commit(root)
-    final = cli(invoke, root, "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, expect=1)["data"]["run"]
+    final = cli(invoke, root, "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER, expect=1)["data"]["run"]
     commit(root)
     policy = cli(invoke, root, "inspect", "--release", "v1.0.0", "--component", "engine")["data"]["review_policy"]
     reports = []
@@ -66,7 +66,7 @@ def planning_fixture(workspace, invoke, *, docs=None):
                   "context": "Structural fixture; no product acceptance", "outcome": outcome, "acceptance_ids": ["AC-001"],
                   "checks": ["Synthetic observation"], "limitations": ["Fixture only"], "findings": []}
         if kind == "independent-review":
-            report["policy_id"] = policy["id"]
+            report.update(policy_id=policy["id"], role="reviewer")
         file = workspace / f"report-{len(reports)}.json"
         put_json(file, report)
         reports.append(cli(invoke, root, "evidence", "record", "--file", file)["data"]["evidence"]["id"])
@@ -217,6 +217,58 @@ def scenarios(workspace, invoke, check, fetch):
     check("V-015 uncommitted local edits change the fingerprint", state_clean["state_id"] != state_dirty["state_id"])
     check("V-015 uncommitted text is searchable after refresh", any(r.get("path") == "docs/unique.md" for r in get("/api/v1/search?q=okapi")["results"]))
     return root
+
+
+def review_attribution_scenarios(workspace, invoke, check, fetch):
+    """M-28: the viewer counts a review only when the verify gate would (declared role, distinct contexts)."""
+    def engine_review(root, release):
+        query = (f"cap={CAP}&revision={release['contracts'][0]['revision']}&component=engine&release=v1.0.0")
+        status, payload = fetch(root, f"/api/v1/requirements/REQ-001?{query}")
+        check("M-28 requirement read succeeds", status == 200, json.dumps(payload)[:300])
+        return payload["data"]["coverage"]["engine"]["review"]
+
+    def strip(root, relative, key):
+        path = root / relative
+        record = json.loads(path.read_text())
+        record.pop(key)
+        record.pop("digest")
+        record["digest"] = digest(record)
+        put_json(path, record)
+
+    root, base, final, reports = planning_fixture(workspace / "viewer-attribution-self", invoke)
+    status, payload = fetch(root, "/api/v1/releases/engine/v1.0.0")
+    release = payload["data"]
+    # R2 becomes favorable too, so the only open question is whether the reviews count.
+    policy = cli(invoke, root, "inspect", "--release", "v1.0.0", "--component", "engine")["data"]["review_policy"]
+    favorable = {"model_schema": 2, "kind": "independent-review", "change_id": None, "release": {"component": "engine", "version": "v1.0.0"},
+                 "component": "engine", "run_id": final["id"], "candidate_digest": final["candidate"]["inputs_digest"], "actor": "R2",
+                 "context": "Reviewer session B", "outcome": "ready", "acceptance_ids": ["AC-001"], "checks": ["Synthetic observation"],
+                 "limitations": ["Fixture only"], "findings": [], "policy_id": policy["id"], "role": "reviewer"}
+    put_json(workspace / "favorable.json", favorable)
+    cli(invoke, root, "evidence", "record", "--file", workspace / "favorable.json")
+    commit(root)
+    check("M-28 attributed independent reviews still show ready", engine_review(root, release)["state"] == "ready")
+    rerun = cli(invoke, root, "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base,
+                "--role", "implementer", "--context", " REVIEWER session b ", expect=1)
+    check("M-28 gate rejects the declared self-review", rerun["issues"][0]["code"] == "SELF_REVIEW_DECLARED", json.dumps(rerun["issues"]))
+    commit(root)
+    review = engine_review(root, release)
+    by_actor = {r["id"]: r for r in review["reviews"]}
+    check("M-28 a review in the producer's context is not shown as favorable",
+          review["state"] != "ready" and any(r["uncounted"] == "self-review-declared" and r["state"] != "applicable" for r in by_actor.values()),
+          json.dumps(review)[:500])
+
+    root, base, final, reports = planning_fixture(workspace / "viewer-attribution-history", invoke)
+    status, payload = fetch(root, "/api/v1/releases/engine/v1.0.0")
+    release = payload["data"]
+    for name in ("start.json", "manifest.json"):
+        strip(root, f".roclec/runs/{final['id']}/{name}", "producer")
+    strip(root, f".roclec/evidence/{reports[2]}.json", "role")
+    commit(root)
+    review = engine_review(root, release)
+    r1 = next(r for r in review["reviews"] if r["id"] == reports[2])
+    check("M-28 unattributed history is not shown as favorable",
+          review["state"] != "ready" and r1["uncounted"] == "unattributed" and r1["state"] != "applicable", json.dumps(review)[:500])
 
 
 def published_scenarios(workspace, invoke, check, fetch):

@@ -10,10 +10,10 @@ import time
 
 try:
     from .c1_scenarios import digest, file_hash, put_json, tree
-    from .c2_scenarios import commit, git, prepared_fixture, setup
+    from .c2_scenarios import PRODUCER, commit, git, prepared_fixture, setup
 except ImportError:
     from c1_scenarios import digest, file_hash, put_json, tree
-    from c2_scenarios import commit, git, prepared_fixture, setup
+    from c2_scenarios import PRODUCER, commit, git, prepared_fixture, setup
 
 
 INJECTOR = '''
@@ -102,7 +102,7 @@ def capture_scenarios(workspace, invoke, inject, check):
         root, base = setup(workspace / "log-capture", invoke, names=("engine",),
                            check_code="import os\nassert 'ROCLEC_FIXTURE_CAPTURE_SECRET' not in os.environ\nprint('complete')\n")
         prefix = ["--project", str(root), "--json"]
-        run_args = ["run", "verify", "CHG-001", "--component", "engine", "--base", base]
+        run_args = ["run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER]
         def run_command(runner=invoke):
             result = runner([*prefix, *run_args])
             return result, json.loads(result.stdout)["data"]["run"]
@@ -253,15 +253,15 @@ def scenarios(workspace, invoke, inject, check):
         check("I-026 " + stage + ": recovered result is integrated", result.returncode == 0 and json.loads(result.stdout)["data"]["status"] == "integrated", result.stdout)
     root, base = setup(workspace / "run-interruption", invoke, names=("engine",))
     prefix = ["--project", str(root), "--json"]
-    result = inject(INTERRUPTOR, [*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = inject(INTERRUPTOR, [*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     payload = json.loads(result.stdout)
     check("I-015 interrupted process records an interrupted run", result.returncode == 130 and payload["data"]["recorded"]
           and payload["data"]["run"]["status"] == "interrupted", result.stdout + result.stderr)
     result = invoke([*prefix, "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify"])
     check("I-015 interrupted run cannot satisfy verify", result.returncode == 1, result.stdout)
-    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     check("I-015 retry allocates another successful run", result.returncode == 0, result.stdout)
-    result = inject(ABRUPT, [*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = inject(ABRUPT, [*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     check("I-015 abrupt termination preserves a durable start", result.returncode == 130
           and len(list((root / ".roclec/runs").glob("RUN-*/start.json"))) == 3, result.stdout + result.stderr)
     before = tree(root)

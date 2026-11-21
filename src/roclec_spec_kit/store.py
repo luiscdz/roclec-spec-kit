@@ -13,6 +13,13 @@ import tomllib
 
 from .model import ModelError, digest, encoded, fingerprint, local_path, need, read_json, sha
 
+# Operations whose journal may contain a forward deletion (a `None` write).
+DELETING = frozenset({"skills-install"})
+
+
+def _hash(content):
+    return None if content is None else sha(content)
+
 
 class Store:
     def __init__(self, root: Path):
@@ -113,6 +120,28 @@ class Store:
             if os.path.exists(temporary):
                 os.unlink(temporary)
 
+    def _remove(self, relative):
+        """Delete one journaled file, then any directory it leaves empty below a namespace root."""
+        path = self.path(relative)
+        directory = path.parent
+        if path.exists():
+            path.unlink()
+            descriptor = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        # A retired skill folder should not linger empty; namespace roots such
+        # as `.agents/skills` (two components) and the project root are kept.
+        # Recovery may re-enter after part of this cleanup already happened.
+        while len(directory.relative_to(self.root).parts) > 2:
+            if directory.is_dir() and not directory.is_symlink():
+                try:
+                    directory.rmdir()
+                except OSError:
+                    break
+            directory = directory.parent
+
     def _allowed(self, kind, payload, paths):
         roots = {
             "init": (".roclec/project.toml", ".roclec/current.json", ".roclec/references.json", ".roclec/identities.json", ".gitignore"),
@@ -134,11 +163,13 @@ class Store:
             "integrate": (".roclec/contracts/", ".roclec/current.json", ".roclec/integrations/"),
             "release-prepare": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/preparations/",),
             "release-record": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/publication.json",),
-            "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".codex/", ".specify/",
+            "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".claude/agents/", ".codex/", ".specify/",
                                "AGENTS.md", "CLAUDE.md", ".gitignore", ".roclec/workflow.md", ".roclec/model.md", ".roclec/run", ".roclec/templates/",
                                ".roclec/constitution.md", ".roclec/notices/", ".roclec/link.toml", ".roclec/installation.json"),
         }
         need(kind in roots and bool(paths), "OPERATION_CONFLICT", "Unsupported write operation", exit_code=3)
+        need(kind in DELETING or None not in paths.values(), "OPERATION_CONFLICT",
+             "This operation cannot delete files", exit_code=3)
         for relative in paths:
             path = self.path(relative)
             need(not path.exists() or path.is_file(), "UNMANAGED_FILE", "Write target is not a file", path=relative)
@@ -199,10 +230,11 @@ class Store:
                 pass
             raise ModelError("OPERATION_CONFLICT", "The lock owner may still be running", exit_code=3, entity=owner["pid"])
 
-    def apply(self, kind, payload, writes: dict[str, bytes], expected_token: str, *, validate=None, plan=None):
+    def apply(self, kind, payload, writes: dict[str, bytes | None], expected_token: str, *, validate=None, plan=None):
+        """Journal then apply writes; `None` deletes the path (only for DELETING kinds)."""
         self.guard_branch(kind, payload.get("profile") if kind == "init" else None)
         self._allowed(kind, payload, writes)
-        operation_id = digest({"kind": kind, "payload": payload, "writes": {p: sha(b) for p, b in sorted(writes.items())}})
+        operation_id = digest({"kind": kind, "payload": payload, "writes": {p: _hash(b) for p, b in sorted(writes.items())}})
         if plan is not None:
             operation_id = plan["operation_id"]
             need(operation_id == digest({k: v for k, v in plan.items() if k != "operation_id"}),
@@ -214,8 +246,7 @@ class Store:
             self.healthy(locked=True)
             if self.path(receipt_path).is_file():
                 receipt = read_json(self.path(receipt_path))
-                need(all(self.path(p).is_file() and sha(self.path(p).read_bytes()) == h
-                         for p, h in receipt["writes"].items()), "OPERATION_CONFLICT",
+                need(all(self._current_hash(p) == h for p, h in receipt["writes"].items()), "OPERATION_CONFLICT",
                      "Operation was applied, but later edits diverged; refusing to replay", exit_code=3)
                 return receipt
             need(self.token() == expected_token, "BASE_CONFLICT", "Project inputs changed during validation", exit_code=3)
@@ -226,7 +257,7 @@ class Store:
             guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
             journal = {"model_schema": 2, "operation_id": operation_id, "kind": kind, "payload": payload,
                        "before": before, "guard": guard,
-                       "writes": {p: base64.b64encode(b).decode("ascii") for p, b in writes.items()}}
+                       "writes": {p: None if b is None else base64.b64encode(b).decode("ascii") for p, b in writes.items()}}
             if plan is not None:
                 journal["plan"] = plan
             if kind == "integrate":
@@ -241,22 +272,22 @@ class Store:
         need(journal.get("journal_digest") == digest({k: v for k, v in journal.items() if k != "journal_digest"}),
              "OPERATION_CONFLICT", "Journal digest mismatch", exit_code=3)
         operation_id = journal["operation_id"]
-        writes = {p: base64.b64decode(b, validate=True) for p, b in journal["writes"].items()}
+        writes = {p: None if b is None else base64.b64decode(b, validate=True) for p, b in journal["writes"].items()}
         self._allowed(journal["kind"], journal["payload"], writes)
         expected_id = digest({"kind": journal["kind"], "payload": journal["payload"],
-                              "writes": {p: sha(b) for p, b in sorted(writes.items())}})
+                              "writes": {p: _hash(b) for p, b in sorted(writes.items())}})
         if "plan" in journal:
             plan = journal["plan"]
             expected_id = digest({k: v for k, v in plan.items() if k != "operation_id"})
             need(plan["operation_id"] == expected_id and plan["kind"] == journal["kind"]
-                 and plan["writes"] == {p: sha(b) for p, b in writes.items()},
+                 and plan["writes"] == {p: _hash(b) for p, b in writes.items()},
                  "OPERATION_CONFLICT", "Journal differs from its prepared plan", exit_code=3)
         need(expected_id == operation_id and journal["before"].keys() == writes.keys(),
              "OPERATION_CONFLICT", "Journal integrity mismatch", exit_code=3)
         receipt_path = f".roclec/receipts/{operation_id}.json"
         journal_path = f".roclec/runtime/{operation_id}.json"
         receipt = {"model_schema": 2, "operation_id": operation_id, "kind": journal["kind"],
-                   "payload": journal["payload"], "writes": {p: sha(b) for p, b in writes.items()}}
+                   "payload": journal["payload"], "writes": {p: _hash(b) for p, b in writes.items()}}
         if self.path(receipt_path).is_file():
             need(read_json(self.path(receipt_path)) == receipt and all(self._current_hash(p) == h for p, h in receipt["writes"].items()),
                  "OPERATION_CONFLICT", "Confirmed operation diverged from its receipt", exit_code=3)
@@ -297,11 +328,14 @@ class Store:
         for relative, content in writes.items():
             path = self.path(relative)
             current = sha(path.read_bytes()) if path.exists() else None
-            need(current in (journal["before"][relative], sha(content)), "OPERATION_CONFLICT",
+            need(current in (journal["before"][relative], _hash(content)), "OPERATION_CONFLICT",
                  "A journal destination diverged; manual resolution required", exit_code=3, path=relative)
         try:
             for relative, content in writes.items():
                 path = self.path(relative)
+                if content is None:
+                    self._remove(relative)
+                    continue
                 if not path.exists() or sha(path.read_bytes()) != sha(content):
                     self._atomic(relative, content)
                 if journal["kind"] == "skills-install" and relative == ".roclec/run":
@@ -340,7 +374,7 @@ class Store:
         conflicts = {}
         for relative, content in writes.items():
             current = self._current_hash(relative)
-            expected = [journal["before"][relative], sha(content)]
+            expected = [journal["before"][relative], _hash(content)]
             if current not in expected:
                 conflicts[relative] = {"expected": expected, "actual": current}
         need(not conflicts, "OPERATION_CONFLICT", "Restore divergent files to an expected state before retrying rollback",

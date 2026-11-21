@@ -8,3 +8,9 @@ user_facing = false
 inputs = ["src/**", "tests/**"]
 generated = ["build/**"]
 verification = [{id="unit", argv=["python3", "-m", "unittest"], cwd=".", timeout_seconds=30}]
+
+# Optional: pin the model of a Roclec role per host. Without it, each role
+# inherits the model of the host session. Roles: specifier, implementer, reviewer.
+# [agents.implementer]
+# claude = "host-model-name"
+# codex = "host-model-name"

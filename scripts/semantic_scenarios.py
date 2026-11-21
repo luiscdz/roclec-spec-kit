@@ -23,6 +23,8 @@ except ImportError:
     from c1_scenarios import bundle, digest, put_json, seed_foundation, tree
 
 CATALOG = Path(__file__).with_name("semantic_cases.json")
+# Fixture preparation declares its own producer; it never executes an agent.
+PRODUCER = ("--role", "human", "--context", "semantic fixture preparation")
 
 
 def sha(content):
@@ -232,7 +234,7 @@ class Fixture:
 
     def run(self, change_id="CHG-001", *, component="engine", release=None, expected=0):
         target = ["--release", release] if release else [change_id]
-        return self.call("run", "verify", *target, "--component", component, "--base", self.base, expected=expected)["data"]["run"]
+        return self.call("run", "verify", *target, "--component", component, "--base", self.base, *PRODUCER, expected=expected)["data"]["run"]
 
     def integrate(self, change_id="CHG-001", *, component="engine"):
         run = self.run(change_id, component=component)

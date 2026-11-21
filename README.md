@@ -57,6 +57,18 @@ Python 3.11 or later and Git. The native CLI uses **profile 3 and model schema 2
 | Implement, review, and integrate | `roclec-implement`, `roclec-reviewer`, `roclec-converge` |
 | Plan and prepare releases | `roclec-release` |
 
+#### Agent roles installed by Roclec
+
+`roclec skills` also installs three subagent roles for Claude Code (`.claude/agents/`) and Codex (`.codex/agents/`). They are generated from host- and model-neutral contracts. The coordinator runs in your own session and delegates bounded stages to them.
+
+| Role | Skills it loads | Returns |
+| --- | --- | --- |
+| `roclec-specifier` | `roclec-specify`, `roclec-clarify`, `roclec-analyze`, `roclec-checklist` | A sealed change bundle and open questions; never approves |
+| `roclec-implementer` | `roclec-plan`, `roclec-tasks`, `roclec-implement` | A candidate and a verification run for one component |
+| `roclec-reviewer` | `roclec-reviewer` | Review evidence from a context separate from the implementation |
+
+Each role inherits the session's model unless the profile pins one per host with `[agents.<role>]`. Codex loads project roles only in a trusted project. Your own roles in those folders are left untouched. [Roles, files and model pinning (Spanish)](docs/c3.md#roles-de-agente)
+
 #### Optional external design skills
 
 Roclec ships a suggested lockfile for projects with a UI. Profile 3 restores the entries from the consumer's own `skills-lock.json`. If your project has no lockfile and you want the suggested set, review the file and save a copy as `skills-lock.json` in the consumer root. Keep your existing lockfile if you already manage these dependencies. [Suggested design lockfile](src/roclec_spec_kit/assets/profiles/design-skills-lock.json)
@@ -90,7 +102,7 @@ In a later chat, use the change ID or a clear description to resume.
 
 > Roclec, resume the date filter change and take it through integration.
 
-The installed project instructions route the request to `roclec-coordinator`. It finds or drafts the change, selects the relevant skills and runs the CLI steps itself. It handles planning, implementation, verification and integration within the requested scope and the project's Git policy. It asks when a decision or evidence is missing, such as approval of a specific proposal or an unresolved release assignment. Once you respond, it continues from the recorded state. To see progress only, ask “What is the status of this change?”.
+The installed project instructions route the request to `roclec-coordinator`. It finds or drafts the change, selects the relevant skills and runs the CLI steps itself, delegating larger specification, implementation and review stages to the installed roles when the host supports subagents. It handles planning, implementation, verification and integration within the requested scope and the project's Git policy. It asks when a decision or evidence is missing, such as approval of a specific proposal or an unresolved release assignment. Once you respond, it continues from the recorded state. To see progress only, ask “What is the status of this change?”.
 
 Use this flow in trusted repositories. Verification runs commands defined in the profile. Full local logs can contain secrets, and optional committed excerpts redact configured values and patterns. [Verification and logs (Spanish)](docs/c2.md)
 
@@ -107,7 +119,8 @@ For direct CLI use, see [definition and queries](docs/c1.md), [verification and 
 - Input-based candidates, path classification, direct command execution, bounded local logs, and explicit coverage by acceptance criterion. Manual or external observations and optional independent review support per-component verification gates. When review is required, a passing run must be accompanied by a current favorable report.
 - Per-component integration with a clean final candidate, reconstructed plans, idempotent receipts, and recovery.
 - Release verification against the final combined contract, immutable release preparation, and inclusion checks for fixes and backports. Git publication records verify local and remote commits and tags, including annotated tags. Tag creation, pushing, and deployment are separate operations.
-- Install or refresh native skills and optional spec-kit aliases for Codex and Claude while preserving project-owned templates and principles.
+- Install or refresh native skills, agent roles and optional spec-kit aliases for Codex and Claude while preserving project-owned templates, principles and roles. A refresh removes files Roclec no longer ships and refuses to overwrite managed files you edited.
+- Runs record the role and context that produced them, and the review gate rejects a review that declares the same context as the run it reviews.
 - Optional local viewer: `pip install 'roclec-spec-kit[viewer]'` then `roclec view` opens a read-only browser view of releases, changes, requirements, evidence and project Markdown. The gate shown matches `check --gate release`. [Viewer guide (Spanish)](docs/visor.md)
 
 ### Validate the package
@@ -180,6 +193,18 @@ Python 3.11 o posterior y Git. La CLI nativa usa **perfil 3 y esquema de modelo 
 | Implementar, revisar e integrar | `roclec-implement`, `roclec-reviewer`, `roclec-converge` |
 | Planificar y preparar releases | `roclec-release` |
 
+#### Roles de agente que instala Roclec
+
+`roclec skills` también instala tres roles de subagente para Claude Code (`.claude/agents/`) y Codex (`.codex/agents/`). Se generan desde contratos que no nombran proveedores ni modelos. El coordinador corre en tu propia sesión y les delega etapas acotadas.
+
+| Rol | Skills que carga | Entrega |
+| --- | --- | --- |
+| `roclec-specifier` | `roclec-specify`, `roclec-clarify`, `roclec-analyze`, `roclec-checklist` | Un bundle de cambio sellado y preguntas abiertas; nunca aprueba |
+| `roclec-implementer` | `roclec-plan`, `roclec-tasks`, `roclec-implement` | Un candidato y un run de verificación para un componente |
+| `roclec-reviewer` | `roclec-reviewer` | Evidencia de revisión desde un contexto distinto del de la implementación |
+
+Cada rol hereda el modelo de la sesión, salvo que el perfil fije uno por host con `[agents.<rol>]`. Codex solo carga los roles del proyecto si el proyecto es de confianza. Tus propios roles en esas carpetas no se tocan. [Roles, archivos y modelo por rol](docs/c3.md#roles-de-agente)
+
 #### Skills externas de diseño opcionales
 
 Roclec incluye un lockfile sugerido para proyectos con interfaz. El perfil 3 restaura las entradas del `skills-lock.json` del consumidor. Si tu proyecto todavía no tiene uno y quieres usar el conjunto sugerido, revisa el archivo y guarda una copia como `skills-lock.json` en su raíz. Conserva tu lockfile si ya administras esas dependencias. [Lockfile de diseño sugerido](src/roclec_spec_kit/assets/profiles/design-skills-lock.json)
@@ -213,7 +238,7 @@ En otro chat, retoma con el ID del cambio o una descripción clara.
 
 > Roclec, retoma el cambio del filtro por fecha y llévalo hasta la integración.
 
-Las instrucciones instaladas dirigen la solicitud a `roclec-coordinator`. El coordinador encuentra o prepara el cambio, elige las skills pertinentes y ejecuta los comandos. Se ocupa de la planificación, la implementación, la verificación y la integración dentro del alcance solicitado y la política Git del proyecto. Pregunta cuando falta una decisión o evidencia, como la aprobación de una propuesta concreta o la elección de una release que aún no está definida. Con tu respuesta, continúa desde el estado registrado. Para consultar el avance, pide «¿En qué estado está este cambio?».
+Las instrucciones instaladas dirigen la solicitud a `roclec-coordinator`. El coordinador encuentra o prepara el cambio, elige las skills pertinentes y ejecuta los comandos; cuando el host admite subagentes, delega en los roles instalados las etapas mayores de especificación, implementación y revisión. Se ocupa de la planificación, la implementación, la verificación y la integración dentro del alcance solicitado y la política Git del proyecto. Pregunta cuando falta una decisión o evidencia, como la aprobación de una propuesta concreta o la elección de una release que aún no está definida. Con tu respuesta, continúa desde el estado registrado. Para consultar el avance, pide «¿En qué estado está este cambio?».
 
 Usa este flujo en repositorios de confianza. La verificación ejecuta comandos del perfil. Los logs locales completos pueden contener secretos y los extractos versionados optativos ocultan los valores y patrones configurados. [Verificación y logs](docs/c2.md)
 
@@ -230,7 +255,8 @@ Para usar la CLI directamente, consulta las guías de [definición y consulta](d
 - Candidatos por entradas, clasificación de rutas, ejecución directa de comandos, logs locales acotados y cobertura explícita por criterio de aceptación. Observaciones manuales o externas y revisión independiente opcional para los controles de verificación por componente. Cuando se exige revisión, un run favorable debe ir acompañado de un informe favorable vigente.
 - Integración por componente con candidato final limpio, planes reconstruidos, recibos idempotentes y recuperación.
 - Verificación de release contra el contrato final del conjunto, preparación inmutable y comprobación de inclusión de fixes y backports. El registro de publicación Git verifica commits y tags locales y remotos, incluidos los tags anotados. La creación de tags, el push y el despliegue son operaciones separadas.
-- Instalación y actualización de skills nativas y aliases opcionales de spec-kit para Codex y Claude, preservando plantillas y principios del consumidor.
+- Instalación y actualización de skills nativas, roles de agente y aliases opcionales de spec-kit para Codex y Claude, preservando plantillas, principios y roles del consumidor. Una actualización borra los archivos que Roclec ya no distribuye y se niega a sobrescribir archivos administrados que editaste.
+- Los runs registran el rol y el contexto que los produjeron, y el gate de revisión rechaza una revisión que declara el mismo contexto que el run revisado.
 - Visor local opcional: `pip install 'roclec-spec-kit[viewer]'` y luego `roclec view` abre una vista de solo lectura de releases, cambios, requisitos, evidencia y Markdown del proyecto. El gate que muestra coincide con `check --gate release`. [Guía del visor](docs/visor.md)
 
 ### Validar el paquete

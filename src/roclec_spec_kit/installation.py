@@ -11,11 +11,73 @@ import shutil
 import tempfile
 
 from . import __version__
-from .model import ModelError, encoded, need, sha
+from .agents import bindings, is_binding_path
+from .model import ModelError, digest, encoded, need, read_json, sha
 from .store import Store
 
 MARKER = "<!-- managed by roclec-spec-kit -->"
 START, END = "<!-- roclec-spec-kit:begin -->", "<!-- roclec-spec-kit:end -->"
+MANIFEST = ".roclec/installation.json"
+NATIVE_FILES = (".roclec/workflow.md", ".roclec/model.md", ".roclec/run")
+EDITED_REMEDIATION = ("Restore each listed file (for example `git checkout -- PATH`) or delete it to accept the refreshed "
+                      "version, then retry; move consumer content into a consumer-owned file.")
+
+
+def _native(relative):
+    """Paths that only Roclec's own installer writes and may compare by hash or prune.
+
+    Seeded templates/constitution, root instruction blocks, `.gitignore`, links,
+    notices and every adapter output (`.specify/`, `speckit-*` skills, commands)
+    are deliberately excluded, whatever an installation manifest claims. Role
+    bindings match only `roclec-<one lowercase word>` directly in a host's
+    `agents/` folder, so hyphenated or other consumer role files never do.
+    """
+    return relative in NATIVE_FILES or is_binding_path(relative) or any(
+        relative.startswith(f"{host}/skills/roclec-") and relative.count("/") >= 3 for host in (".agents", ".claude"))
+
+
+def _previous(store):
+    """Return (recorded native hashes, generation) from the previous manifest.
+
+    Empty hashes mean a first install. Manifests without the optional `managed`
+    list (earlier versions) are read through the same native-path rule; a
+    missing or invalid manifest falls back to the marker rule and prunes nothing.
+    """
+    path = store.path(MANIFEST)
+    if not path.is_file():
+        return {}, None
+    try:
+        data = read_json(path)
+    except ModelError:
+        return {}, None
+    if not isinstance(data, dict):
+        return {}, None
+    generation = data.get("generation") if isinstance(data.get("generation"), str) else None
+    files = data.get("files")
+    managed = data.get("managed", list(files) if isinstance(files, dict) else None)
+    if not isinstance(files, dict) or not isinstance(managed, list):
+        return {}, generation
+    return {p: files[p] for p in managed
+            if isinstance(p, str) and _native(p) and isinstance(files.get(p), str)}, generation
+
+
+def _generation(store, token):
+    """Distinguish an effective refresh from every confirmed one.
+
+    A deterministic refresh that restores a deleted or edited file would
+    otherwise reuse the operation id of the refresh that first wrote those
+    bytes, and the store refuses to replay a receipt whose files diverged.
+    Every existing receipt was prepared before it existed, so a digest over
+    the current receipt names cannot match any of them.
+    """
+    receipts = store.path(".roclec/receipts")
+    names = sorted(p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []
+    return digest({"inputs": token, "receipts": names})
+
+
+def _current(store, relative):
+    path = store.path(relative)
+    return path.read_bytes() if path.is_file() else None
 
 
 def install(kernel, *, into=None, restore=False, adapter=False):
@@ -32,12 +94,22 @@ def install(kernel, *, into=None, restore=False, adapter=False):
         read_lock(destination)
     assets = files("roclec_spec_kit").joinpath("assets")
     writes = {}
+    previous, generation = _previous(store)
+    managed, edited = set(), []
+    observed = {}  # Bytes each owned or retired path held when it was judged.
 
     def owned(relative, content):
         path = store.path(relative)
-        need(not path.exists() or MARKER.encode() in path.read_bytes() or b"managed by roclec-spec-kit" in path.read_bytes(),
+        current = path.read_bytes() if path.exists() else None
+        observed[relative] = current
+        need(current is None or MARKER.encode("utf-8") in current or b"managed by roclec-spec-kit" in current,
              "UNMANAGED_FILE", "Installation would overwrite consumer-owned instructions", path=relative)
+        # A recorded hash proves which bytes Roclec wrote; anything else, unless
+        # it already equals the refreshed bytes, is a consumer edit to keep.
+        if current is not None and relative in previous and sha(current) not in (previous[relative], sha(content)):
+            edited.append(relative)
         writes[relative] = content
+        managed.add(relative)
 
     for skill in assets.joinpath("skills").iterdir():
         if not skill.is_dir():
@@ -50,10 +122,13 @@ def install(kernel, *, into=None, restore=False, adapter=False):
                     for host in (".agents", ".claude"):
                         owned(f"{host}/skills/{prefix}/{item.name}", item.read_bytes())
         visit(skill, skill.name)
-    block = START + "\n" + assets.joinpath("project/agent-instructions.md").read_text().strip() + "\n" + END
+    # Subagent role bindings for both hosts, with the project's pinned models.
+    for relative, content in bindings(profile).items():
+        owned(relative, content)
+    block = START + "\n" + assets.joinpath("project/agent-instructions.md").read_text(encoding="utf-8").strip() + "\n" + END
     for name in ("AGENTS.md", "CLAUDE.md"):
         path = store.path(name)
-        body = path.read_text() if path.exists() else ""
+        body = path.read_text(encoding="utf-8") if path.exists() else ""
         need(body.count(START) == body.count(END) and body.count(START) <= 1, "UNMANAGED_FILE", "Malformed managed instruction block", path=name)
         if START in body:
             before, rest = body.split(START, 1)
@@ -61,7 +136,7 @@ def install(kernel, *, into=None, restore=False, adapter=False):
             content = before + block + after
         else:
             content = body + ("\n\n" if body else "") + block + "\n"
-        writes[name] = content.encode()
+        writes[name] = content.encode("utf-8")
     owned(".roclec/workflow.md", assets.joinpath("project/workflow.md").read_bytes())
     owned(".roclec/model.md", assets.joinpath("project/model.md").read_bytes())
     relative = os.path.relpath(profile.root, destination)
@@ -73,10 +148,10 @@ def install(kernel, *, into=None, restore=False, adapter=False):
               'elif [ -x "$repo_root/.venv/bin/roclec" ]; then cli="$repo_root/.venv/bin/roclec"; '
               'else cli=$(command -v roclec) || { echo "Install roclec-spec-kit in the project .venv" >&2; exit 127; }; fi\n'
               'exec "$cli" --project "$project_root" "$@"\n')
-    owned(".roclec/run", runner.encode())
+    owned(".roclec/run", runner.encode("utf-8"))
     if destination != profile.root:
         link = store.path(".roclec/link.toml")
-        content = f"schema = 1\nproject_root = {json.dumps(relative)}\n".encode()
+        content = f"schema = 1\nproject_root = {json.dumps(relative)}\n".encode("utf-8")
         need(not link.exists() or link.read_bytes() == content, "UNMANAGED_FILE", "Linked repo already belongs to another project")
         writes[".roclec/link.toml"] = content
     else:
@@ -95,6 +170,21 @@ def install(kernel, *, into=None, restore=False, adapter=False):
     ignored = ignore.read_bytes() if ignore.exists() else b""
     if b".roclec/runtime/" not in ignored.splitlines():
         writes[".gitignore"] = ignored + (b"\n" if ignored and not ignored.endswith(b"\n") else b"") + b".roclec/runtime/\n"
+    # Retired native files: delete only bytes Roclec recorded; reject edits.
+    retired = []
+    for relative in sorted(set(previous) - managed):
+        path = store.path(relative)
+        if not path.exists():
+            continue
+        # Read once: the judged bytes are both hashed and rechecked under the lock.
+        current = path.read_bytes() if path.is_file() else None
+        if current is not None and sha(current) == previous[relative]:
+            retired.append(relative)
+            observed[relative] = current
+        else:
+            edited.append(relative)
+    need(not edited, "MANAGED_FILE_EDITED", "Refresh would overwrite or delete edited Roclec-managed files",
+         path=sorted(edited)[0] if edited else None, actual=sorted(edited), remediation=EDITED_REMEDIATION)
     if adapter:
         need(destination == profile.root, "INVALID_INPUT", "Install aliases in the project root", exit_code=2)
         need(store.path(".specify").is_dir(), "INVALID_REFERENCE", "Initialize the desired spec-kit integration before installing Roclec aliases")
@@ -121,13 +211,28 @@ def install(kernel, *, into=None, restore=False, adapter=False):
             for p in stage.rglob("*"):
                 if p.is_file():
                     name = p.relative_to(stage).as_posix()
-                    content = p.read_bytes().replace(str(stage).encode(), str(destination).encode())
+                    content = p.read_bytes().replace(str(stage).encode("utf-8"), str(destination).encode("utf-8"))
                     if content != initial.get(name):
                         writes[name] = content
+    for relative in retired:
+        # Store journals None as a recoverable deletion within this namespace.
+        writes.setdefault(relative, None)
     manifest = {"model_schema": 2, "version": __version__, "adapter": adapter,
-                "files": {p: sha(b) for p, b in writes.items()}}
-    writes[".roclec/installation.json"] = encoded(manifest)
-    receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token)
+                "files": {p: sha(b) for p, b in writes.items() if b is not None},
+                "managed": sorted(managed)}
+    # A refresh that changes nothing keeps the previous generation, so its
+    # operation id matches the confirmed one and replays idempotently.
+    content = encoded({**manifest, "generation": generation} if generation else manifest)
+    if retired or content != _current(store, MANIFEST) or any(_current(store, p) != b for p, b in writes.items()):
+        content = encoded({**manifest, "generation": _generation(store, token)})
+    writes[MANIFEST] = content
+    def unchanged():
+        # The store token does not hash `.claude/agents/`; recheck under the
+        # lock that no judged file changed before anything is journaled.
+        need(all(_current(store, p) == b for p, b in observed.items()), "BASE_CONFLICT",
+             "Project inputs changed during validation", exit_code=3)
+
+    receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token, validate=unchanged)
     # Executability is installed as part of the journal's mode metadata.
     if restore:
         from .external_skills import SkillLockError, restore_verified_external_skills
