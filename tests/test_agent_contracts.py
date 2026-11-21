@@ -70,6 +70,31 @@ class AgentContractTests(unittest.TestCase):
                     self.assertFalse([p for p in paragraphs if p in body])
 
 
+class CoordinatorDelegationTests(unittest.TestCase):
+    """roclec-coordinator and the managed block delegate to the installed roles (TR.4)."""
+
+    def setUp(self):
+        self.skill = ASSETS.joinpath("skills/roclec-coordinator/SKILL.md").read_text(encoding="utf-8")
+        self.block = ASSETS.joinpath("project/agent-instructions.md").read_text(encoding="utf-8")
+
+    def test_single_agent_rule_is_gone(self):
+        self.assertNotIn("A separate agent is unnecessary", self.skill)
+
+    def test_delegation_table_matches_contracts(self):
+        for role in subagent_roles():
+            meta = contract(role)[0]
+            row = next(line for line in self.skill.splitlines() if line.startswith(f"| `roclec-{role}` |"))
+            stages = row.split("|")[2]
+            with self.subTest(role=role):
+                self.assertEqual(re.findall(r"`(roclec-[a-z-]+)`", stages), meta["skills"])
+                self.assertIn(f"roclec-{role}", self.block)
+
+    def test_proportionality_and_degradation_are_written(self):
+        for heading in ("**Proportionality.**", "**Degradation.**", "**Brief.**"):
+            self.assertIn(heading, self.skill)
+        self.assertIn("never present a self-review as independent", self.skill)
+
+
 class AgentProfileTests(unittest.TestCase):
     """Optional [agents.<role>] host models in profile 3 (D10, TR.7)."""
 
