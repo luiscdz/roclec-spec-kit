@@ -11,6 +11,7 @@ import shutil
 import tempfile
 
 from . import __version__
+from .agents import bindings, is_binding_path
 from .model import ModelError, digest, encoded, need, read_json, sha
 from .store import Store
 
@@ -27,9 +28,11 @@ def _native(relative):
 
     Seeded templates/constitution, root instruction blocks, `.gitignore`, links,
     notices and every adapter output (`.specify/`, `speckit-*` skills, commands)
-    are deliberately excluded, whatever an installation manifest claims.
+    are deliberately excluded, whatever an installation manifest claims. Role
+    bindings match only `roclec-<one lowercase word>` directly in a host's
+    `agents/` folder, so hyphenated or other consumer role files never do.
     """
-    return relative in NATIVE_FILES or any(
+    return relative in NATIVE_FILES or is_binding_path(relative) or any(
         relative.startswith(f"{host}/skills/roclec-") and relative.count("/") >= 3 for host in (".agents", ".claude"))
 
 
@@ -93,10 +96,12 @@ def install(kernel, *, into=None, restore=False, adapter=False):
     writes = {}
     previous, generation = _previous(store)
     managed, edited = set(), []
+    observed = {}  # Bytes each owned or retired path held when it was judged.
 
     def owned(relative, content):
         path = store.path(relative)
         current = path.read_bytes() if path.exists() else None
+        observed[relative] = current
         need(current is None or MARKER.encode("utf-8") in current or b"managed by roclec-spec-kit" in current,
              "UNMANAGED_FILE", "Installation would overwrite consumer-owned instructions", path=relative)
         # A recorded hash proves which bytes Roclec wrote; anything else, unless
@@ -117,6 +122,9 @@ def install(kernel, *, into=None, restore=False, adapter=False):
                     for host in (".agents", ".claude"):
                         owned(f"{host}/skills/{prefix}/{item.name}", item.read_bytes())
         visit(skill, skill.name)
+    # Subagent role bindings for both hosts, with the project's pinned models.
+    for relative, content in bindings(profile).items():
+        owned(relative, content)
     block = START + "\n" + assets.joinpath("project/agent-instructions.md").read_text(encoding="utf-8").strip() + "\n" + END
     for name in ("AGENTS.md", "CLAUDE.md"):
         path = store.path(name)
@@ -168,8 +176,11 @@ def install(kernel, *, into=None, restore=False, adapter=False):
         path = store.path(relative)
         if not path.exists():
             continue
-        if path.is_file() and sha(path.read_bytes()) == previous[relative]:
+        # Read once: the judged bytes are both hashed and rechecked under the lock.
+        current = path.read_bytes() if path.is_file() else None
+        if current is not None and sha(current) == previous[relative]:
             retired.append(relative)
+            observed[relative] = current
         else:
             edited.append(relative)
     need(not edited, "MANAGED_FILE_EDITED", "Refresh would overwrite or delete edited Roclec-managed files",
@@ -215,7 +226,13 @@ def install(kernel, *, into=None, restore=False, adapter=False):
     if retired or content != _current(store, MANIFEST) or any(_current(store, p) != b for p, b in writes.items()):
         content = encoded({**manifest, "generation": _generation(store, token)})
     writes[MANIFEST] = content
-    receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token)
+    def unchanged():
+        # The store token does not hash `.claude/agents/`; recheck under the
+        # lock that no judged file changed before anything is journaled.
+        need(all(_current(store, p) == b for p, b in observed.items()), "BASE_CONFLICT",
+             "Project inputs changed during validation", exit_code=3)
+
+    receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token, validate=unchanged)
     # Executability is installed as part of the journal's mode metadata.
     if restore:
         from .external_skills import SkillLockError, restore_verified_external_skills

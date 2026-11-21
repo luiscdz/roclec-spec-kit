@@ -157,7 +157,8 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     check('native wheel installs without runtime dependencies', result.returncode == 0, result.stdout + result.stderr)
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
-        for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py'):
+        for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
+                     'agents.py', *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
     from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios

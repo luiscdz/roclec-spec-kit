@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import tomllib
 
 try:
     from .c1_scenarios import file_hash, put_json, tree
@@ -11,6 +12,85 @@ try:
 except ImportError:
     from c1_scenarios import file_hash, put_json, tree
     from c2_scenarios import setup, git
+
+
+BINDING_ROLES = ("implementer", "reviewer", "specifier")
+
+
+def bindings(root):
+    """Generated role definitions found in a repo's host agent folders."""
+    return {p.relative_to(root).as_posix(): p.read_bytes() for folder in (".claude/agents", ".codex/agents")
+            if (root / folder).is_dir() for p in sorted((root / folder).iterdir()) if p.is_file()}
+
+
+def binding_model(root, role, host):
+    """Pinned model of one binding, or None when the key is absent (inherit the session)."""
+    if host == "codex":
+        return tomllib.loads((root / f".codex/agents/roclec-{role}.toml").read_text(encoding="utf-8")).get("model")
+    head = (root / f".claude/agents/roclec-{role}.md").read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    values = [line.split(": ", 1)[1] for line in head.splitlines() if line.startswith("model: ")]
+    return json.loads(values[0]) if values else None
+
+
+def binding_scenarios(root, call, check):
+    """Subagent role bindings are managed files on both hosts (M-28)."""
+    expected = {f".claude/agents/roclec-{r}.md" for r in BINDING_ROLES} | {f".codex/agents/roclec-{r}.toml" for r in BINDING_ROLES}
+    current = bindings(root)
+    check("I-034 subagent bindings installed on both hosts, no coordinator", set(current) == expected, sorted(current))
+    codex = {r: tomllib.loads((root / f".codex/agents/roclec-{r}.toml").read_text(encoding="utf-8")) for r in BINDING_ROLES}
+    check("I-034 codex bindings parse with name, sandbox and instructions", all(
+        data["name"] == f"roclec-{r}" and data["sandbox_mode"] in ("read-only", "workspace-write")
+        and "<!-- managed by roclec-spec-kit -->" in data["developer_instructions"] for r, data in codex.items()), "")
+    check("I-034 claude bindings carry name, tools and the contract", all(
+        (root / f".claude/agents/roclec-{r}.md").read_text(encoding="utf-8").startswith(f"---\nname: roclec-{r}\n")
+        and "\ntools: Read, Grep, Glob" in (root / f".claude/agents/roclec-{r}.md").read_text(encoding="utf-8") for r in BINDING_ROLES), "")
+    check("I-034 no model key without [agents]", all(binding_model(root, r, h) is None for r in BINDING_ROLES for h in ("claude", "codex")))
+    own = {".claude/agents/my-role.md": b"---\nname: my-role\n---\nConsumer role\n", ".codex/agents/my-role.toml": b'name = "my-role"\n'}
+    for relative, content in own.items():
+        (root / relative).write_bytes(content)
+    config = root / ".roclec/project.toml"
+    profile = config.read_text(encoding="utf-8")
+    config.write_text(profile + '\n[agents.implementer]\nclaude = "m-a"\ncodex = "m-b"\n', encoding="utf-8")
+    call("I-034 refresh with pinned implementer models", "skills")
+    pinned = bindings(root)
+    check("I-034 pinned models reach only the implementer", binding_model(root, "implementer", "claude") == "m-a"
+          and binding_model(root, "implementer", "codex") == "m-b"
+          and all(binding_model(root, r, h) is None for r in ("reviewer", "specifier") for h in ("claude", "codex")))
+    check("I-034 pinning rewrites only the implementer bindings", {p for p in current if pinned[p] != current[p]}
+          == {".claude/agents/roclec-implementer.md", ".codex/agents/roclec-implementer.toml"})
+    config.write_text(profile + '\n[agents.implementer]\nclaude = "m-c"\ncodex = "m-b"\n', encoding="utf-8")
+    changed = call("I-034 refresh after changing one host model", "skills")
+    after = bindings(root)
+    check("I-034 model change rewrites only that host binding", {p for p in after if after[p] != pinned.get(p)}
+          == {".claude/agents/roclec-implementer.md"} and binding_model(root, "implementer", "claude") == "m-c"
+          and changed["receipt"]["writes"][".claude/agents/roclec-implementer.md"] == file_hash(after[".claude/agents/roclec-implementer.md"]))
+    check("I-034 consumer role files untouched", all((root / p).read_bytes() == b for p, b in own.items()))
+    reviewer = root / ".codex/agents/roclec-reviewer.toml"
+    original = reviewer.read_bytes()
+    reviewer.write_bytes(original + b"# consumer note\n")
+    call("I-034 edited binding rejects whole refresh", "skills", expect=1, issue="MANAGED_FILE_EDITED")
+    reviewer.write_bytes(b'name = "roclec-reviewer"\n')
+    call("I-034 unmarked binding is consumer-owned", "skills", expect=1, issue="UNMANAGED_FILE")
+    reviewer.write_bytes(original)
+    manifest_path = root / ".roclec/installation.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    retired = {".claude/agents/roclec-retired.md": b"<!-- managed by roclec-spec-kit -->\nretired role\n",
+               ".codex/agents/roclec-retired.toml": b"# managed by roclec-spec-kit\nname = \"roclec-retired\"\n"}
+    for relative, content in retired.items():
+        (root / relative).write_bytes(content)
+        manifest["files"][relative] = file_hash(content)
+        manifest["managed"].append(relative)
+    put_json(manifest_path, manifest)
+    (root / ".claude/agents/roclec-retired.md").write_bytes(retired[".claude/agents/roclec-retired.md"] + b"edited\n")
+    call("I-034 edited retired binding rejects whole refresh", "skills", expect=1, issue="MANAGED_FILE_EDITED")
+    (root / ".claude/agents/roclec-retired.md").write_bytes(retired[".claude/agents/roclec-retired.md"])
+    pruned = call("I-034 refresh prunes a retired role", "skills")
+    check("I-034 retired role pruned on both hosts", not any((root / p).exists() for p in retired)
+          and all(pruned["receipt"]["writes"][p] is None for p in retired)
+          and all((root / p).read_bytes() == b for p, b in own.items()))
+    config.write_text(profile, encoding="utf-8")
+    call("I-034 unpinning restores inherited models", "skills")
+    check("I-034 unpinned bindings equal the first install", {p: b for p, b in bindings(root).items() if p not in own} == current)
 
 
 def scenarios(workspace, invoke, check, *, compatibility=False):
@@ -95,7 +175,9 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
     (third_party / "SKILL.md").write_text("# Consumer helper\n")
     (root / ".claude/skills/consumer-helper").symlink_to("../../.agents/skills/consumer-helper", target_is_directory=True)
     call("I-033 refresh preserves unrelated skill links", "skills")
+    binding_scenarios(root, call, check)
     if compatibility:
+        native_bindings = bindings(root)
         for integration in ("codex", "claude"):
             result = subprocess.run(["specify", "init", "--here", "--integration", integration, "--ignore-agent-tools", "--force"],
                                     cwd=root, capture_output=True, text=True, timeout=60)
@@ -115,7 +197,8 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
             call("I-033 refresh " + integration + " aliases", "speckit")
             check("I-033 adapter refresh preserves consumer template", template.read_bytes() == b"# Consumer plan\n")
             check("I-033 adapter preserves third-party skill link", (root / ".claude/skills/consumer-helper").is_symlink())
-        aliases = {p: v for p, v in tree(root).items() if p.startswith((".specify/", ".codex/", ".claude/commands/")) or "/skills/speckit-" in p}
+        check("I-034 aliases keep role bindings byte-identical", bindings(root) == native_bindings, sorted(bindings(root)))
+        aliases = {p: v for p, v in tree(root).items() if p.startswith((".specify/", ".codex/", ".claude/commands/", ".claude/agents/")) or "/skills/speckit-" in p}
         call("I-033 native refresh after aliases", "skills")
         call("I-033 repeated native refresh after aliases", "skills")
         current = tree(root)
@@ -127,6 +210,8 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
     config = root / ".roclec/project.toml"
     config.write_text(config.read_text().replace('repo = "."', 'repo = "../linked code"'))
     call("I-033 install into configured linked component", "skills", "--into", "engine")
+    check("I-034 linked component receives the same role bindings",
+          {p: b for p, b in bindings(code).items()} == {p: b for p, b in bindings(root).items() if "/roclec-" in p})
     check("I-033 linked install points to original authority", 'project_root = "../code with spaces"' in (code / ".roclec/link.toml").read_text())
     call("I-033 installed native consumer validates", "check")
 

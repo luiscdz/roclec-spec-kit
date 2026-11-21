@@ -163,7 +163,7 @@ class Store:
             "integrate": (".roclec/contracts/", ".roclec/current.json", ".roclec/integrations/"),
             "release-prepare": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/preparations/",),
             "release-record": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/publication.json",),
-            "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".codex/", ".specify/",
+            "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".claude/agents/", ".codex/", ".specify/",
                                "AGENTS.md", "CLAUDE.md", ".gitignore", ".roclec/workflow.md", ".roclec/model.md", ".roclec/run", ".roclec/templates/",
                                ".roclec/constitution.md", ".roclec/notices/", ".roclec/link.toml", ".roclec/installation.json"),
         }
