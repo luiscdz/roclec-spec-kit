@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 922" width="1120" height="922" role="img" aria-labelledby="title description" lang="es">
+  <title id="title">Roclec · Del chat al cambio integrado</title>
+  <desc id="description">El usuario solicita iniciar o retomar un cambio. El coordinador lee el estado y elige las skills para definir, planificar, implementar, verificar e integrar. Si falta una decisión o evidencia que requiere intervención humana, el coordinador consulta al responsable y reanuda desde los registros. Tras integrar, la preparación de la release y el registro de publicación tienen su propio recorrido.</desc>
+  <defs>
+    <pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1" fill="#D8E4E3"/>
+    </pattern>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1l7 4-7 4" fill="none" stroke="#347474" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="decision" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+      <path d="M1 1l7 4-7 4" fill="none" stroke="#9B5D19" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      text { font-family: "Avenir Next", "Segoe UI", Arial, sans-serif; fill: #142D39; }
+      .brand { font-size: 16px; font-weight: 700; letter-spacing: 3px; fill: #89DAD0; }
+      .title { font-size: 43px; font-weight: 700; fill: #F9FAF7; }
+      .heading { font-size: 23px; font-weight: 700; }
+      .body { font-size: 17px; font-weight: 500; fill: #35515D; }
+      .skill { font: 14px "SFMono-Regular", Consolas, "Liberation Mono", monospace; fill: #246362; }
+      .light { fill: #F5FAF8; }
+      .soft { fill: #C0E8E0; }
+      .tag { font-size: 13px; font-weight: 700; letter-spacing: 1.2px; fill: #84521B; }
+      .card { fill: #FFF; stroke: #C9DBD9; }
+      .icon { fill: none; stroke: #236D6A; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+      .flow, .branch { fill: none; stroke: #347474; stroke-width: 2; marker-end: url(#arrow); }
+      .branch { stroke-dasharray: 5 5; }
+      .pause { fill: none; stroke: #9B5D19; stroke-width: 2; stroke-dasharray: 5 5; marker-end: url(#decision); }
+    </style>
+  </defs>
+
+  <rect width="1120" height="922" rx="30" fill="#F2F7F5"/>
+  <rect x="1" y="115" width="1118" height="776" fill="url(#dots)"/>
+  <path d="M30 0h1060a30 30 0 0 1 30 30v104H0V30A30 30 0 0 1 30 0Z" fill="#122F3C"/>
+  <path d="M944 0v38h52v45h60v51m-62-134v27h58v43h68M893 0v59h57v44h47v31" fill="none" stroke="#2B5D66" stroke-width="2"/>
+  <circle cx="950" cy="103" r="4" fill="#7CD3C5"/>
+  <circle cx="1052" cy="27" r="4" fill="#7CD3C5"/>
+  <text x="54" y="47" class="brand">ROCLEC · PERFIL 3</text>
+  <text x="52" y="102" class="title">Del chat al cambio integrado</text>
+
+  <g aria-hidden="true">
+    <path class="flow" d="M373 231v20"/>
+    <path class="flow" d="M373 329v20"/>
+    <path class="flow" d="M373 436v20"/>
+    <path class="flow" d="M373 543v20"/>
+    <path class="flow" d="M373 650v20"/>
+    <path class="flow" d="M373 757v20"/>
+    <path class="pause" d="M693 275h50v110h22"/>
+    <path class="pause" d="M765 569h-46V309h-24"/>
+    <path class="branch" d="M693 820h72"/>
+  </g>
+
+  <g>
+    <rect x="53" y="159" width="640" height="72" rx="16" class="card"/>
+    <rect x="71" y="175" width="40" height="40" rx="12" fill="#DFF1ED"/>
+    <path class="icon" d="M82 187h18v12H90l-5 4v-4h-3z"/>
+    <text x="128" y="188" class="heading">Iniciar o retomar en el chat</text>
+    <text x="128" y="213" class="body">«Roclec, lleva este cambio hasta la integración»</text>
+  </g>
+
+  <g>
+    <rect x="53" y="253" width="640" height="76" rx="16" fill="#174B53"/>
+    <rect x="71" y="271" width="40" height="40" rx="12" fill="#CDF0E8"/>
+    <circle cx="91" cy="291" r="10" class="icon"/>
+    <path class="icon" d="m95 286-2 7-7 3 3-7z"/>
+    <text x="128" y="283" class="heading light">El coordinador toma el relevo</text>
+    <text x="128" y="309" class="body soft">Lee el estado del repo y elige la siguiente skill.</text>
+  </g>
+
+  <g>
+    <rect x="53" y="351" width="640" height="85" rx="16" class="card"/>
+    <rect x="71" y="373" width="40" height="40" rx="12" fill="#DFF1ED"/>
+    <path class="icon" d="M84 383h11l4 4v16H84zM94 383v5h5m-11 5h7m-7 4h7"/>
+    <text x="128" y="378" class="heading">Definir y aprobar</text>
+    <text x="128" y="403" class="body">Prepara el cambio, aclara el alcance y registra la aprobación.</text>
+    <text x="128" y="424" class="skill">roclec-specify · roclec-clarify</text>
+  </g>
+
+  <g>
+    <rect x="53" y="458" width="640" height="85" rx="16" class="card"/>
+    <rect x="71" y="480" width="40" height="40" rx="12" fill="#DFF1ED"/>
+    <path class="icon" d="M89 491h11m-11 8h11m-11 8h11m-18-16h2m-2 8h2m-2 8h2"/>
+    <text x="128" y="485" class="heading">Planificar y asignar</text>
+    <text x="128" y="510" class="body">Resuelve prerrequisitos y asigna la release del componente.</text>
+    <text x="128" y="531" class="skill">roclec-foundation · roclec-plan · roclec-release</text>
+  </g>
+
+  <g>
+    <rect x="53" y="565" width="640" height="85" rx="16" class="card"/>
+    <rect x="71" y="587" width="40" height="40" rx="12" fill="#DFF1ED"/>
+    <path class="icon" d="m87 600-6 7 6 7m8-14 6 7-6 7m-3-14-2 14"/>
+    <text x="128" y="592" class="heading">Implementar y verificar</text>
+    <text x="128" y="617" class="body">Construye, ejecuta comprobaciones y vincula la evidencia.</text>
+    <text x="128" y="638" class="skill">roclec-implement · roclec-reviewer si aplica</text>
+  </g>
+
+  <g>
+    <rect x="53" y="672" width="640" height="85" rx="16" class="card"/>
+    <rect x="71" y="694" width="40" height="40" rx="12" fill="#DFF1ED"/>
+    <path class="icon" d="M84 705v17m15-16v4c0 4-4 6-8 6h-7"/>
+    <circle cx="84" cy="704" r="2.5" fill="#DFF1ED" class="icon"/>
+    <circle cx="84" cy="723" r="2.5" fill="#DFF1ED" class="icon"/>
+    <circle cx="99" cy="704" r="2.5" fill="#DFF1ED" class="icon"/>
+    <text x="128" y="699" class="heading">Integrar</text>
+    <text x="128" y="724" class="body">Confirma el candidato en la rama destino y aplica la integración.</text>
+    <text x="128" y="745" class="skill">roclec-converge</text>
+  </g>
+
+  <g>
+    <rect x="53" y="779" width="640" height="82" rx="16" fill="#D9EFE8" stroke="#B4D9CB"/>
+    <rect x="71" y="800" width="40" height="40" rx="12" fill="#FFF"/>
+    <path class="icon" d="m82 820 6 6 13-14"/>
+    <text x="128" y="812" class="heading">Cambio integrado</text>
+    <text x="128" y="837" class="body">Contrato vigente, candidato y evidencia quedan vinculados.</text>
+  </g>
+
+  <g>
+    <rect x="767" y="351" width="300" height="258" rx="18" fill="#FFF5E1" stroke="#E7C990"/>
+    <text x="789" y="382" class="tag">EN CUALQUIER ETAPA</text>
+    <text x="789" y="417" class="heading">Decisión pendiente</text>
+    <text x="789" y="447" class="body">
+      <tspan x="789">El agente pide una decisión</tspan>
+      <tspan x="789" dy="24">o evidencia que requiere tu</tspan>
+      <tspan x="789" dy="24">participación.</tspan>
+    </text>
+    <path d="M789 515h256" stroke="#E7C990"/>
+    <text x="789" y="546" class="heading" style="font-size:19px">Al responder</text>
+    <text x="789" y="574" class="body">Relee el estado y continúa.</text>
+  </g>
+
+  <g>
+    <rect x="767" y="779" width="300" height="82" rx="16" fill="#E4EBF1" stroke="#C5D4DF"/>
+    <text x="789" y="812" class="heading">Release por separado</text>
+    <text x="789" y="837" class="body">Verificar, preparar y registrar.</text>
+  </g>
+
+  <text x="53" y="898" class="body" style="font-size:15px">El coordinador vuelve a consultar el estado entre etapas. El recorrido se ajusta al cambio y al componente.</text>
+</svg>

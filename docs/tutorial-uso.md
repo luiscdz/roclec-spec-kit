@@ -1,4 +1,4 @@
-> Referencia histórica 0.7/perfil 1. Para 0.8/C1 usar [la guía vigente](c1.md); el adaptador del modelo nuevo continúa pendiente de C3.
+> Referencia histórica de 0.7 y el perfil 1. El recorrido vigente está en la [guía de flujos del perfil 3](flujo-roclec.md).
 
 # Tutorial de funcionamiento de Roclec
 

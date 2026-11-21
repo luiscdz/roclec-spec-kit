@@ -1,6 +1,8 @@
 <!-- managed by roclec-spec-kit -->
 # Native Roclec workflow — profile 3
 
+Start or resume changes with `roclec-coordinator`. It inspects project state, applies the relevant skills and continues through authorized component integration. Use it for read-only status when asked.
+
 Definition: agreed references → explicit capability/change bundle → exact intent approval → release membership per component → implementation/checks/evidence → integration per component → combined release run → preparation → record existing Git publication.
 
 Approve and assign changes on the configured `trunk_ref`. Worktrees on other branches can record a start, a run and evidence. The profile executes configured checks, so verify only repositories you trust. Raw output goes to local runtime logs. Integration requires a fetched target tracking ref that contains the candidate commit.
