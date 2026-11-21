@@ -351,7 +351,8 @@ def scenarios(workspace, invoke, check):
     view = root / "specs/capabilities/CAP-001.md"
     view.write_text(view.read_text() + "Consumer edit\n")
     call("preserve hand-edited view", "views", "--write", expect=1, issue="UNMANAGED_FILE")
-    call("C2 requires explicit base", "run", "verify", "CHG-002", "--component", "engine", expect=2, issue="INVALID_INPUT")
+    call("C2 requires explicit base", "run", "verify", "CHG-002", "--component", "engine",
+         "--role", "implementer", "--context", "synthetic implementer session", expect=2, issue="INVALID_INPUT")
     call("C3 preparation requires explicit release run and output", "release", "prepare", "engine", "v0.3.0", expect=2, issue="INVALID_INPUT")
     call("JSON usage error has no success envelope", "inspect", "--nonsense", expect=2, issue="INVALID_INPUT")
     return root

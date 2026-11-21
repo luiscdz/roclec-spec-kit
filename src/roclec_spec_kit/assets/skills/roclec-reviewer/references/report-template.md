@@ -1,7 +1,7 @@
 <!-- managed by roclec-spec-kit -->
 # Native candidate review input
 
-Use `evidence record --file FILE` with this schema, filling values from real inspect/run records. For a change use change_id CHG-NNN and omit release. For a release use change_id null and release {component, version}. candidate_digest is the run's candidate.inputs_digest. policy_id is the adopted decision ID for a change or the aggregate ID from inspect release. Do not fabricate independence, execution or approval.
+Use `evidence record --file FILE` with this schema, filling values from real inspect/run records. For a change use change_id CHG-NNN and omit release. For a release use change_id null and release {component, version}. candidate_digest is the run's candidate.inputs_digest. policy_id is the adopted decision ID for a change or the aggregate ID from inspect release. role is reviewer, or human when a person reviews. context names the session or tool that actually reviewed; it must differ from the run's producer.context (compared ignoring case and surrounding spaces) or the record is rejected as SELF_REVIEW_DECLARED. Do not fabricate independence, execution or approval.
 
 ```json
 {
@@ -14,6 +14,7 @@ Use `evidence record --file FILE` with this schema, filling values from real ins
   "candidate_digest": "exact SHA-256 from the real run",
   "policy_id": "current policy identity from inspect",
   "actor": "declared independent reviewer",
+  "role": "reviewer",
   "context": "actual tool/session identity and independence limits",
   "outcome": "incomplete",
   "acceptance_ids": [],

@@ -12,7 +12,7 @@ try:
 except ImportError:  # The viewer is an optional extra.
     flask = None
 
-from scripts.viewer_scenarios import partial_provenance_scenarios, published_scenarios, scenarios
+from scripts.viewer_scenarios import partial_provenance_scenarios, published_scenarios, review_attribution_scenarios, scenarios
 from test_kernel import invoke
 
 
@@ -45,6 +45,10 @@ class ViewerTest(unittest.TestCase):
     def test_published_history_survives_project_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             published_scenarios(Path(directory), invoke, checker(self), Fetcher())
+
+    def test_review_attribution_matches_the_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review_attribution_scenarios(Path(directory), invoke, checker(self), Fetcher())
 
     def test_partial_publication_provenance(self):
         with tempfile.TemporaryDirectory() as directory:

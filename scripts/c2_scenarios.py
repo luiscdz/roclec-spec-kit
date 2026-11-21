@@ -13,6 +13,10 @@ except ImportError:
     from c1_scenarios import bundle, foundation, put_json, tree, snapshot, digest, seed_publication, seed_current
 
 
+# Declared producer of every scripted run; reviews declare another context.
+PRODUCER = ("--role", "implementer", "--context", "synthetic implementer session")
+
+
 def git(root, *args):
     result = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
     if result.returncode:
@@ -79,7 +83,7 @@ def branch_scenarios(workspace, invoke, check):
         return payload
 
     def verify(repo, component="engine"):
-        return call(repo, "run", "verify", "CHG-001", "--component", component, "--base", base)["data"]["run"]
+        return call(repo, "run", "verify", "CHG-001", "--component", component, "--base", base, *PRODUCER)["data"]["run"]
 
     def observe(repo, run):
         evidence = workspace / "branch-observation.json"
@@ -128,7 +132,7 @@ def branch_scenarios(workspace, invoke, check):
     gate = ("check", "--change", "CHG-001", "--component", "engine", "--gate", "verify")
     conflict = call(root, *gate, code=1, issue="AMBIGUOUS_EVIDENCE")
     check("F2 all concurrent run heads are reported", conflict["issues"][0]["actual"] == sorted(r["id"] for r, _ in records), "")
-    result = call(root, "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+    result = call(root, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER,
                   code=1, issue="AMBIGUOUS_EVIDENCE")["data"]["run"]
     check("F2 new run supersedes both heads", result["supersedes"] == sorted(r["id"] for r, _ in records), "")
     observation = observe(root, result)
@@ -174,16 +178,22 @@ def scenarios(workspace, invoke, check):
     call("C2 start", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
     expect_status("in-progress")
     # Development is explicitly allowed with uncommitted operational records.
-    run = call("I-014 executed check", "run", "verify", "CHG-001", "--component", "engine", "--base", base)["run"]
+    run = call("I-014 executed check", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER)["run"]
     run_id = run["id"]
     check("I-014 pass has executed logs and exact inputs", run["status"] == "pass" and run["results"][0]["executed_by_roclec"] and bool(run["candidate"]["inputs_digest"]))
+    check("M-28 run records its declared producer", run["producer"] == {"role": "implementer", "context": "synthetic implementer session"}, str(run.get("producer")))
+    unattributed = ("run", "verify", "CHG-001", "--component", "engine", "--base", base)
+    call("M-28 run without a declared producer is rejected", *unattributed, expect=2, issue="INVALID_INPUT")
+    call("M-28 run without a context is rejected", *unattributed, "--role", "implementer", expect=2, issue="INVALID_INPUT")
+    call("M-28 run with a non-producer role is rejected", *unattributed, "--role", "reviewer", "--context", "other session", expect=2, issue="INVALID_INPUT")
+    call("M-28 run with a multi-line context is rejected", *unattributed, "--role", "implementer", "--context", "first\nsecond", expect=2, issue="INVALID_INPUT")
     expect_status("verified")
     call("I-018 final gate rejects uncommitted metadata", "check", "--change", "CHG-001", "--component", "engine", "--gate", "integrate", expect=1, issue="CANDIDATE_DIRTY")
     (root / "src/new.py").write_text("# new relevant source\n")
     call("I-012 DEF-002 new source invalidates run", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="EVIDENCE_STALE")
     (root / "src/new.py").unlink()
     (root / "unknown.txt").write_text("unclassified\n")
-    call("I-013 unknown paths block before execution", "run", "verify", "CHG-001", "--component", "engine", "--base", base, expect=1, issue="CANDIDATE_INCOMPLETE")
+    call("I-013 unknown paths block before execution", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER, expect=1, issue="CANDIDATE_INCOMPLETE")
     (root / "unknown.txt").unlink()
     (root / "private.env").write_text("not a source; never read by candidate\n")
     (root / "build").mkdir()
@@ -196,22 +206,30 @@ def scenarios(workspace, invoke, check):
     (root / ".gitignore").write_text(".roclec/runtime/\nbuild/\nprivate.env\n")
     policy = call("I-017 enable review", "review", "policy", "--change", "CHG-001", "--enabled", "true", "--actor", "fixture user", "--reason", "test independent review")["policy"]
     call("I-017 absent review blocks verify", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="REVIEW_REQUIRED")
-    run = call("I-017 tests execute while review is missing", "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+    run = call("I-017 tests execute while review is missing", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER,
                expect=1, issue="REVIEW_REQUIRED", recorded=True)["run"]
     check("I-017 completed run differs from verified component", run["status"] == "pass")
     run_id = run["id"]
     evidence_file = workspace / "review.json"
 
-    def report(outcome, kind="independent-review"):
+    def report(outcome, kind="independent-review", expect=0, issue=None, **changes):
         record = {"model_schema": 2, "kind": kind, "change_id": "CHG-001", "component": "engine", "run_id": run_id,
                   "candidate_digest": run["candidate"]["inputs_digest"], "actor": "declared fixture reviewer", "context": "synthetic harness report, no model evaluation",
                   "outcome": outcome, "acceptance_ids": ["AC-001"], "checks": ["Observed fixture output"], "limitations": ["No actual independent human review"],
                   "findings": [{"id": "F-001", "description": "Stable historical finding"}]}
         if kind == "independent-review":
-            record["policy_id"] = policy["id"]
+            record.update(policy_id=policy["id"], role="reviewer")
+        record.update(changes)
+        record = {k: v for k, v in record.items() if v is not None}
         put_json(evidence_file, record)
-        return call("I-016/017 record " + kind + " " + outcome, "evidence", "record", "--file", evidence_file)["evidence"]
+        label = "I-016/017 record " + kind + " " + outcome + (" rejected" if expect else "")
+        result = call(label, "evidence", "record", "--file", evidence_file, expect=expect, issue=issue)
+        return result if expect else result["evidence"]
 
+    report("ready", expect=1, issue="SELF_REVIEW_DECLARED", context="  Synthetic IMPLEMENTER Session ")
+    report("ready", expect=2, issue="INVALID_INPUT", role=None)
+    report("ready", expect=2, issue="INVALID_INPUT", role="implementer")
+    report("pass", "manual", expect=2, issue="INVALID_INPUT", role="reviewer")
     for outcome in ("changes-needed", "incomplete"):
         report(outcome)
         call("I-017 unfavorable review blocks", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="REVIEW_REQUIRED")
@@ -221,15 +239,15 @@ def scenarios(workspace, invoke, check):
     call("I-017 current ready permits verify", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify")
     (root / "src/new.py").write_text("# relevant source\n")
     call("I-017 ready report becomes stale", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify", expect=1, issue="EVIDENCE_STALE")
-    run = call("I-017 new passing run does not refresh a stale report", "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+    run = call("I-017 new passing run does not refresh a stale report", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER,
                expect=1, issue="REVIEW_REQUIRED", recorded=True)["run"]
     (root / "src/new.py").unlink()
-    run = call("I-019 restore identical inputs and reuse matching review", "run", "verify", "CHG-001", "--component", "engine", "--base", base)["run"]
+    run = call("I-019 restore identical inputs and reuse matching review", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER)["run"]
     run_id = run["id"]
     history = tree(root)
     call("I-017 disable with a recorded reason", "review", "policy", "--change", "CHG-001", "--enabled", "false", "--actor", "fixture user", "--reason", "disable for test")
     check("I-017 reports and findings preserved", all(tree(root).get(p) == v for p, v in history.items() if p.startswith(".roclec/evidence/")))
-    viewer = call("I-011 verify second component", "run", "verify", "CHG-001", "--component", "viewer", "--base", base)["run"]
+    viewer = call("I-011 verify second component", "run", "verify", "CHG-001", "--component", "viewer", "--base", base, *PRODUCER)["run"]
     commit(root, "record execution metadata")
     call("I-019 same bytes under descendant commit reuse evidence", "check", "--change", "CHG-001", "--component", "engine", "--gate", "integrate")
     plan_path = workspace / "integration.json"
@@ -265,7 +283,7 @@ def scenarios(workspace, invoke, check):
           and state["integrations"]["engine"]["proposal_digest"] != record["proposal_digest"])
     call("C2 explicitly approve pending revision", "change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Clarify pending participant")
     call("C2 rebind pending release membership only", "release", "plan", "viewer", "v1.0.0", "--change", "CHG-001")
-    viewer = call("C2 fresh evidence for pending intent", "run", "verify", "CHG-001", "--component", "viewer", "--base", base)["run"]
+    viewer = call("C2 fresh evidence for pending intent", "run", "verify", "CHG-001", "--component", "viewer", "--base", base, *PRODUCER)["run"]
     commit(root, "record first integration")
     second_plan = workspace / "viewer-integration.json"
     call("I-011 prepare remaining component", "integrate", "prepare", "CHG-001", "--component", "viewer", "--run", viewer["id"], "--out", second_plan)
@@ -293,7 +311,7 @@ def execution_scenarios(workspace, invoke, check):
             path = root / ".roclec/project.toml"
             path.write_text(path.read_text().replace(json.dumps(sys.executable), '"roclec-fixture-command-does-not-exist"'))
         prefix = ["--project", str(root), "--json"]
-        result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+        result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
         payload = json.loads(result.stdout)
         check(label + ": execution rejected verification", result.returncode == 1 and issue in [i["code"] for i in payload["issues"]], result.stdout + result.stderr)
         run = payload["data"]["run"]
@@ -328,7 +346,7 @@ def execution_scenarios(workspace, invoke, check):
 def prepared_fixture(workspace, invoke):
     root, base = setup(workspace, invoke, names=("engine",))
     prefix = ["--project", str(root), "--json"]
-    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     if result.returncode:
         raise AssertionError(result.stdout + result.stderr)
     run = json.loads(result.stdout)["data"]["run"]
@@ -366,7 +384,7 @@ def competing_fixture(workspace, invoke):
     must("release", "plan", "engine", "v1.1.0", "--change", "CHG-002", "--change", "CHG-003")
     runs = []
     for record in records:
-        run = must("run", "verify", record["id"], "--component", "engine", "--base", base, expect=1)["run"]
+        run = must("run", "verify", record["id"], "--component", "engine", "--base", base, *PRODUCER, expect=1)["run"]
         if run["status"] != "pass":
             raise AssertionError("Competing fixture checks must pass before attaching manual coverage")
         evidence_file = workspace / (record["id"] + "-observation.json")
@@ -410,7 +428,7 @@ def edge_scenarios(workspace, invoke, check):
     base = commit(root)
     obsolete.unlink()
     git(root, "add", "-u")
-    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     check("I-018 staged development deletion is verifiable", result.returncode == 0, result.stdout)
     manifest = json.loads(result.stdout)["data"]["run"]["candidate"]
     check("I-019 deletion has an explicit manifest marker", manifest["inputs"]["files"]["src/obsolete.py"] == {"type": "deleted"})
@@ -434,7 +452,7 @@ def edge_scenarios(workspace, invoke, check):
     config = root / ".roclec/project.toml"
     config.write_text(config.read_text().replace('repo = "."', 'repo = "../external code"'))
     prefix = ["--project", str(root), "--json"]
-    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base])
+    result = invoke([*prefix, "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER])
     check("I-018 separate configured repo executes checks", result.returncode == 0, result.stdout)
     run_id = json.loads(result.stdout)["data"]["run"]["id"]
     plan = root.parent / "separate-plan.json"
@@ -464,7 +482,7 @@ def edge_scenarios(workspace, invoke, check):
     must("change", "new", "--file", source / "change.json")
     must("change", "approve", "CHG-002", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Restore historical contract")
     must("release", "plan", "engine", "v1.0.1", "--kind", "hotfix", "--base-tag", "v1.0.0", "--change", "CHG-002")
-    run = must("run", "verify", "CHG-002", "--component", "engine", "--base", publication["commit"])["run"]
+    run = must("run", "verify", "CHG-002", "--component", "engine", "--base", publication["commit"], *PRODUCER)["run"]
     commit(root)
     fix_plan = root.parent / "fix-plan.json"
     must("integrate", "prepare", "CHG-002", "--component", "engine", "--run", run["id"], "--out", fix_plan)

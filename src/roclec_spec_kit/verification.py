@@ -32,6 +32,37 @@ def matches(path, patterns):
     return any(fnmatch.fnmatchcase(path, p) for p in patterns)
 
 
+# Declared producers (M-28): canonical agent roles plus `human`. The coordinator
+# may implement small changes itself; only a reviewer or a human may review.
+RUN_ROLES = ("coordinator", "human", "implementer")
+REVIEW_ROLES = ("human", "reviewer")
+RERUN_ATTRIBUTED = ("Rerun `run verify` with --role ROLE --context CONTEXT for this scope "
+                    "and record the review against that run.")
+SEPARATE_CONTEXT = ("Produce the review in a separate context (the roclec-reviewer role) and declare that context; "
+                    "Roclec compares declared contexts, not real independence.")
+
+
+def single_line(value):
+    return text(value) and value.splitlines() == [value]
+
+
+def declared(role, context, allowed, what):
+    need(role in allowed, "INVALID_INPUT", f"Unknown {what} role", exit_code=2, expected=list(allowed), actual=role,
+         remediation="Declare one of: " + ", ".join(allowed))
+    need(single_line(context), "INVALID_INPUT", f"Declare the actual {what} context as non-empty single-line text",
+         exit_code=2, remediation="Use the session or tool identity that actually produced the record.")
+
+
+def same_context(first, second):
+    return first.strip().casefold() == second.strip().casefold()
+
+
+def read_producer(record):
+    if "producer" in record:
+        fields(record["producer"], ("role", "context"))
+        declared(record["producer"]["role"], record["producer"]["context"], RUN_ROLES, "run")
+
+
 class Verification:
     def __init__(self, kernel, *, release=None):
         self.k = kernel
@@ -161,7 +192,9 @@ class Verification:
     def run_heads(attempts):
         return scoped_heads(attempts, lambda _: ["run"])
 
-    def run(self, change_id, component, base):
+    def run(self, change_id, component, base, role, context):
+        declared(role, context, RUN_ROLES, "run")
+        producer = {"role": role, "context": context}
         if self.release:
             from .releases import Releases
             Releases(self.k).context(**self.release, unpublished=True)
@@ -177,7 +210,7 @@ class Verification:
         root = f".roclec/runs/{run_id}"
         started = {"model_schema": 2, "id": run_id, "change_id": change_id, "component": component,
                    "candidate": before, "status": "incomplete", "checks": checks,
-                   "supersedes": [run["id"] for run in previous], **self.extras()}
+                   "supersedes": [run["id"] for run in previous], "producer": producer, **self.extras()}
         started["digest"] = digest(started)
         self.store.apply("run-start", {"id": run_id}, {f"{root}/start.json": encoded(started)}, self.k.token)
         execution_token = self.store.token()
@@ -207,7 +240,7 @@ class Verification:
                   else "fail" if any(r["status"] == "fail" for r in results) else "pass")
         manifest = {"model_schema": 2, "id": run_id, "change_id": change_id, "component": component,
                     "candidate": before, "status": status, "results": results, "limitations": limitations,
-                    "tools": before["inputs"]["tools"], "supersedes": started["supersedes"], **self.extras()}
+                    "tools": before["inputs"]["tools"], "supersedes": started["supersedes"], "producer": producer, **self.extras()}
         manifest["digest"] = digest(manifest)
         writes = {f"{root}/manifest.json": encoded(manifest)}
         need(not self.store.path(f"{root}/manifest.json").exists(), "OPERATION_CONFLICT", "Run was already finalized", exit_code=3)
@@ -230,17 +263,19 @@ class Verification:
         identifier(run_id, "RUN")
         record = self.k.read(f".roclec/runs/{run_id}/manifest.json")
         fields(record, ("model_schema", "id", "change_id", "component", "candidate", "status", "results", "limitations", "tools", "digest",
-                        "supersedes"), ("release",))
+                        "supersedes"), ("release", "producer"))
         need(record["id"] == run_id and record["digest"] == digest({k: v for k, v in record.items() if k != "digest"}),
              "HASH_MISMATCH", "Run manifest integrity mismatch")
         if started is None:
             started = self.read_start(self.store.path(f".roclec/runs/{run_id}/start.json"))
         need(started.get("digest") == digest({k: v for k, v in started.items() if k != "digest"})
-             and all(started.get(k) == record[k] for k in ("id", "change_id", "component", "candidate", "supersedes")),
+             and all(started.get(k) == record[k] for k in ("id", "change_id", "component", "candidate", "supersedes"))
+             and started.get("producer") == record.get("producer"),
              "HASH_MISMATCH", "Run differs from its reserved candidate")
         need(record["status"] in {"pass", "fail", "incomplete", "interrupted"}
              and isinstance(record["results"], list) and isinstance(record["limitations"], list),
              "INVALID_INPUT", "Invalid run status/results", exit_code=2)
+        read_producer(record)
         if "release" in record:
             fields(record["release"], ("component", "version"))
             version_key(record["release"]["version"])
@@ -290,12 +325,13 @@ class Verification:
     def read_start(self, path):
         started = self.k.read(path.relative_to(self.k.profile.root).as_posix())
         fields(started, ("model_schema", "id", "change_id", "component", "candidate", "status", "checks", "digest",
-                         "supersedes"), ("release",))
+                         "supersedes"), ("release", "producer"))
         need(started["id"] == path.parent.name and started["digest"] == digest({k: v for k, v in started.items() if k != "digest"}),
              "HASH_MISMATCH", "Run start integrity mismatch")
         identifier(started["id"], "RUN")
         need(started["component"] in self.k.profile.components and isinstance(started["checks"], list),
              "INVALID_REFERENCE", "Run start has an invalid component or check list")
+        read_producer(started)
         if "release" in started:
             fields(started["release"], ("component", "version"))
             version_key(started["release"]["version"])
@@ -313,10 +349,16 @@ class Verification:
     def record_evidence(self, file):
         record = read_json(file)
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
-                        "outcome", "acceptance_ids", "checks", "limitations", "findings"), ("policy_id", "release"))
+                        "outcome", "acceptance_ids", "checks", "limitations", "findings"), ("policy_id", "release", "role"))
         schema(record)
         need(record["kind"] in {"manual", "automated-import", "independent-review"}, "INVALID_INPUT", "Unknown evidence kind", exit_code=2)
         need(text(record["actor"]) and text(record["context"]), "INVALID_INPUT", "Declare observer and context", exit_code=2)
+        review = record["kind"] == "independent-review"
+        need(review or "role" not in record, "INVALID_INPUT", "Only an independent review declares a role", exit_code=2)
+        if review:
+            need("role" in record, "INVALID_INPUT", "An independent review must declare its role", exit_code=2,
+                 expected=list(REVIEW_ROLES), remediation="Add role: " + " or ".join(REVIEW_ROLES))
+            declared(record["role"], record["context"], REVIEW_ROLES, "review")
         for key in ("checks", "limitations"):
             need(isinstance(record[key], list) and all(text(s) for s in record[key]), "INVALID_INPUT", f"{key} must be strings", exit_code=2)
         need(isinstance(record["findings"], list), "INVALID_INPUT", "findings must be a list", exit_code=2)
@@ -326,12 +368,17 @@ class Verification:
             need(text(finding["id"]) and text(finding["description"]), "INVALID_INPUT", "Findings need stable IDs and text", exit_code=2)
             ids.append(finding["id"])
         need(len(ids) == len(set(ids)), "ID_COLLISION", "Duplicate finding ID")
-        review = record["kind"] == "independent-review"
         need(record["outcome"] in ({"ready", "changes-needed", "incomplete"} if review else {"pass", "fail", "incomplete"}),
              "INVALID_INPUT", "Invalid evidence outcome", exit_code=2)
         run = self.read_run(record["run_id"])
         context = Verification(self.k, release=run.get("release"))
         need(context.same_scope(record, run["change_id"], run["component"]), "INVALID_REFERENCE", "Evidence scope differs from run")
+        if review:
+            need("producer" in run, "EVIDENCE_STALE", "The run has no declared producer context to review against",
+                 entity=run["id"], remediation=RERUN_ATTRIBUTED)
+            need(not same_context(record["context"], run["producer"]["context"]), "SELF_REVIEW_DECLARED",
+                 "Review context equals the context that produced its run", entity=run["id"],
+                 actual=record["context"], remediation=SEPARATE_CONTEXT)
         fingerprint(record["candidate_digest"])
         candidate = context.candidate(record["change_id"], record["component"], run["candidate"]["base"])
         need(record["candidate_digest"] == candidate["inputs_digest"] == run["candidate"]["inputs_digest"],
@@ -354,7 +401,7 @@ class Verification:
         record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
                         "outcome", "acceptance_ids", "checks", "limitations", "findings", "id", "digest", "executed_by_roclec",
-                        "supersedes"), ("policy_id", "release"))
+                        "supersedes"), ("policy_id", "release", "role"))
         identifier(record["id"], "EVD")
         if "release" not in record:
             identifier(record["change_id"], "CHG")
@@ -366,6 +413,8 @@ class Verification:
              "INVALID_INPUT", "Invalid evidence attribution/scope", exit_code=2)
         need(record["outcome"] in ({"ready", "changes-needed", "incomplete"} if record["kind"] == "independent-review" else {"pass", "fail", "incomplete"}),
              "INVALID_INPUT", "Invalid evidence outcome", exit_code=2)
+        need("role" not in record or (record["kind"] == "independent-review" and record["role"] in REVIEW_ROLES),
+             "INVALID_INPUT", "Invalid evidence role", exit_code=2, entity=record["id"])
         for key in ("checks", "limitations"):
             need(isinstance(record[key], list) and all(text(v) for v in record[key]), "INVALID_INPUT", "Invalid observation strings", exit_code=2)
         need(record.get("id") == path.stem and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),
@@ -423,10 +472,22 @@ class Verification:
         if policy and policy["enabled"]:
             reviews = [one_head(heads, scope) for scope in sorted(heads) if scope[0] == "review"]
             current = [r for r in reviews if r["candidate_digest"] == candidate["inputs_digest"] and r.get("policy_id") == policy["id"]]
-            need(any(r["outcome"] == "ready" and bool(r["checks"]) for r in current)
+            # A review is compared with the run it cites and with the gated run.
+            sources = {run["id"]: run}
+            def producers(report):
+                if report["run_id"] not in sources:
+                    sources[report["run_id"]] = self.read_run(report["run_id"])
+                return [sources[report["run_id"]].get("producer"), run.get("producer")]
+            unattributed = [r for r in current if "role" not in r or None in producers(r)]
+            accepted = [r for r in current if r not in unattributed]
+            own = [r["id"] for r in accepted if any(same_context(r["context"], p["context"]) for p in producers(r))]
+            need(not own, "SELF_REVIEW_DECLARED", "Review context equals the context that produced the reviewed run",
+                 actual=own, remediation=SEPARATE_CONTEXT)
+            need(any(r["outcome"] == "ready" and bool(r["checks"]) for r in accepted)
                  and all(r["outcome"] == "ready" for r in current),
-                 "REVIEW_REQUIRED", "An enabled policy requires a current favorable independent report with no adverse current reviews")
-            live.update(r["id"] for r in current)
+                 "REVIEW_REQUIRED", "An enabled policy requires a current favorable independent report with no adverse current reviews",
+                 actual=[r["id"] for r in unattributed] or None, remediation=RERUN_ATTRIBUTED if unattributed else None)
+            live.update(r["id"] for r in accepted)
         return {"change": change_id, "component": component, "status": "verified", "run_id": run["id"],
                 "candidate": candidate, "policy_id": policy["id"] if policy else None,
                 "evidence": sorted(live), **self.extras()}

@@ -5,10 +5,10 @@ import json
 
 try:
     from .c1_scenarios import file_hash, put_json, tree
-    from .c2_scenarios import prepared_fixture, commit, git
+    from .c2_scenarios import PRODUCER, prepared_fixture, commit, git
 except ImportError:
     from c1_scenarios import file_hash, put_json, tree
-    from c2_scenarios import prepared_fixture, commit, git
+    from c2_scenarios import PRODUCER, prepared_fixture, commit, git
 
 
 INJECTOR = '''
@@ -57,7 +57,7 @@ def scenarios(workspace, invoke, inject, check):
         return payload["data"]["operation_id"]
 
     call("C3 recovery fixture integrates", "operation", "apply", integration_plan)
-    run = call("C3 recovery fixture verifies release", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base)["run"]
+    run = call("C3 recovery fixture verifies release", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER)["run"]
     commit(root)
     plan = workspace / "c3-recover-prepare.json"
     prepared = call("C3 recovery exports preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", plan)["plan"]
