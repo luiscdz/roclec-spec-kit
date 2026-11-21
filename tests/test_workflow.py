@@ -41,7 +41,10 @@ class WorkflowTest(unittest.TestCase):
             self.assertTrue((root / ".roclec/workflow.md").is_file())
             self.assertTrue((root / ".roclec/run").stat().st_mode & 0o111)
             design_lock = json.loads((root / "skills-lock.json").read_text())
-            self.assertEqual(set(design_lock["skills"]), {"design-taste-frontend", "frontend-design", "impeccable", "ui-ux-pro-max", "web-design-guidelines"})
+            self.assertEqual(set(design_lock["skills"]), {
+                "design-lab", "design-taste-frontend", "frontend-design",
+                "impeccable", "ui-ux-pro-max", "web-design-guidelines",
+            })
             taste = design_lock["skills"]["design-taste-frontend"]
             self.assertEqual(taste["source"], "Leonxlnx/taste-skill")
             self.assertEqual(taste["skillPath"], "skills/taste-skill/SKILL.md")

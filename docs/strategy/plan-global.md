@@ -4,6 +4,8 @@ Estado al 19 de noviembre de 2026. C1–C3 se implementaron localmente en 0.8.0.
 
 ## 1. Destino
 
+El [plan del visor local](plan-visor-roclec.md) describe el MVP propuesto de `roclec view` para explorar documentación y navegar de una release a sus cambios, requisitos y evidencia.
+
 Construir un framework independiente de spec-kit que permita explicar qué necesita un producto, qué comportamiento está acordado, qué cambios se están preparando, cómo se verificaron y qué versión entrega cada componente. El proceso debe ser proporcional al riesgo y recuperable después de interrupciones.
 
 Conservar la CLI determinista, skills nativas, adaptador opcional generado, Git y archivos propiedad del consumidor. Reemplazar el uso de una carpeta de feature como contrato vigente, expediente histórico y ejecución a la vez por conceptos diferenciados con relaciones verificables.

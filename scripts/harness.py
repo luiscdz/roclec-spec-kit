@@ -13,16 +13,132 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import select
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 import zipfile
 
 
 def execute(command, cwd):
     env = {key: value for key, value in os.environ.items() if key not in {'PYTHONPATH', 'PYTHONHOME'}}
     return subprocess.run([str(value) for value in command], cwd=cwd, env=env, capture_output=True, text=True, timeout=60)
+
+
+class ViewerServers:
+    """One ``roclec view`` process per project, started from a subdirectory to prove root discovery."""
+
+    def __init__(self, cli, workspace):
+        self.cli, self.workspace, self.running = cli, workspace, {}
+
+    def url(self, root):
+        root = Path(root)
+        if root not in self.running:
+            cwd = root / 'src' if (root / 'src').is_dir() else root
+            env = {k: v for k, v in os.environ.items() if k not in {'PYTHONPATH', 'PYTHONHOME'}}
+            process = subprocess.Popen([str(self.cli), 'view', '--no-open', '--port', '0'], cwd=cwd, env=env,
+                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                       # A harness started as a background job inherits an ignored SIGINT; Ctrl+C must behave as in a terminal.
+                                       preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+            deadline, seen, found = time.time() + 30, b'', None
+            while time.time() < deadline and found is None:
+                ready, _, _ = select.select([process.stderr], [], [], 1)
+                if ready:
+                    chunk = os.read(process.stderr.fileno(), 4096)  # unbuffered: a text readline could hold the URL line back
+                    seen += chunk
+                    match = re.search(rb'http://127\.0\.0\.1:[0-9]+/', seen)
+                    found = match.group(0).decode() if match else None
+                if process.poll() is not None and found is None:
+                    raise AssertionError('roclec view exited early: ' + process.stdout.read().decode() + seen.decode())
+            if found is None:
+                process.kill()
+                raise AssertionError('roclec view did not announce a URL: ' + seen.decode())
+            self.running[root] = (process, found)
+        return self.running[root][1]
+
+    def fetch(self, root, path):
+        try:
+            with urllib.request.urlopen(self.url(root).rstrip('/') + path, timeout=60) as response:
+                return response.status, json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            body = error.read()
+            try:
+                return error.code, json.loads(body)
+            except ValueError:
+                return error.code, None
+
+    def stop_all(self):
+        codes = []
+        for process, _ in self.running.values():
+            process.send_signal(signal.SIGINT)
+            try:
+                codes.append(process.wait(timeout=15))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                codes.append(-9)
+        self.running.clear()
+        return codes
+
+
+def viewer_harness(wheel: Path, workspace: Path, cases: list[dict]):
+    """Base wheel without the extra, then with it: the CLI stays usable and the viewer matches the CLI."""
+    from c1_scenarios import init_trunk, profile
+    from viewer_scenarios import partial_provenance_scenarios, published_scenarios, scenarios
+
+    def check(name, condition, evidence=''):
+        cases.append({'scope': 'viewer-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
+        if not condition:
+            raise AssertionError(f'{name}: {evidence}')
+
+    workspace.mkdir()
+    env = workspace / 'venv'
+    check('viewer virtualenv created', execute([sys.executable, '-m', 'venv', env], workspace).returncode == 0)
+    result = execute([env / 'bin/python', '-m', 'pip', 'install', '--no-index', '--no-deps', wheel], workspace)
+    check('base wheel installs without the extra', result.returncode == 0, result.stdout + result.stderr)
+    cli = env / 'bin/roclec'
+    with zipfile.ZipFile(wheel) as archive:
+        names = archive.namelist()
+        check('wheel includes the compiled interface', 'roclec_spec_kit/viewer/static/index.html' in names
+              and any(n.startswith('roclec_spec_kit/viewer/static/assets/') and n.endswith('.js') for n in names))
+        check('wheel includes fonts and brand symbol for offline use', sum(n.endswith('.woff2') for n in names) == 2
+              and any(n.endswith('.svg') and 'static/assets/roclec' in n for n in names))
+        check('wheel ships no Node sources or modules', not any('node_modules' in n or n.endswith('.tsx') for n in names))
+    project = workspace / 'without-extra'
+    init_trunk(project)
+    config = workspace / 'viewer-profile.toml'
+    profile(config)
+    check('viewer fixture initializes', execute([cli, '--json', 'init', project, '--profile', config], workspace).returncode == 0)
+    result = execute([cli, '--json', '--project', project, 'view', '--no-open'], workspace)
+    payload = json.loads(result.stdout)
+    check('view without the extra explains how to install it', result.returncode == 1
+          and payload['issues'][0]['code'] == 'VIEWER_UNAVAILABLE' and 'roclec-spec-kit[viewer]' in payload['issues'][0]['remediation'], result.stdout)
+    check('CLI stays operational without the extra', execute([cli, '--json', '--project', project, 'check'], workspace).returncode == 0)
+    result = execute([env / 'bin/python', '-m', 'pip', 'install', f'{wheel}[viewer]'], workspace)
+    check('wheel installs with the viewer extra', result.returncode == 0, result.stdout[-400:] + result.stderr[-400:])
+    servers = ViewerServers(cli, workspace)
+    try:
+        invoke = lambda argv: execute([cli, *argv], workspace)  # noqa: E731
+        status, body = servers.fetch(project, '/api/v1/project')
+        check('view finds the project root from a subdirectory', status == 200 and Path(body['data']['root']) == project.resolve())
+        with urllib.request.urlopen(servers.url(project), timeout=30) as response:
+            page = response.read().decode()
+            check('interface is served locally with its security headers', response.status == 200 and '<div id="root">' in page
+                  and "default-src 'self'" in response.headers['Content-Security-Policy'])
+        asset = page.split('/assets/')[1].split('"')[0]
+        with urllib.request.urlopen(servers.url(project) + 'assets/' + asset, timeout=30) as response:
+            check('compiled assets are served without Node', response.status == 200)
+        scenarios(workspace, invoke, check, servers.fetch)
+        published_scenarios(workspace / 'published', invoke, check, servers.fetch)
+        partial_provenance_scenarios(workspace, invoke, check, servers.fetch)
+    finally:
+        codes = servers.stop_all()
+    check('viewer processes close cleanly on Ctrl+C', codes and all(code == 0 for code in codes), str(codes))
 
 
 def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibility=False):
@@ -346,13 +462,18 @@ def main():
     parser.add_argument('--wheel', required=True, type=Path)
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('--spec-kit', action='store_true', help='Also verify optional aliases with installed specify-cli 0.13.4')
+    parser.add_argument('--viewer', action='store_true', help='Also verify `roclec view` from the wheel with the viewer extra (needs a package index for Flask)')
+    parser.add_argument('--viewer-only', action='store_true', help='With --viewer, skip the native CLI harness')
     parser.add_argument('--legacy', action='store_true', help='Also retain pre-redesign regressions; no schema-1 public CLI')
     args = parser.parse_args()
     cases = []
     failure = None
     try:
         with tempfile.TemporaryDirectory(prefix='roclec-harness-') as directory:
-            native_harness(args.wheel.resolve(), Path(directory) / 'native', cases, args.spec_kit)
+            if not (args.viewer and args.viewer_only):
+                native_harness(args.wheel.resolve(), Path(directory) / 'native', cases, args.spec_kit)
+            if args.viewer:
+                viewer_harness(args.wheel.resolve(), Path(directory) / 'viewer', cases)
             if args.legacy or args.spec_kit:
                 legacy_harness(args.wheel.resolve(), Path(directory) / 'legacy', cases, args.spec_kit)
     except (AssertionError, OSError, subprocess.TimeoutExpired, ValueError) as exc:

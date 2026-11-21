@@ -12,6 +12,10 @@ license = "MIT"
 license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 dependencies = []
 
+[project.optional-dependencies]
+# `roclec view`: local read-only server. The compiled interface itself ships in the base wheel.
+viewer = ["flask>=3.1,<4"]
+
 [project.scripts]
 roclec = "roclec_spec_kit.cli:main"
 
@@ -35,4 +39,6 @@ roclec_spec_kit = [
   "assets/legacy/templates/*.md",
   "assets/legacy/notices/*",
   "assets/legacy/profiles/*.json",
+  "viewer/static/*",
+  "viewer/static/assets/*",
 ]

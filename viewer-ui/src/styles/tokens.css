@@ -1,0 +1,41 @@
+@font-face {
+  font-family: "Plus Jakarta Sans";
+  src: url("@fontsource-variable/plus-jakarta-sans/files/plus-jakarta-sans-latin-wght-normal.woff2") format("woff2");
+  font-weight: 200 800;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("@fontsource-variable/inter/files/inter-latin-wght-normal.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  /* Brand tokens (roclec-brand-brief v1.4, §6) */
+  --roclec-violet: #7c4dff;
+  --roclec-green: #14e0a0;
+  --roclec-charcoal: #15121f;
+  --roclec-bone: #f2f0f7;
+  --roclec-ink: #1e1b2e;
+  /* Support tones (document guideline §3) */
+  --muted: #5f5873;
+  --line: #e3dfeb;
+  --surface: #ffffff;
+  --page: var(--roclec-bone);
+  --violet-wash: #ece6ff;
+  --danger: #a3262f;
+  --danger-wash: #fbe9ea;
+  --warn: #8a5a00;
+  --warn-wash: #fdf1d6;
+  --ok: #0b6b4d;
+  --ok-wash: #def7ee;
+
+  --font-display: "Plus Jakarta Sans", sans-serif;
+  --font-body: "Inter", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sidebar: 264px;
+}

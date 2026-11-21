@@ -25,3 +25,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Viewer interface (`roclec view`)
+
+The compiled interface in `src/roclec_spec_kit/viewer/static/` bundles these packages (versions pinned in `viewer-ui/package-lock.json`):
+
+- React, React DOM, React Router, react-markdown, remark-gfm and their unified/remark/micromark dependency tree (MIT; `@ungap/structured-clone` is ISC). Each package keeps its own copyright notice in its published distribution.
+- Plus Jakarta Sans and Inter, Latin subset, via `@fontsource-variable/plus-jakarta-sans` and `@fontsource-variable/inter` (SIL Open Font License 1.1).
+- Roclec Technologies symbol, horizontal lockup and favicon, copied unmodified from the official brand package; see `viewer-ui/src/assets/brand/PROVENANCE.md`. The brand assets are not covered by the MIT license of this package.
+
+The optional `viewer` extra installs Flask (BSD-3-Clause) and its dependencies from PyPI; they are not vendored.
