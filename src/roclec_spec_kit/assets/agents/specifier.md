@@ -19,6 +19,7 @@ A coordinator brief with: the intent, the change ID when revising, the current c
 ## Outputs
 
 - A sealed bundle (`change seal`) imported or revised through native operations, with the result of `check --change ID --gate approve`.
+- Source captures and criterion coverage, including derived ACs, exclusions and deferrals for the user to decide.
 - Open questions that need the user, each with its impact on the bundle.
 - What was not verified.
 
