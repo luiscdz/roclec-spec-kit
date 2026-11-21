@@ -25,6 +25,12 @@
 - `scripts/semantic_cases.json`, `semantic_scenarios.py`, `semantic_record.py`: semantic case/oracle catalog, wheel-based fixture preparation and optional future CLI telemetry. Preparation never executes agents; semantic campaigns require a separately agreed scope and budget.
 - `tests/`: behavior on isolated consumer projects.
 
+## Development roles
+
+Subagent roles for developing this repository live in `.claude/agents/` and `.codex/agents/` (`roclec-dev-*`); they are not shipped in the wheel. Each definition is self-contained; keep both hosts in sync. Critical zones are `model.py`, `store.py`, `kernel.py`, `verification.py`, `integration.py`, `releases.py` and `installation.py` under `src/roclec_spec_kit/`: changes there use the critical implementer and a review from the other host. Agents never commit, push or decide on the user's behalf. Handoff contract, escalation, definition of done and host validation: `docs/desarrollo-con-agentes.md`. Roles that Roclec installs in consumer projects are a separate, shipped capability.
+
+## Rules
+
 Change generic behavior here. Consumer constitutions, specs, product design and releases belong to consumer repos. Release membership lives in version files; roadmap and indexes are generated. Never assume component names such as `api`, `web` or `mobile` in the kernel.
 
 Before finishing a change, run `PYTHONPATH=src python3 -m unittest discover -s tests -v` and build a wheel. When changing package assets, confirm the wheel contains them and that `roclec speckit` installs into an isolated sample project. For releases, update `__version__`; the build and generated adapter use that single version.
