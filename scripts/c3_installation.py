@@ -60,7 +60,31 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
     original = skill.read_bytes()
     skill.write_bytes(b"# Consumer-owned skill\n")
     call("I-033 unmanaged stage rejects whole refresh", "skills", expect=1, issue="UNMANAGED_FILE")
-    skill.write_bytes(original)
+    skill.write_bytes(original + b"\nConsumer addition that keeps the managed marker.\n")
+    call("I-033 edited managed stage rejects whole refresh", "skills", expect=1, issue="MANAGED_FILE_EDITED")
+    skill.unlink()
+    call("I-033 deleting an edited stage accepts the refreshed version", "skills")
+    check("I-033 refreshed stage restored", skill.read_bytes() == original)
+    # A stage an earlier version recorded as managed and the assets retired.
+    manifest_path = root / ".roclec/installation.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    retired_bytes = b"<!-- managed by roclec-spec-kit -->\n# Retired stage\n"
+    retired = [root / host / "skills/roclec-retired/SKILL.md" for host in (".agents", ".claude")]
+    for path in retired:
+        path.parent.mkdir(parents=True)
+        path.write_bytes(retired_bytes)
+        relative = path.relative_to(root).as_posix()
+        manifest["files"][relative] = file_hash(retired_bytes)
+        manifest["managed"].append(relative)
+    put_json(manifest_path, manifest)
+    retired[0].write_bytes(retired_bytes + b"Consumer note\n")
+    call("I-033 edited retired stage rejects whole refresh", "skills", expect=1, issue="MANAGED_FILE_EDITED")
+    retired[0].write_bytes(retired_bytes)
+    pruned = call("I-033 refresh prunes retired managed stages", "skills")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    check("I-033 retired stages removed on both hosts", not any(path.parent.exists() for path in retired)
+          and not any(path.relative_to(root).as_posix() in manifest["files"] for path in retired)
+          and all(pruned["receipt"]["writes"][path.relative_to(root).as_posix()] is None for path in retired))
     report = root / ".agents/skills/roclec-reviewer/references/report-template.md"
     check("I-033 review input has candidate/release scope", '"candidate_digest"' in report.read_text() and '"release"' in report.read_text())
     check("I-033 MIT attribution installed", "MIT" in (root / ".roclec/notices/spec-kit-LICENSE.txt").read_text())
@@ -91,6 +115,11 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
             call("I-033 refresh " + integration + " aliases", "speckit")
             check("I-033 adapter refresh preserves consumer template", template.read_bytes() == b"# Consumer plan\n")
             check("I-033 adapter preserves third-party skill link", (root / ".claude/skills/consumer-helper").is_symlink())
+        aliases = {p: v for p, v in tree(root).items() if p.startswith((".specify/", ".codex/", ".claude/commands/")) or "/skills/speckit-" in p}
+        call("I-033 native refresh after aliases", "skills")
+        call("I-033 repeated native refresh after aliases", "skills")
+        current = tree(root)
+        check("I-033 native refresh neither prunes nor flags alias files", bool(aliases) and {p: current.get(p) for p in aliases} == aliases)
     # A linked repository receives its own guarded install without a second
     # profile or a guessed technology stack.
     code = root.parent / "linked code"

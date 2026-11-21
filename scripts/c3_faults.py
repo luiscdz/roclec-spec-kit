@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 
 try:
-    from .c1_scenarios import tree
+    from .c1_scenarios import file_hash, put_json, tree
     from .c2_scenarios import prepared_fixture, commit, git
 except ImportError:
-    from c1_scenarios import tree
+    from c1_scenarios import file_hash, put_json, tree
     from c2_scenarios import prepared_fixture, commit, git
 
 
@@ -25,7 +25,12 @@ def fail(store, relative, content):
     if stage == "launcher" and relative == ".roclec/run":
         raise OSError("C3 fixture interruption after launcher bytes")
     return result
-with patch.object(Store, "_atomic", fail):
+remove = Store._remove
+def interrupt_delete(store, relative):
+    if stage == "prune":
+        raise OSError("C3 fixture interruption before a journaled deletion")
+    return remove(store, relative)
+with patch.object(Store, "_atomic", fail), patch.object(Store, "_remove", interrupt_delete):
     raise SystemExit(main(sys.argv[2:]))
 '''
 
@@ -87,4 +92,16 @@ def scenarios(workspace, invoke, inject, check):
     operation = fail("I-033 instruction installation interruption journaled", "launcher", "skills")
     call("I-033 instruction installation recovers", "operation", "recover", operation)
     check("I-033 recovery restores executable launcher", (root / ".roclec/run").stat().st_mode & 0o111)
+    manifest_path = root / ".roclec/installation.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    retired = root / ".agents/skills/roclec-retired/SKILL.md"
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(b"<!-- managed by roclec-spec-kit -->\n# Retired stage\n")
+    manifest["files"][".agents/skills/roclec-retired/SKILL.md"] = file_hash(retired.read_bytes())
+    manifest["managed"].append(".agents/skills/roclec-retired/SKILL.md")
+    put_json(manifest_path, manifest)
+    operation = fail("I-033 retired stage deletion interruption journaled", "prune", "skills")
+    check("I-033 interrupted deletion leaves the retired bytes", retired.is_file())
+    call("I-033 retired stage deletion recovers", "operation", "recover", operation)
+    check("I-033 recovery completes the deletion", not retired.parent.exists())
     call("C3 recovered consumer remains structurally valid", "check")
