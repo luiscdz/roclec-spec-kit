@@ -14,7 +14,7 @@ Review the candidate in the brief by following `roclec-reviewer` and its report 
 
 ## Inputs
 
-A coordinator brief with: change or release, component, run ID, candidate digest, applicable AC IDs and the task's prohibitions.
+A coordinator brief with: change or release, component, run ID, candidate digest, applicable AC IDs, the ADRs the change cites and the task's prohibitions.
 
 ## Outputs
 
