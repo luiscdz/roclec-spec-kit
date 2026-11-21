@@ -32,13 +32,13 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
-    listing.add_argument("category", choices=("changes", "futs", "releases", "runs"))
+    listing.add_argument("category", choices=("adrs", "changes", "futs", "releases", "runs"))
     init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
     inspect = sub.add_parser("inspect", help="Read integrated, proposed or historical state")
     selectors = inspect.add_mutually_exclusive_group(required=True)
-    for name in ("capability", "change", "fut", "release"):
+    for name in ("adr", "capability", "change", "fut", "release"):
         selectors.add_argument(f"--{name}")
     inspect.add_argument("--component")
     inspect.add_argument("--at")
@@ -59,6 +59,8 @@ def build_parser():
         editor.add_argument("--path", required=True)
         editor.add_argument("--component", action="append", required=True)
         editor.add_argument("--role", required=True)
+        editor.add_argument("--supersedes", action="append", default=[], metavar="ADR-ID",
+                            help="ADR replaced by this decision reference (repeatable; role decision only)")
     change = sub.add_parser("change")
     csub = change.add_subparsers(dest="action", required=True)
     new = csub.add_parser("new")
@@ -228,6 +230,9 @@ def execute(args):
             return kernel.inspect_change(args.change, deep=args.deep)
         if args.fut:
             return kernel.inspect_fut(args.fut)
+        if args.adr:
+            from .adr import Adrs
+            return Adrs(kernel).inspect(args.adr)
         need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
         result = kernel.release(args.component, args.release)
         from .verification import Verification
@@ -242,7 +247,7 @@ def execute(args):
             return kernel.agree_foundation(args.ref, args.actor, args.reason)
         return kernel.foundation(args.component, args.change)
     if command == "reference":
-        return kernel.write_reference(action, args.id, args.path, args.component, args.role)
+        return kernel.write_reference(action, args.id, args.path, args.component, args.role, args.supersedes)
     if command == "change":
         if action == "seal":
             from .authoring import seal

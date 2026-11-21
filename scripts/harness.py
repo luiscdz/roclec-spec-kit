@@ -158,9 +158,11 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
         for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
-                     'agents.py', *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
+                     'agents.py', 'adr.py', 'assets/templates/adr-template.md', *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
+    from c1_scenarios import adr_scenarios as c1_adr_scenarios
+    c1_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
     from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios
 
     def c2_check(name, condition, evidence=''):
@@ -188,6 +190,8 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
         return results
     conflict_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check, race=race)
     edge_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    from c2_scenarios import adr_scenarios as c2_adr_scenarios
+    c2_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c3_scenarios import combined_and_fix_scenarios as c3_scenarios
     def c3_check(name, condition, evidence=''):
         cases.append({'scope': 'C3-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -196,6 +200,8 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     c3_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_scenarios import review_scenarios
     review_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
+    from c3_scenarios import adr_scenarios as c3_adr_scenarios
+    c3_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_installation import scenarios as install_scenarios, verified_restore_scenarios
     verified_restore_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
                                lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c3_check)

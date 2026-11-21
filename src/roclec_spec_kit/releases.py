@@ -139,7 +139,18 @@ class Releases:
         self.version(record)
         verified = Verification(self.k, release={"component": component, "version": version}).verify(None, component, run_id=run_id, final=True)
         fixes = self.fixes(record, verified["candidate"], verified["evidence"])
-        return {**verified, "gate": "release", "context": context, "fixes": fixes}
+        return {**verified, "gate": "release", "context": context, "fixes": fixes, "limitations": self.limitations(record)}
+
+    def limitations(self, record):
+        """Non-blocking: approved members that applied an ADR superseded since then."""
+        from .adr import Adrs
+        adrs, result = Adrs(self.k), []
+        view = adrs.view()
+        for member in record["changes"]:
+            folder = self.store.path(f".roclec/changes/{member['change_id']}/revisions/{member['intent_revision']}")
+            change, _, _ = self.k.change(member["change_id"], source=folder, historical=True)
+            result.extend(adrs.superseded_citations(change, view))
+        return sorted(result, key=lambda item: (item["change_id"], item["adr"]))
 
     def preparation(self, component, version, preparation):
         fingerprint(preparation)

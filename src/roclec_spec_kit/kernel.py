@@ -10,11 +10,15 @@ import copy
 import re
 import subprocess
 
+from .adr import Adrs, adr_ids, declaration, in_folder, is_adr, supersession
 from .config import Profile, load_profile, validate_profile
 from .model import (ModelError, checked_files, digest, encoded, fields, fingerprint, identifier,
                     identities, local_path, need, read_json, schema, sha, strings, text,
                     validate_contract, validate_delta, version_key)
 from .store import Store
+
+FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design"}
+REFERENCE_ID = r"[a-z][a-z0-9-]*"
 
 
 class Kernel:
@@ -102,29 +106,44 @@ class Kernel:
         need(isinstance(record["references"], list), "INVALID_INPUT", "references must be a list", exit_code=2)
         refs = {}
         for ref in record["references"]:
-            fields(ref, ("id", "path", "components", "role", "decision_id"))
-            need(text(ref["id"]) and re.fullmatch(r"[a-z][a-z0-9-]*", ref["id"]),
-                 "INVALID_INPUT", "Invalid reference ID", exit_code=2)
+            fields(ref, ("id", "path", "components", "role", "decision_id"), ("supersedes",))
+            need(ref["role"] in FOUNDATION_ROLES | {"decision"}, "INVALID_INPUT", "Unknown foundation role", exit_code=2,
+                 actual=ref["role"])
+            decision = ref["role"] == "decision"
+            need(is_adr(ref["id"]) if decision else text(ref["id"]) and re.fullmatch(REFERENCE_ID, ref["id"]) is not None,
+                 "INVALID_INPUT", "Invalid reference ID for its role", exit_code=2, actual=ref["id"],
+                 remediation="Role decision requires an ADR-NNN ID; every other role a lowercase ID such as architecture.")
             need(ref["id"] not in refs, "ID_COLLISION", "Duplicate reference ID", entity=ref["id"])
             self.store.path(ref["path"])
             need(set(strings(ref["components"], nonempty=True)) <= self.profile.components.keys(),
                  "INVALID_REFERENCE", "Reference names unknown components", entity=ref["id"])
-            need(ref["role"] in {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design"},
-                 "INVALID_INPUT", "Unknown foundation role", exit_code=2)
             need(ref["decision_id"] is None or (text(ref["decision_id"]) and re.fullmatch(r"[a-zA-Z0-9-]+", ref["decision_id"])),
                  "INVALID_INPUT", "Invalid foundation decision ID", exit_code=2)
+            need(("supersedes" in ref) == decision, "INVALID_INPUT", "Only decision references carry supersedes",
+                 exit_code=2, entity=ref["id"])
+            if decision:
+                adr_ids(ref["supersedes"])
             refs[ref["id"]] = ref
+        supersession(refs)
         return refs
 
-    def write_reference(self, action, ref_id, path, components, role):
+    def write_reference(self, action, ref_id, path, components, role, supersedes=()):
         refs = self.references()
         need((ref_id in refs) == (action == "update"), "INVALID_REFERENCE",
              f"Cannot {action} reference with this ID", entity=ref_id)
+        need(not supersedes or role == "decision", "INVALID_INPUT", "--supersedes applies only to role decision",
+             exit_code=2, entity=ref_id, remediation="Remove --supersedes, or register an ADR-NNN with --role decision.")
         ref = {"id": ref_id, "path": path, "components": sorted(components),
                "role": role, "decision_id": None}
+        if role == "decision":
+            ref["supersedes"] = sorted(supersedes)
         refs[ref_id] = ref
         record = {"model_schema": 2, "references": [refs[key] for key in sorted(refs)]}
         self._validate_references(record)
+        folder = self.profile.adr["path"]
+        need(role != "decision" or in_folder(path, folder), "INVALID_PATH",
+             "An ADR must be a Markdown file inside the configured ADR folder", exit_code=2, entity=ref_id,
+             expected=folder, actual=path, remediation="Place the ADR under the [adr] path of the profile (default docs/adr).")
         source = self.store.path(path)
         need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
              "Reference requires an existing nonempty source", path=path)
@@ -141,7 +160,8 @@ class Kernel:
         need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
         content = source.read_bytes()
         need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
-        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)})
+        extra = {"supersedes": list(ref["supersedes"])} if ref["role"] == "decision" else {}
+        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)}, **extra)
         decision_id = decision["id"]
         ref["decision_id"] = decision_id
         writes = {".roclec/references.json": encoded({"model_schema": 2, "references": [refs[k] for k in sorted(refs)]}),
@@ -154,7 +174,8 @@ class Kernel:
         refs = self.references()
         roles, resolved, issues = set(), [], []
         for ref in refs.values():
-            if component not in ref["components"]:
+            # ADRs are not foundation roles: a proposed ADR never blocks unrelated changes.
+            if component not in ref["components"] or ref["role"] == "decision":
                 continue
             try:
                 path = self.store.path(ref["path"])
@@ -208,8 +229,17 @@ class Kernel:
              "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2)
         semantic = record["semantic"]
         fields(semantic, ("intention", "files", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-               ("baseline_release", "fixes"))
+               ("baseline_release", "fixes", "architecture_decisions"))
         scope = strings(semantic["components"], nonempty=True)
+        if "architecture_decisions" in semantic:
+            cited = declaration(semantic["architecture_decisions"]).get("adrs", [])
+            # Historical snapshots keep their pins; only the current proposal needs registered ADRs.
+            # Pins are compared at approval and gates, never here (no retroactive invalidation).
+            registered = self.references() if cited and not historical else {}
+            for entry in cited if not historical else []:
+                need(entry["id"] in registered and registered[entry["id"]]["role"] == "decision", "INVALID_REFERENCE",
+                     "Change cites an unregistered ADR", entity=entry["id"],
+                     remediation="Register the ADR with reference add ADR-NNN --role decision, or remove it from architecture_decisions.")
         need(set(scope) <= self.profile.components.keys(), "INVALID_REFERENCE", "Unknown change component")
         fingerprint(record["proposal_digest"])
         need(record["proposal_digest"] == digest({k: record[k] for k in ("id", "kind", "semantic")}),
@@ -388,7 +418,7 @@ class Kernel:
         for path in sorted(directory.glob("*.json")) if directory.exists() else []:
             record = self.read(path.relative_to(self.profile.root).as_posix())
             fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
-                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources"))
+                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes"))
             fingerprint(record["id"])
             need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
             seen.add(record["id"])
@@ -418,10 +448,16 @@ class Kernel:
             else:
                 ref = record["entity"]
                 sources = record.get("sources")
-                need(text(ref) and re.fullmatch(r"[a-z][a-z0-9-]*", ref)
+                need(text(ref) and (is_adr(ref) or re.fullmatch(REFERENCE_ID, ref) is not None)
                      and record.get("status") == "agreed" and isinstance(sources, dict) and sources.keys() == {ref},
                      "INVALID_INPUT", "Invalid foundation agreement", exit_code=2)
                 fingerprint(sources[ref])
+                if is_adr(ref):
+                    need("supersedes" in record, "INVALID_INPUT", "An ADR agreement must record its supersedes list",
+                         exit_code=2, entity=ref, path=path.name)
+                    adr_ids(record["supersedes"])
+            need("supersedes" not in record or (record["kind"] == "foundation" and is_adr(record["entity"])),
+                 "INVALID_INPUT", "Only an ADR agreement records supersedes", exit_code=2, path=path.name)
             chain = self._decision_chain(record)
             previous = record["previous"]
             existing = chains[chain].get(previous)
@@ -461,6 +497,7 @@ class Kernel:
         need(not any(d["kind"] == "change-cancel" for d in self.decisions(change_id)),
              "CHANGE_CANCELED", "Canceled work requires a new change", entity=change_id)
         need(proposal_digest == record["proposal_digest"], "APPROVAL_STALE", "Approval must cite the exact proposal digest")
+        Adrs(self).approvable(record)
         decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest)
         writes = {path: encoded(decision)}
         if new_ids:
@@ -499,6 +536,7 @@ class Kernel:
             return Releases(self).gate(component, release)
         record, _, _ = self.change(change_id, check_base=True, check_component=component)
         if stage == "approve":
+            Adrs(self).approvable(record)
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
         self._approved(record)
@@ -508,6 +546,9 @@ class Kernel:
         if foundation["issues"]:
             raise ModelError("FOUNDATION_INCOMPLETE", "Resolve foundation before implementation", entity=component,
                              actual=foundation["issues"])
+        if self.integration(change_id, component) is None:
+            # An integrated component keeps its historical pins: no retroactive invalidation.
+            Adrs(self).gate(record)
         assignments = [(r, entry) for r in self.releases() if r["record"]["component"] == component
                        for entry in r["record"]["changes"] if entry["change_id"] == change_id
                        and entry["intent_revision"] == record["proposal_digest"]]
@@ -593,7 +634,8 @@ class Kernel:
             issues.append(exc.issue)
         return {"change": record, "status": status, "components": progress, "approval": approval,
                 "approval_current": valid, "decisions": decisions, "issues": issues,
-                "integrations": {c: r for c, r in integrated.items() if r}}
+                "integrations": {c: r for c, r in integrated.items() if r},
+                "architecture_decisions": Adrs(self).declared(record)}
 
     def list_records(self, category):
         if category == "releases":
@@ -605,6 +647,8 @@ class Kernel:
             return [{"id": item["change"]["id"], "status": item["status"], "components": item["components"],
                      "approval_current": item["approval_current"]}
                     for item in items]
+        if category == "adrs":
+            return Adrs(self).list()
         if category == "futs":
             return [{"id": path.stem, "status": self.inspect_fut(path.stem)["status"]}
                     for path in sorted(self.store.path(".roclec/futs").glob("*.json"))]
@@ -621,7 +665,10 @@ class Kernel:
         return result
 
     def status(self):
-        components = {name: {"changes": [], "pending_gates": [], "unfinished_runs": [], "planning_releases": []}
+        adrs = Adrs(self)
+        view = adrs.view()
+        components = {name: {"changes": [], "pending_gates": [], "unfinished_runs": [], "planning_releases": [],
+                             "pending_adrs": adrs.pending(name, view)}
                       for name in sorted(self.profile.components)}
         gates = {"not-started": "implement", "in-progress": "verify", "verified": "integrate"}
         for change in self.list_records("changes"):
@@ -870,6 +917,7 @@ class Kernel:
                      "ID_COLLISION", "Historical contract identity conflicts with the registry", entity=name)
         self.references()
         self.decisions()
+        adr_warnings = Adrs(self).structure()
         for path in self.store.path(".roclec/futs").glob("*.json"):
             self.inspect_fut(path.stem)
         for path in sorted(self.store.path(".roclec/changes").glob("*/change.json")):
@@ -890,7 +938,7 @@ class Kernel:
         unfinished = []
         run_paths = sorted(self.store.path(".roclec/runs").glob("RUN-*/start.json"))
         groups, reports, runs = defaultdict(list), defaultdict(list), {}
-        warnings = []
+        warnings = list(adr_warnings)
         def scope(record):
             return (record["change_id"], record["component"], (record.get("release") or {}).get("version"))
         for path in run_paths:
