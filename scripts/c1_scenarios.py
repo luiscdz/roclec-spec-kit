@@ -670,3 +670,230 @@ def adr_scenarios(workspace, invoke, check):
     check("deficient ADR reports ADR_STRUCTURE as a warning", any(i["code"] == "ADR_STRUCTURE" and i["severity"] == "warning"
                                                                 and i["entity"] == "ADR-005" for i in warned), str(warned))
     return root
+
+
+def rejection_scenarios(workspace, invoke, check, inject):
+    """Exercise FX through the public CLI against the same fixture in both runners."""
+    root = workspace / "fx-consumer"
+    init_trunk(root)
+    config = workspace / "fx-profile.toml"
+    profile(config, ("engine",))
+    args = ["--project", str(root), "--json"]
+
+    def call(name, *command, fails=False, issue=None):
+        before = tree(root) if fails else None
+        result = invoke([*args, *map(str, command)])
+        data = json.loads(result.stdout)
+        check(name, (result.returncode != 0) == fails and data["ok"] == (not fails),
+              result.stdout + result.stderr)
+        if issue:
+            check(name + " code", issue in {item["code"] for item in data["issues"]}, result.stdout)
+        if fails:
+            check(name + " preserves files", before == tree(root), result.stdout)
+        return data["data"]
+
+    call("FX initialize", "init", root, "--profile", config)
+    foundation(root, ("engine",))
+    actor = ("--actor", "Human maintainer", "--reason", "Recorded during review")
+    correction_file = workspace / "fx-corrections.json"
+    put_json(correction_file, [{"id": "R-1", "description": "Explain the empty state"},
+                               {"id": "R-2", "description": "Show the update operation"}])
+    revise = ("--consequence", "revise", "--corrections", correction_file)
+    prototype = "mockups/preview.html"
+    preview = root / prototype
+    preview.parent.mkdir()
+    preview.write_bytes(b"<h1>Preview</h1>\r\n")
+    preview_hash = file_hash(preview.read_bytes())
+    folder = workspace / "fx-input"
+    draft = bundle(folder, components=("engine",))
+    draft["semantic"]["prototypes"] = [{"path": prototype}]
+    put_json(folder / "change.json", draft)
+    call("FX seal pins prototype", "change", "seal", folder)
+    draft = json.loads((folder / "change.json").read_bytes())
+    old_digest = draft["proposal_digest"]
+    call("FX import proposal", "change", "new", "--file", folder / "change.json")
+    change = root / ".roclec/changes/CHG-001"
+    original = {name: (change / name).read_bytes() for name in ("change.json", "proposal.md", "origins/request.md")}
+    base_reject = ("reject", "change", "CHG-001", "--digest", old_digest)
+    call("FX rejection requires actual actor", *base_reject, "--actor", " ", "--reason", "Review", *revise, fails=True)
+    call("FX rejection requires exact digest", "reject", "change", "CHG-001", "--digest", "0" * 64, *actor, *revise, fails=True)
+    call("FX revise requires corrections", *base_reject, *actor, "--consequence", "revise", fails=True)
+    evaluations = workspace / "fx-criteria.json"
+    put_json(evaluations, [{"id": "CR-001", "status": "met"}])
+    call("FX supplied criteria must include one not met", *base_reject, *actor, *revise, "--criteria", evaluations, fails=True)
+    put_json(evaluations, [{"id": "CR-001", "status": "not-met"}, {"id": "CR-002", "status": "n/a", "reason": "Out of scope"}])
+    subprocess.run(["git", "-C", str(root), "symbolic-ref", "HEAD", "refs/heads/side"], check=True)
+    call("FX rejects off trunk", *base_reject, *actor, *revise, fails=True, issue="OFF_TRUNK")
+    subprocess.run(["git", "-C", str(root), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+    rejection = call("FX reject exact draft", *base_reject, *actor, *revise, "--criteria", evaluations)["decision"]
+    check("FX retains actual actor and evaluations", rejection["actor"] == "Human maintainer"
+          and rejection["criteria"] == json.loads(evaluations.read_bytes()), str(rejection))
+    frozen = change / "rejected" / old_digest
+    check("FX freezes exact proposal bytes", all((frozen / name).read_bytes() == raw for name, raw in original.items()), str(frozen))
+    snapshot_file = frozen / "proposal.md"
+    snapshot_file.write_bytes(b"changed")
+    call("FX check detects changed rejection snapshot", "check", fails=True)
+    snapshot_file.write_bytes(original["proposal.md"])
+    rejected = call("FX inspect rejected draft", "inspect", "--change", "CHG-001")
+    check("FX inspection reports a rejected draft", rejected["status"] == "rejected" and not rejected["approval_current"], str(rejected))
+    call("FX rejects approval of unchanged draft", "change", "approve", "CHG-001", "--digest", old_digest, *actor, fails=True)
+    opened = call("FX lists unresolved rejection", "list", "rejections", "--open")["rejections"]
+    check("FX open contains recorded rejection", any(item["id"] == rejection["id"] for item in opened), str(opened))
+
+    draft_file = folder / "change.json"
+    (folder / "proposal.md").write_bytes(original["proposal.md"] + b"Describe the empty state.\n")
+    response = {"rejection": rejection["id"], "corrections": [{"id": "R-1", "status": "addressed"}]}
+    draft["semantic"]["addresses"] = response
+    put_json(draft_file, draft)
+    call("FX sealing requires every correction", "change", "seal", folder, fails=True)
+    response["corrections"].append({"id": "R-2", "status": "disputed"})
+    put_json(draft_file, draft)
+    call("FX disputed correction requires reason", "change", "seal", folder, fails=True)
+    response["corrections"][-1]["reason"] = "Update operation is already shown in the source"
+    put_json(draft_file, draft)
+    call("FX seal addressed proposal", "change", "seal", folder)
+    call("FX import addressed proposal under the same ID", "change", "new", "--file", draft_file)
+    new_digest = json.loads(draft_file.read_bytes())["proposal_digest"]
+    revised = call("FX inspect revised proposal", "inspect", "--change", "CHG-001")
+    check("FX inspection reports a revised draft", revised["status"] == "revised", str(revised))
+    check("FX revision closes rejection before approval",
+          not call("FX list open after revision", "list", "rejections", "--open")["rejections"], "")
+    intermediate = new_digest
+    second_rejection = call("FX rejects unapproved revision", "reject", "change", "CHG-001",
+                            "--digest", intermediate, *actor, *revise)["decision"]
+    draft["semantic"]["addresses"] = {**response, "rejection": second_rejection["id"]}
+    put_json(draft_file, draft)
+    call("FX seal second revision", "change", "seal", folder)
+    call("FX import second revision", "change", "new", "--file", draft_file)
+    new_digest = json.loads(draft_file.read_bytes())["proposal_digest"]
+    check("FX repeated rejection keeps the earlier correction link",
+          not call("FX list open after second revision", "list", "rejections", "--open")["rejections"], "")
+    call("FX approve addressed revision explicitly", "change", "approve", "CHG-001", "--digest", new_digest, *actor)
+    history = call("FX inspect proposal history", "inspect", "--change", "CHG-001")
+    history_json = json.dumps(history)
+    check("FX inspection carries rejected and revised digests and disputed correction",
+          old_digest in history_json and new_digest in history_json and "disputed" in history_json, history_json)
+    call("FX an approved revision cannot be imported over again", "change", "new", "--file", draft_file, fails=True)
+    call("FX plan proposal release", "release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
+    gate = ("check", "--gate", "implement", "--change", "CHG-001", "--component", "engine")
+    call("FX implement blocks without prototype checkpoint", *gate, fails=True)
+    checkpoint = ("checkpoint", prototype, "--digest", preview_hash)
+    call("FX approves exact prototype", *checkpoint, *actor, "--outcome", "approved")
+    call("FX implement accepts current visual approval", *gate)
+    preview.write_bytes(b"<h1>Changed preview</h1>\n")
+    call("FX edited prototype blocks implementation", *gate, fails=True)
+    preview.write_bytes(b"<h1>Preview</h1>\r\n")
+    first_preview = call("FX negative checkpoint revokes visual approval", *checkpoint,
+                         *actor, "--outcome", "rejected", *revise)["decision"]
+    call("FX rejected checkpoint blocks implementation", *gate, fails=True)
+    second_preview = call("FX records another rejection on the same prototype bytes", *checkpoint,
+                          *actor, "--outcome", "rejected", *revise)["decision"]
+    preview.write_bytes(b"<h1>Revised prototype</h1>\n")
+    last_preview = call("FX rejects another prototype revision", "checkpoint", prototype, "--digest",
+                        file_hash(preview.read_bytes()), *actor, "--outcome", "rejected", *revise)["decision"]
+    prototype_history = call("FX inspects prototype history", "inspect", "--prototype", prototype)["rejections"]
+    check("FX superseded prototype rounds preserve history without inferring responses",
+          [(row["id"], row["superseded_by"], row["revision"], row["open"]) for row in prototype_history] ==
+          [(first_preview["id"], second_preview["id"], None, False),
+           (second_preview["id"], last_preview["id"], None, False),
+           (last_preview["id"], None, None, True)], str(prototype_history))
+    still_open = call("FX lists only the latest prototype round", "list", "rejections", "--open")["rejections"]
+    check("FX open list drops superseded prototype rounds", [row["id"] for row in still_open] == [last_preview["id"]], str(still_open))
+
+    adr_file = root / "docs/adr/001-choice.md"
+    adr_file.parent.mkdir()
+    adr_content = b"# Synthetic ADR\r\n"
+    adr_file.write_bytes(adr_content)
+    call("FX register ADR", "reference", "add", "ADR-001", "--path", adr_file.relative_to(root),
+         "--component", "engine", "--role", "decision")
+    adr_hash = file_hash(adr_content)
+    call("FX cancel ADR", "reject", "adr", "ADR-001", "--digest", adr_hash, *actor, "--consequence", "cancel")
+    withdrawn = call("FX inspect withdrawn ADR", "inspect", "--adr", "ADR-001")
+    check("FX ADR state is withdrawn", withdrawn["state"] == "withdrawn", str(withdrawn))
+    adr_file.write_bytes(adr_content + b"Reconsidered\n")
+    call("FX canceled ADR cannot be agreed using same ID", "foundation", "agree", "--ref", "ADR-001", *actor, fails=True)
+
+    fut_file = workspace / "fx-fut.json"
+    put_json(fut_file, {"model_schema": 2, "id": "FUT-001", "finding": "Review later",
+                        "impact": "Architecture needs follow-up", "questions": [],
+                        "source": {"location": "request", "locator": "FX fixture"}})
+    ref_path = root / "docs/reference.md"
+    ref_reject = ("reject", "reference", "architecture", "--digest", file_hash(ref_path.read_bytes()), *actor,
+                  "--consequence", "defer", "--corrections", correction_file, "--fut", "FUT-001")
+    call("FX defer rejects missing FUT", *ref_reject, fails=True)
+    call("FX capture deferred work", "fut", "capture", "--file", fut_file)
+    call("FX defer links captured FUT", *ref_reject)
+    inspected = call("FX inspect deferred reference", "inspect", "--reference", "architecture")
+    check("FX reference history includes FUT", "FUT-001" in json.dumps(inspected), str(inspected))
+    call("FX explicitly resume deferred reference", "foundation", "agree", "--ref", "architecture", *actor)
+    revised_ref = root / "docs/engineering.md"
+    revised_ref.write_bytes(b"# Initial engineering reference\r\n")
+    call("FX repoint engineering reference", "reference", "update", "engineering", "--path",
+         revised_ref.relative_to(root), "--component", "engine", "--role", "engineering")
+    call("FX agrees on engineering reference", "foundation", "agree", "--ref", "engineering", *actor)
+    ref_pin = file_hash(revised_ref.read_bytes())
+    ref_decision = call("FX records requested changes to an agreed reference", "reject", "reference",
+                        "engineering", "--digest", ref_pin, *actor, *revise)["decision"]
+    call("FX old agreement no longer satisfies foundation", "foundation", "check", "--component", "engine", fails=True)
+    revised_ref.write_bytes(b"# Engineering with requested changes\r\n")
+    call("FX reference agreement requires addresses", "foundation", "agree", "--ref", "engineering", *actor, fails=True)
+    ref_addresses = workspace / "fx-reference-addresses.json"
+    put_json(ref_addresses, {**response, "rejection": ref_decision["id"]})
+    second_ref = call("FX reject revised reference with prior responses", "reject", "reference", "engineering",
+                      "--digest", file_hash(revised_ref.read_bytes()), *actor, *revise, "--addresses", ref_addresses)["decision"]
+    revised_ref.write_bytes(b"# Engineering with a second revision\r\n")
+    put_json(ref_addresses, {**response, "rejection": second_ref["id"]})
+    call("FX agree with linked reference corrections", "foundation", "agree", "--ref", "engineering",
+         *actor, "--addresses", ref_addresses)
+    call("FX revised reference satisfies foundation", "foundation", "check", "--component", "engine")
+    reference_history = call("FX inspect addressed reference", "inspect", "--reference", "engineering")
+    check("FX reference inspection links revision to rejection",
+          {item["id"] for item in reference_history["rejections"] if item["revision"] and not item["open"]}
+          == {ref_decision["id"], second_ref["id"]} and "disputed" in json.dumps(reference_history),
+          str(reference_history))
+    call("FX check validates recorded history", "check")
+
+    injector = """
+import sys
+from unittest.mock import patch
+from roclec_spec_kit.cli import main
+from roclec_spec_kit.store import Store
+original = Store._atomic
+count = 0
+
+def interrupted(store, path, content):
+    global count
+    count += 1
+    if count == 3:
+        raise OSError("FX injected interruption")
+    return original(store, path, content)
+
+with patch.object(Store, "_atomic", interrupted):
+    raise SystemExit(main(sys.argv[1:]))
+"""
+    result = inject(injector, [*args, "reject", "change", "CHG-001", "--digest", new_digest,
+                               *actor, "--consequence", "cancel"])
+    pending = json.loads(result.stdout)
+    check("FX cancel interruption leaves a recoverable journal",
+          result.returncode == 4 and pending["data"]["partial"], result.stdout + result.stderr)
+    operation = pending["data"]["operation_id"]
+    call("FX recover paired change rejection and cancellation", "operation", "recover", operation)
+    history = call("FX inspect canceled change", "inspect", "--change", "CHG-001")
+    check("FX recovery records rejection and change cancellation",
+          history["status"] == "canceled" and {"rejection", "change-cancel"} <= {d["kind"] for d in history["decisions"]},
+          str(history))
+    before = tree(root)
+    call("FX recover cancellation a second time", "operation", "recover", operation)
+    check("FX recovery is idempotent", before == tree(root), "")
+    call("FX check validates recovered cancellation", "check")
+
+    root = workspace / "fx-previously-canceled"
+    init_trunk(root)
+    args = ["--project", str(root), "--json"]
+    call("FX initialize legacy cancellation fixture", "init", root, "--profile", config)
+    standalone = workspace / "fx-cancel-input"
+    unrelated = bundle(standalone, components=("engine",))
+    call("FX import fresh proposal for ordinary cancellation", "change", "new", "--file", standalone / "change.json")
+    call("FX ordinary cancellation", "change", "cancel", "CHG-001", *actor)
+    call("FX already canceled change cannot be rejected", "reject", "change", "CHG-001", "--digest", unrelated["proposal_digest"],
+         *actor, *revise, fails=True, issue="CHANGE_CANCELED")

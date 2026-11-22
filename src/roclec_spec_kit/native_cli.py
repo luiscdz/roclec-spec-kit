@@ -23,6 +23,27 @@ class Parser(argparse.ArgumentParser):
         raise ModelError("INVALID_INPUT", message, exit_code=2, remediation=self.format_usage().strip())
 
 
+def subject_decision_arguments(parser):
+    for name in ("digest", "actor", "reason"):
+        parser.add_argument(f"--{name}", required=True)
+
+
+def rejection_arguments(parser, *, required=False):
+    parser.add_argument("--consequence", choices=("revise", "cancel", "defer"), required=required)
+    parser.add_argument("--corrections", type=Path, help="JSON list of requested corrections")
+    parser.add_argument("--fut", help="Captured FUT for a deferred rejection")
+    parser.add_argument("--criteria", type=Path, help="JSON list of evaluated criteria")
+    parser.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
+
+
+def record_rejection(kernel, args, subject_type):
+    return kernel.reject(subject_type, args.entity, args.digest, args.actor, args.reason,
+                         consequence=args.consequence, fut=args.fut,
+                         corrections=read_json(args.corrections.resolve()) if args.corrections else [],
+                         criteria=read_json(args.criteria.resolve()) if args.criteria else [],
+                         addresses=read_json(args.addresses.resolve()) if args.addresses else None)
+
+
 def build_parser():
     parser = Parser(prog="roclec", description="Native contract/change/release workflow, profile 3")
     parser.add_argument("--project", default=".")
@@ -32,19 +53,19 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
-    listing.add_argument("category", choices=("adrs", "changes", "futs", "releases", "runs", "findings"))
+    listing.add_argument("category", choices=("adrs", "changes", "findings", "futs", "rejections", "releases", "runs"))
     scope = listing.add_mutually_exclusive_group()
     scope.add_argument("--change")
     scope.add_argument("--release")
     listing.add_argument("--component")
-    listing.add_argument("--open", action="store_true", help="Show only open or still-open findings")
+    listing.add_argument("--open", action="store_true", help="Show open findings or rejections awaiting a revision")
     listing.add_argument("--origin", help="Filter changes by source identifier")
     init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
     inspect = sub.add_parser("inspect", help="Read integrated, proposed or historical state")
     selectors = inspect.add_mutually_exclusive_group(required=True)
-    for name in ("adr", "capability", "change", "fut", "release"):
+    for name in ("adr", "capability", "change", "fut", "prototype", "reference", "release"):
         selectors.add_argument(f"--{name}")
     inspect.add_argument("--component")
     inspect.add_argument("--at")
@@ -57,6 +78,17 @@ def build_parser():
     agree = fsub.add_parser("agree")
     for name in ("ref", "actor", "reason"):
         agree.add_argument(f"--{name}", required=True)
+    agree.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
+    rejection = sub.add_parser("reject", help="Record a human rejection of an exact revision")
+    rejection.add_argument("subject_type", choices=("change", "adr", "reference", "prototype"))
+    rejection.add_argument("entity", help="Change or reference ID, or project-relative prototype path")
+    subject_decision_arguments(rejection)
+    rejection_arguments(rejection, required=True)
+    checkpoint = sub.add_parser("checkpoint", help="Record a human decision on a prototype revision")
+    checkpoint.add_argument("entity", metavar="PATH")
+    checkpoint.add_argument("--outcome", choices=("approved", "rejected"), required=True)
+    subject_decision_arguments(checkpoint)
+    rejection_arguments(checkpoint)
     reference = sub.add_parser("reference")
     rsub = reference.add_subparsers(dest="action", required=True)
     for name in ("add", "update"):
@@ -204,9 +236,23 @@ def execute(args):
         if args.category == "findings":
             need(args.origin is None, "INVALID_INPUT", "--origin applies only to changes", exit_code=2)
             return {"findings": list_findings(kernel, args)}
-        need(all(value is None for value in (args.change, args.release, args.component)) and not args.open,
+        need(all(value is None for value in (args.change, args.release, args.component)),
              "INVALID_INPUT", "Finding filters require list findings", exit_code=2)
-        return {args.category: kernel.list_records(args.category, origin=args.origin)}
+        need(not args.open or args.category == "rejections", "INVALID_INPUT",
+             "--open applies only to list findings or rejections", exit_code=2)
+        return {args.category: kernel.list_records(args.category, origin=args.origin, open_only=args.open)}
+    if command == "reject":
+        return record_rejection(kernel, args, args.subject_type)
+    if command == "checkpoint":
+        if args.outcome == "rejected":
+            need(args.consequence is not None, "INVALID_INPUT",
+                 "A rejected checkpoint needs --consequence", exit_code=2)
+            return record_rejection(kernel, args, "prototype")
+        need(all(value is None for value in (args.consequence, args.corrections, args.fut, args.criteria)),
+             "INVALID_INPUT", "Rejection details apply only to a rejected checkpoint", exit_code=2)
+        addresses = read_json(args.addresses.resolve()) if args.addresses else None
+        return kernel.checkpoint(args.entity, args.digest, args.actor, args.reason,
+                                 outcome=args.outcome, addresses=addresses)
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:
@@ -244,6 +290,10 @@ def execute(args):
         if args.adr:
             from .adr import Adrs
             return Adrs(kernel).inspect(args.adr)
+        if args.reference:
+            return kernel.inspect_reference(args.reference)
+        if args.prototype:
+            return kernel.inspect_prototype(args.prototype)
         need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
         result = kernel.release(args.component, args.release)
         from .verification import Verification
@@ -255,7 +305,8 @@ def execute(args):
         return result
     if command == "foundation":
         if action == "agree":
-            return kernel.agree_foundation(args.ref, args.actor, args.reason)
+            addresses = read_json(args.addresses.resolve()) if args.addresses else None
+            return kernel.agree_foundation(args.ref, args.actor, args.reason, addresses=addresses)
         return kernel.foundation(args.component, args.change)
     if command == "reference":
         return kernel.write_reference(action, args.id, args.path, args.component, args.role, args.supersedes)
@@ -375,9 +426,10 @@ def main(argv=None):
                 exit_code = 1
             if args.command == "inspect" and args.change:
                 status = result["status"]
-                if status != "canceled":
+                if status not in {"canceled", "rejected"}:
                     actions = {
                         "draft": ("change approve", "Review the proposal and approve the current digest"),
+                        "revised": ("change approve", "Review the corrections and approve the revised digest"),
                         "approved": ("check --gate implement", "Check foundation, dependencies and release assignment"),
                         "in-progress": ("run verify", "Run checks for the implementation candidate"),
                         "verified": ("integrate prepare", "Prepare integration using the current run"),

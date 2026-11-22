@@ -16,8 +16,8 @@ from .model import ModelError, fields, fingerprint, need, sha, strings, text
 ADR_ID = r"ADR-[0-9]{3,}"
 # Derived states in rule order (first match wins, see Adrs.view); later lifecycle
 # states such as rejected or withdrawn are inserted where they belong.
-STATES = ("superseded", "proposed", "stale", "accepted")
-PENDING = ("proposed", "stale")
+STATES = ("withdrawn", "superseded", "rejected", "revised", "proposed", "stale", "accepted")
+PENDING = ("proposed", "stale", "rejected", "revised", "withdrawn")
 DECLARE = ('Add "architecture_decisions" to the change semantic as {"adrs": [{"id": "ADR-NNN"}]} or '
            '{"none": "reason"}, then seal the bundle again and approve the new proposal digest.')
 REPIN = ("Pin the current ADR bytes again (remove the entry's sha256 and run change seal, which fills it), "
@@ -118,7 +118,8 @@ class Adrs:
     def view(self):
         """Derived state per registered ADR, keyed and sorted by ID."""
         refs = {i: r for i, r in self.k.references().items() if r["role"] == "decision"}
-        agreed = {d["id"]: d for d in self.k.decisions() if d["kind"] == "foundation" and is_adr(d["entity"])}
+        decisions = self.k.decisions()
+        agreed = {d["id"]: d for d in decisions if d["kind"] == "foundation" and is_adr(d["entity"])}
         agreements, current = {}, {}
         for adr_id, ref in refs.items():
             record = agreed.get(ref["decision_id"])
@@ -147,6 +148,10 @@ class Adrs:
                 state = "stale"
             else:
                 state = "accepted"
+            from .rejection import Rejections
+            rejection_state = Rejections(self.k).state("adr", adr_id, current[adr_id], approved=state == "accepted", decisions=decisions)
+            if rejection_state == "withdrawn" or (state != "superseded" and rejection_state in {"rejected", "revised"}):
+                state = rejection_state
             result[adr_id] = {
                 "id": adr_id, "path": ref["path"], "components": ref["components"], "state": state,
                 "sha256": current[adr_id],
@@ -193,7 +198,8 @@ class Adrs:
                             "sha256": pin, "pin_current": pin == entry["sha256"]} for revision, components, pin in cited)
         return {"adr": ref, "state": entry["state"], "sha256": entry["sha256"], "agreement": entry["agreement"],
                 "supersedes": entry["supersedes"], "superseded_by": entry["superseded_by"],
-                "chain": {"replaces": closure("replaces"), "replaced_by": closure("superseded_by")}, "changes": changes}
+                "chain": {"replaces": closure("replaces"), "replaced_by": closure("superseded_by")}, "changes": changes,
+                "rejections": self.k.inspect_reference(adr_id)["rejections"]}
 
     def citations(self, change_id, adr_id):
         """(revision, integrated components, pinned sha) for the current proposal and every integrated
@@ -258,6 +264,9 @@ class Adrs:
                 "stale": f"Re-agree the edited ADR with foundation agree --ref {cited['id']}, or restore its agreed content and supersedes.",
                 "superseded": f"Cite the replacing ADR ({', '.join(entry['superseded_by'])}) in a new proposal revision and approve it again.",
                 "accepted": REPIN,
+                "rejected": "Revise the ADR and address every correction before agreement.",
+                "revised": "Agree the revised ADR with correction responses.",
+                "withdrawn": "Register a new ADR ID for a new proposal.",
             }[entry["state"]]
             failures.append({"id": cited["id"], "state": entry["state"], "pinned": cited["sha256"], "agreed": agreed,
                              "superseded_by": entry["superseded_by"], "remediation": remediation})

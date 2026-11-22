@@ -306,6 +306,11 @@ def scenarios(workspace, invoke, check):
     call("I-011 integrate remaining component", "operation", "apply", second_plan)
     state = call("I-011 inspect fully integrated change", "inspect", "--change", "CHG-001")
     check("I-011 all participants integrated", state["status"] == "integrated")
+    corrections = workspace / "fx-integrated-corrections.json"
+    put_json(corrections, [{"id": "R-1", "description": "Clarify the historical change"}])
+    call("FX integrated changes need a new change", "reject", "change", "CHG-001",
+         "--digest", state["change"]["proposal_digest"], "--actor", "Fixture maintainer",
+         "--reason", "Request follow-up", "--consequence", "revise", "--corrections", corrections, expect=1)
     before = tree(root)
     call("I-026 old receipt never rolls back later index", "operation", "apply", plan_path)
     check("I-026 later index preserved", tree(root) == before)

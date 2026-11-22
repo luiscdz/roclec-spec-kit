@@ -5,6 +5,7 @@ import base64
 from datetime import datetime, timezone
 import fcntl
 import os
+import re
 from pathlib import Path
 import socket
 import subprocess
@@ -143,11 +144,28 @@ class Store:
             directory = directory.parent
 
     def _allowed(self, kind, payload, paths):
+        snapshot = None
+        if kind == "reject":
+            subject = payload.get("subject")
+            need(isinstance(subject, dict) and set(subject) == {"type", "entity", "digest"}
+                 and isinstance(subject["type"], str) and subject["type"] in {"change", "adr", "reference", "prototype"}
+                 and subject["entity"] == payload.get("id"), "OPERATION_CONFLICT", "Invalid rejection subject", exit_code=3)
+            fingerprint(subject["digest"])
+            entity = subject["entity"]
+            need(isinstance(entity, str) and bool(entity.strip()), "OPERATION_CONFLICT", "Invalid subject identity", exit_code=3)
+            if subject["type"] == "change":
+                need(re.fullmatch(r"CHG-[0-9]{3,}", entity) is not None, "OPERATION_CONFLICT", "Invalid change subject", exit_code=3)
+                base = f".roclec/changes/{entity}"
+            else:
+                base = f".roclec/subjects/{subject['type']}/{digest(entity)}"
+            snapshot = f"{base}/rejected/{subject['digest']}/"
         roots = {
             "init": (".roclec/project.toml", ".roclec/current.json", ".roclec/references.json", ".roclec/identities.json", ".gitignore"),
             "change-new": (f".roclec/changes/{payload.get('id')}/", ".roclec/identities.json"),
             "change-approve": (f".roclec/changes/{payload.get('id')}/revisions/", ".roclec/decisions/", ".roclec/identities.json"),
             "change-start": (".roclec/decisions/",),
+            "reject": (".roclec/decisions/", snapshot),
+            "checkpoint": (".roclec/decisions/",),
             "change-cancel": (".roclec/decisions/",),
             "reference-add": (".roclec/references.json",),
             "reference-update": (".roclec/references.json",),
@@ -172,6 +190,11 @@ class Store:
              "This operation cannot delete files", exit_code=3)
         for relative in paths:
             path = self.path(relative)
+            if kind == "change-new":
+                parts = Path(relative).parts
+                need(len(parts) > 3 and parts[3] not in {"rejected", "revisions"}
+                     or relative == ".roclec/identities.json", "OPERATION_CONFLICT",
+                     "Change import cannot overwrite frozen snapshots", exit_code=3, path=relative)
             need(not path.exists() or path.is_file(), "UNMANAGED_FILE", "Write target is not a file", path=relative)
             need(any(relative.startswith(r) if r.endswith("/") else relative == r for r in roots[kind]),
                  "OPERATION_CONFLICT", "Write is outside this operation's namespace", exit_code=3, path=relative)
@@ -252,6 +275,7 @@ class Store:
             need(self.token() == expected_token, "BASE_CONFLICT", "Project inputs changed during validation", exit_code=3)
             if validate:
                 validate()
+            self._source_guards(payload)
             previous = {p: self.path(p).read_bytes() if self.path(p).exists() else None for p in writes}
             before = {p: sha(b) if b is not None else None for p, b in previous.items()}
             guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
@@ -324,6 +348,7 @@ class Store:
                 Releases(Kernel(load_profile(self.root), allow_pending=True)).recovery_guard(journal["payload"])
             except ModelError as exc:
                 raise ModelError("OPERATION_CONFLICT", "Release candidate or remote diverged during recovery", exit_code=3, actual=exc.issue) from exc
+        self._source_guards(journal["payload"])
         # Validate every destination before completing any interrupted write.
         for relative, content in writes.items():
             path = self.path(relative)
@@ -352,6 +377,13 @@ class Store:
                                entity=operation_id, remediation=f"operation recover {operation_id}")
             error.operation_id, error.partial = operation_id, True
             raise error from exc
+
+    def _source_guards(self, payload):
+        for relative, pin in payload.get("source_guards", {}).items():
+            fingerprint(pin)
+            source = self.path(relative)
+            need(source.is_file() and sha(source.read_bytes()) == pin, "OPERATION_CONFLICT",
+                 "Subject source changed during the operation", exit_code=3, path=relative)
 
     def _current_hash(self, relative):
         path = self.path(relative)

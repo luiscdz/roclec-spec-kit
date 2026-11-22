@@ -56,6 +56,7 @@ Para consultar únicamente, pide «Roclec, ¿en qué estado está el cambio del 
 
 - **Alcance o aprobación.** El coordinador muestra la propuesta concreta y pregunta por la decisión pendiente. Si un cambio de alcance genera una revisión nueva, la aprobación debe corresponder a esa revisión.
 - **Decisiones de arquitectura.** El coordinador te presenta cada ADR propuesto con sus alternativas y consecuencias. Solo tu acuerdo lo acepta, y la implementación espera a que todos los ADR citados estén aceptados. [ADR](c1.md#decisiones-de-arquitectura-adr)
+- **Rechazos y correcciones.** Puedes rechazar una propuesta, ADR, referencia o prototipo indicando qué corregir y si deseas revisar, cancelar o diferir. El coordinador registra tu actor y motivo, conserva el contenido rechazado y presenta la revisión y las correcciones disputadas para tu decisión. [Rechazos y prototipos](c1.md#rechazos-y-prototipos)
 - **Diseño, versión o política.** Intervienes si la decisión es material y el proyecto aún no tiene una regla o un acuerdo aplicable.
 - **Evidencia o aceptación externa.** Por ejemplo, una validación en un dispositivo al que el agente no tiene acceso, una revisión independiente exigida o una aprobación de Git que depende de otra persona.
 
