@@ -5,10 +5,10 @@ import json
 from pathlib import Path
 
 try:
-    from .c1_scenarios import tree, bundle, snapshot, digest, put_json
+    from .c1_scenarios import tree, bundle, snapshot, digest, put_json, adr_bundle, adr_caller, adr_markdown
     from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
 except ImportError:
-    from c1_scenarios import tree, bundle, snapshot, digest, put_json
+    from c1_scenarios import tree, bundle, snapshot, digest, put_json, adr_bundle, adr_caller, adr_markdown
     from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
 
 
@@ -80,6 +80,10 @@ def scenarios(workspace, invoke, check):
     release = call("I-032 read frozen publication", "inspect", "--release", "v1.0.0", "--component", "engine")
     check("I-031 component publication independent", release["status"] == "published" and not (root / ".roclec/releases/viewer/v1.0.0/publication.json").exists())
     check("I-032 exact shipped candidate frozen", release["publication"]["commit"] == shipped and release["publication"]["evidence"]["preparation"] == preparation)
+    release_member = release["record"]["changes"][0]
+    frozen_source = root / ".roclec/changes/CHG-001/revisions" / release_member["intent_revision"] / "origins/request.md"
+    check("FO published release retains the captured approved origin", frozen_source.read_text(encoding="utf-8")
+          == "Synthetic request: present the agreed result.\n")
     call("I-032 published membership immutable", "release", "plan", "engine", "v1.0.0", "--clear", expect=1, issue="VERSION_INVALID")
     decision_file = workspace / "published-finding-decision.json"
     put_json(decision_file, {**release_scope, "kind": "finding-decision", "status": "accepted",
@@ -283,3 +287,60 @@ def review_scenarios(workspace, invoke, check):
     commit(root)
     call("D3 disabled release review allows gate", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")
     check("D3 old preparations/reports remain historical", all(p.exists() for p in previous) and len(list((root / ".roclec/evidence").glob("*.json"))) == 10)
+
+
+def adr_scenarios(workspace, invoke, check):
+    """A member citing a later-superseded ADR is reported by the release gate, which still prepares and applies."""
+    root, base = setup(workspace / "c3-adr", invoke, names=("engine",))
+    call = adr_caller(root, invoke, check)
+
+    def register(adr_id, *supersedes):
+        path = root / "docs/adr" / f"{adr_id}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(adr_markdown(f"{adr_id}: Decision"), encoding="utf-8")
+        args = ["reference", "add", adr_id, "--path", f"docs/adr/{adr_id}.md", "--component", "engine", "--role", "decision"]
+        for older in supersedes:
+            args += ["--supersedes", older]
+        call(f"C3 ADR register {adr_id}", *args)
+        call(f"C3 ADR agree {adr_id}", "foundation", "agree", "--ref", adr_id, "--actor", "Maintainer", "--reason", "Accepted ADR")
+
+    def integrate(change_id):
+        run = call(f"C3 ADR verify {change_id}", "run", "verify", change_id, "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
+        commit(root)
+        plan = workspace / f"c3-adr-{change_id}.json"
+        call(f"C3 ADR prepare {change_id}", "integrate", "prepare", change_id, "--component", "engine", "--run", run["id"], "--out", plan)
+        call(f"C3 ADR apply {change_id}", "operation", "apply", plan)
+
+    register("ADR-001")
+    commit(root)
+    integrate("CHG-001")
+    folder = adr_bundle(workspace / "c3-adr-bundle", "CHG-002", {"adrs": [{"id": "ADR-001"}]}, base=snapshot(("engine",)))
+    call("C3 ADR seal citing change", "change", "seal", folder)
+    call("C3 ADR new citing change", "change", "new", "--file", folder / "change.json")
+    record = json.loads((folder / "change.json").read_text())
+    call("C3 ADR approve citing change", "change", "approve", "CHG-002", "--digest", record["proposal_digest"],
+         "--actor", "fixture", "--reason", "Approved scope")
+    call("C3 ADR release membership", "release", "plan", "engine", "v1.0.0", "--change", "CHG-001", "--change", "CHG-002")
+    commit(root)
+    integrate("CHG-002")
+    register("ADR-002", "ADR-001")
+    commit(root)
+    run = call("C3 ADR final release run", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
+    policy = call("C3 ADR inspect final review policy", "inspect", "--release", "v1.0.0", "--component", "engine")["data"]["review_policy"]
+    report = workspace / "c3-adr-review.json"
+    put_json(report, {"model_schema": 2, "kind": "independent-review", "change_id": None, "component": "engine",
+                      "release": run["release"], "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"],
+                      "policy_id": policy["id"], "actor": "Fixture reviewer", "role": "reviewer", "context": "C3 review fixture",
+                      "outcome": "ready", "acceptance_ids": [], "checks": ["Observed synthetic behavior"], "limitations": [],
+                      "findings": [{**finding("F-1", "minor"), "acceptance_ids": []}], "resolutions": []})
+    evidence = call("C3 FH record a nonmaterial release finding", "evidence", "record", "--file", report)["data"]["evidence"]
+    commit(root)
+    gate = call("C3 ADR and FH release limitations do not block", "check", "--component", "engine", "--gate", "release", "--release", "v1.0.0")["data"]
+    check("C3 release gate reports open findings and superseded ADRs as objects", gate["limitations"] == [
+        {"code": "FINDING_OPEN", "key": evidence["id"] + "#F-1"},
+        {"code": "ADR_SUPERSEDED", "change_id": "CHG-002", "adr": "ADR-001", "superseded_by": ["ADR-002"]}], str(gate.get("limitations")))
+    out = workspace / "c3-adr-release.json"
+    plan = call("C3 ADR release prepare still works", "release", "prepare", "engine", "v1.0.0", "--run", run["id"], "--out", out)["data"]["plan"]
+    call("C3 ADR release preparation applies", "operation", "apply", out)
+    stored = list((root / ".roclec/releases/engine/v1.0.0/preparations").glob("*.json"))
+    check("C3 ADR preparation is persisted", len(stored) == 1 and plan["inputs"]["preparation"], "")

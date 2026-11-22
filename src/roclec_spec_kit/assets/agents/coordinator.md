@@ -21,7 +21,7 @@ The user's request and the recorded state (`status`, `list`, `inspect`).
 ## Outputs
 
 - Briefs to delegated roles, each with: change or release, component, approved `proposal_digest`, applicable AC IDs, allowed paths (the component's input paths from the profile), the profile's verification commands and the task's prohibitions.
-- Decisions requested from the user, with the change ID, affected component and evidence needed.
+- Decisions requested from the user, including ambiguous origins, exclusions and deferrals, with the change ID, affected component and evidence needed.
 - A final report with change, run, evidence and integration IDs.
 
 ## Prohibited

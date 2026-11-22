@@ -12,10 +12,12 @@ Esta guía describe el flujo nativo del perfil 3 después de [instalar las skill
 
 | Etapa | Trabajo del coordinador | Resultado que puedes revisar |
 | --- | --- | --- |
-| Definir | Busca cambios relacionados, consulta el contrato vigente y prepara la propuesta. Aclara las decisiones que afecten el comportamiento, los permisos o el alcance. | ID del cambio, propuesta y criterios de aceptación. |
+| Definir | Busca cambios relacionados, consulta el contrato vigente y prepara la propuesta. Aclara las decisiones que afecten el comportamiento, los permisos o el alcance, y redacta como ADR propuesto la decisión de arquitectura que lo merezca. | ID del cambio, propuesta, criterios de aceptación y ADR que aplica, o ninguno con su motivo. |
 | Aprobar y preparar | Registra la aprobación explícita de esa propuesta. Reúne las referencias de fundación, incorpora diseño cuando aplica y prepara el plan y las tareas proporcionales al cambio. Asigna la versión acordada o la que determine la política del proyecto. | Propuesta aprobada, referencias aplicables y release asignada por componente. |
 | Implementar y verificar | Comprueba los prerrequisitos, implementa en el repositorio del componente y ejecuta las pruebas del perfil, registrando qué rol y qué contexto produjeron el run. Vincula la evidencia al candidato y obtiene la revisión independiente en un contexto distinto cuando la política está habilitada por defecto o explícitamente. | Código, resultados de comprobación y cobertura de los criterios aplicables. |
 | Integrar | Sigue el proceso Git autorizado. Con el repositorio de código limpio y el candidato presente en la rama destino configurada, prepara y aplica la integración desde la troncal de specs. | Registro de integración del componente y revisión vigente del contrato. |
+
+La propuesta conserva una copia Markdown de cada origen y relaciona sus criterios con los criterios de aceptación, exclusiones o diferimientos. El coordinador presenta las exclusiones y diferimientos antes de aprobar. Captura solo el texto necesario y redacta datos personales antes de sellar. Si la fuente cambia, incorporar su texto actualizado crea otra revisión que requiere aprobación. Puedes consultar la cobertura con `inspect --change CHG-001` y buscar cambios con `list changes --origin ID`.
 
 Si tienes una idea que todavía quieres investigar, pide «Roclec, registra esta idea para evaluarla». Se puede capturar como FUT con su fuente y sus preguntas. Si luego se promueve, el coordinador sigue el destino registrado y comprueba si el cambio ya tiene aprobación. [Autoría y descubrimiento](c1.md)
 
@@ -53,6 +55,7 @@ Para consultar únicamente, pide «Roclec, ¿en qué estado está el cambio del 
 ## Cuándo intervienes
 
 - **Alcance o aprobación.** El coordinador muestra la propuesta concreta y pregunta por la decisión pendiente. Si un cambio de alcance genera una revisión nueva, la aprobación debe corresponder a esa revisión.
+- **Decisiones de arquitectura.** El coordinador te presenta cada ADR propuesto con sus alternativas y consecuencias. Solo tu acuerdo lo acepta, y la implementación espera a que todos los ADR citados estén aceptados. [ADR](c1.md#decisiones-de-arquitectura-adr)
 - **Diseño, versión o política.** Intervienes si la decisión es material y el proyecto aún no tiene una regla o un acuerdo aplicable.
 - **Evidencia o aceptación externa.** Por ejemplo, una validación en un dispositivo al que el agente no tiene acceso, una revisión independiente exigida o una aprobación de Git que depende de otra persona.
 
