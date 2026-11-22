@@ -15,7 +15,7 @@ from roclec_spec_kit.kernel import Kernel
 from roclec_spec_kit.model import ModelError
 from roclec_spec_kit.store import Store
 from scripts.c1_scenarios import (bundle, digest, file_hash, foundation, init_trunk, profile, put_json,
-                                 scenarios, seed_current, seed_publication, snapshot, tree, write_snapshot)
+                                 rejection_scenarios, scenarios, seed_current, seed_publication, snapshot, tree, write_snapshot)
 
 
 def invoke(argv):
@@ -59,6 +59,18 @@ class KernelTest(unittest.TestCase):
     def test_full_consumer_scenarios(self):
         # Same scenarios are subsequently run using only the installed wheel CLI.
         scenarios(self.workspace, invoke, self.check_case)
+
+    def test_human_rejection_consumer_scenarios(self):
+        def inject(code, argv):
+            with mock.patch("sys.argv", ["roclec", *argv]):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exited:
+                        exec(code, {})
+                return SimpleNamespace(returncode=exited.exception.code,
+                                       stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+        rejection_scenarios(self.workspace, invoke, self.check_case, inject)
 
     def test_foundation_authoring_binds_agreement_to_source_bytes(self):
         source = self.root / "foundation.md"

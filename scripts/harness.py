@@ -142,7 +142,7 @@ def viewer_harness(wheel: Path, workspace: Path, cases: list[dict]):
 
 
 def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibility=False):
-    from c1_scenarios import bundle, init_trunk, scenarios, tree
+    from c1_scenarios import bundle, init_trunk, rejection_scenarios, scenarios, tree
 
     def check(name, condition, evidence=''):
         cases.append({'scope': 'C1-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -158,14 +158,18 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
         for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
-                     'agents.py', 'adr.py', 'findings.py', 'assets/templates/adr-template.md',
-                     'assets/skills/roclec-reviewer/references/report-template.md',
+                     'agents.py', 'adr.py', 'findings.py', 'rejection.py', 'assets/templates/adr-template.md',
+                     'assets/project/model.md', 'assets/skills/roclec-reviewer/references/report-template.md',
+                     *(f'assets/skills/roclec-{skill}/SKILL.md' for skill in ('analyze', 'clarify', 'coordinator', 'prototype', 'specify')),
                      *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
     from c1_scenarios import adr_scenarios as c1_adr_scenarios
     c1_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
-    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios, findings_scenarios
+    rejection_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check,
+                        lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace))
+    from c2_scenarios import (scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios,
+                              branch_scenarios, findings_scenarios)
 
     def c2_check(name, condition, evidence=''):
         cases.append({'scope': 'C2-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})

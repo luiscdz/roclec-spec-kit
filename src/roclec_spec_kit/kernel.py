@@ -17,6 +17,7 @@ from .model import (ModelError, checked_files, digest, encoded, fields, fingerpr
                     validate_contract, validate_delta, version_key)
 from .store import Store
 from .origins import captured_paths, validate_coverage
+from .rejection import Rejections, addresses, validate_decision
 
 FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design"}
 REFERENCE_ID = r"[a-z][a-z0-9-]*"
@@ -130,6 +131,8 @@ class Kernel:
 
     def write_reference(self, action, ref_id, path, components, role, supersedes=()):
         refs = self.references()
+        if action == "update" and ref_id in refs:
+            Rejections(self).withdrawn("adr" if refs[ref_id]["role"] == "decision" else "reference", ref_id)
         need((ref_id in refs) == (action == "update"), "INVALID_REFERENCE",
              f"Cannot {action} reference with this ID", entity=ref_id)
         need(not supersedes or role == "decision", "INVALID_INPUT", "--supersedes applies only to role decision",
@@ -152,7 +155,130 @@ class Kernel:
                                    {".roclec/references.json": encoded(record)}, self.token)
         return {"reference": ref, "receipt": receipt}
 
-    def agree_foundation(self, ref_id, actor, reason):
+    def reject(self, subject_type, entity, subject_digest, actor, reason, *, consequence, corrections=(), fut=None, criteria=(), addresses=None):
+        service = Rejections(self)
+        if subject_type == "change":
+            need(not any(d["kind"] == "change-cancel" for d in self.decisions(entity)), "CHANGE_CANCELED",
+                 "Canceled work requires a new change", entity=entity)
+            current, _, _ = self.change(entity)
+            self._cancelable_components(current)
+        service.withdrawn(subject_type, entity)
+        fingerprint(subject_digest)
+        need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
+        need(consequence in {"revise", "cancel", "defer"}, "INVALID_INPUT", "Unknown rejection consequence", exit_code=2)
+        from .rejection import corrections as validate_corrections, criteria as validate_criteria
+        validate_corrections(corrections, consequence)
+        validate_criteria(criteria)
+        need((consequence == "defer") == (fut is not None), "INVALID_INPUT", "Only defer requires a FUT", exit_code=2)
+        if fut is not None:
+            self.inspect_fut(fut)
+        pin, files = service.subject(subject_type, entity)
+        need(pin == subject_digest, "APPROVAL_STALE", "Rejection must cite the current subject digest", expected=pin, actual=subject_digest)
+        subject = {"type": subject_type, "entity": entity, "digest": pin}
+        extra = {"subject": subject, "consequence": consequence, "corrections": list(corrections),
+                 "criteria": list(criteria), "files": {p: sha(b) for p, b in files.items()}}
+        if fut is not None:
+            extra["fut"] = fut
+        if addresses is not None:
+            service.require_addresses(subject_type, entity, pin, addresses)
+            extra["addresses"] = addresses
+        decision, path = self._decision("rejection", entity, actor, reason, **extra)
+        writes = {path: encoded(decision)}
+        for relative, data in files.items():
+            target = f"{service.root(subject)}/{relative}"
+            need(not self.store.path(target).exists() or self.store.path(target).read_bytes() == data,
+                 "HASH_MISMATCH", "Rejected snapshot was modified", path=target)
+            writes[target] = data
+        result = {"decision": decision}
+        if subject_type == "change" and consequence == "cancel":
+            record, _, _ = self.change(entity)
+            pending = self._cancelable_components(record)
+            cancellation, _ = self._decision("change-cancel", entity, actor, reason,
+                                                       proposal_digest=pin, components=pending)
+            cancellation["previous"] = decision["id"]
+            cancellation["id"] = digest({k: v for k, v in cancellation.items() if k != "id"})
+            writes[f".roclec/decisions/{cancellation['id']}.json"] = encoded(cancellation)
+            result["cancellation"] = cancellation
+        if subject_type == "prototype":
+            checkpoint, _ = self._decision("checkpoint", entity, actor, reason, subject=subject, outcome="rejected", rejection=decision["id"])
+            checkpoint["previous"] = decision["id"]
+            checkpoint["id"] = digest({k: v for k, v in checkpoint.items() if k != "id"})
+            writes[f".roclec/decisions/{checkpoint['id']}.json"] = encoded(checkpoint)
+            result["checkpoint"] = checkpoint
+        source_guards = {entity: pin} if subject_type == "prototype" else {}
+        result["receipt"] = self.store.apply("reject", {"id": entity, "subject": subject, "source_guards": source_guards}, writes, self.token)
+        return result
+
+    def checkpoint(self, entity, subject_digest, actor, reason, *, outcome, addresses=None):
+        need(outcome == "approved", "INVALID_INPUT", "Use reject prototype with corrections for a rejected checkpoint", exit_code=2)
+        service = Rejections(self)
+        pin, _ = service.subject("prototype", entity)
+        need(pin == subject_digest, "APPROVAL_STALE", "Checkpoint must cite current prototype bytes", expected=pin, actual=subject_digest)
+        service.require_addresses("prototype", entity, pin, addresses)
+        extra = {"addresses": addresses} if addresses is not None else {}
+        decision, path = self._decision("checkpoint", entity, actor, reason,
+                                        subject={"type": "prototype", "entity": entity, "digest": pin}, outcome=outcome, **extra)
+        receipt = self.store.apply("checkpoint", {"id": entity, "source_guards": {entity: pin}}, {path: encoded(decision)}, self.token)
+        return {"decision": decision, "receipt": receipt}
+
+    def inspect_reference(self, ref_id):
+        ref = self.references().get(ref_id)
+        need(ref is not None, "INVALID_REFERENCE", "Unknown reference", entity=ref_id)
+        kind = "adr" if ref["role"] == "decision" else "reference"
+        source = self.store.path(ref["path"])
+        pin = sha(source.read_bytes()) if source.is_file() else None
+        agreements = [d for d in self.decisions(ref_id) if d["kind"] == "foundation"]
+        approved = bool(agreements and agreements[-1]["sources"][ref_id] == pin and ref["decision_id"] == agreements[-1]["id"])
+        service = Rejections(self)
+        return {"reference": ref, "sha256": pin, "state": service.state(kind, ref_id, pin, approved=approved),
+                "rejections": service.history(kind, ref_id), "decisions": self.decisions(ref_id)}
+
+    def inspect_prototype(self, entity):
+        source = self.store.path(entity)
+        pin = sha(source.read_bytes()) if source.is_file() else None
+        decisions = self.decisions(entity)
+        checkpoints = [d for d in decisions if d["kind"] == "checkpoint"]
+        approved = bool(checkpoints and checkpoints[-1]["outcome"] == "approved" and checkpoints[-1]["subject"]["digest"] == pin)
+        service = Rejections(self)
+        return {"path": entity, "sha256": pin, "state": service.state("prototype", entity, pin, approved=approved),
+                "checkpoint": checkpoints[-1] if checkpoints else None,
+                "rejections": service.history("prototype", entity), "decisions": decisions}
+
+    def _list_rejections(self, *, open_only=False):
+        result = []
+        seen = set()
+        for decision in self.decisions():
+            if decision["kind"] != "rejection":
+                continue
+            kind, entity = decision["subject"]["type"], decision["entity"]
+            if (kind, entity) in seen:
+                continue
+            seen.add((kind, entity))
+            value, pin = None, None
+            if kind == "change":
+                record, _, _ = self.change(entity)
+                value, pin = record["semantic"].get("addresses"), record["proposal_digest"]
+            result.extend(row for row in Rejections(self).history(kind, entity, value=value, pin=pin)
+                          if not open_only or row["open"])
+        return sorted(result, key=lambda row: (row["entity"], row["id"]))
+
+    def _prototypes(self, value):
+        need(isinstance(value, list), "INVALID_INPUT", "prototypes must be a list", exit_code=2)
+        paths = []
+        for row in value:
+            fields(row, ("path", "sha256"))
+            self.store.path(row["path"])
+            fingerprint(row["sha256"])
+            paths.append(row["path"])
+        need(paths == sorted(set(paths)), "INVALID_INPUT", "Prototype paths must be unique and sorted", exit_code=2)
+
+    def _prototype_gate(self, record):
+        for entry in record["semantic"].get("prototypes", []):
+            view = self.inspect_prototype(entry["path"])
+            need(view["state"] == "approved" and view["sha256"] == entry["sha256"], "PROTOTYPE_NOT_APPROVED",
+                 "Cited prototype needs approval on its current pinned bytes", path=entry["path"], actual=view["state"])
+
+    def agree_foundation(self, ref_id, actor, reason, *, addresses=None):
         need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
         refs = self.references()
         need(ref_id in refs, "INVALID_REFERENCE", "Unknown foundation reference", entity=ref_id)
@@ -161,7 +287,10 @@ class Kernel:
         need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
         content = source.read_bytes()
         need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
+        Rejections(self).require_addresses("adr" if ref["role"] == "decision" else "reference", ref_id, sha(content), addresses)
         extra = {"supersedes": list(ref["supersedes"])} if ref["role"] == "decision" else {}
+        if addresses is not None:
+            extra["addresses"] = addresses
         decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)}, **extra)
         decision_id = decision["id"]
         ref["decision_id"] = decision_id
@@ -174,6 +303,7 @@ class Kernel:
         self.profile.repo(component)
         refs = self.references()
         roles, resolved, issues = set(), [], []
+        decisions = self.decisions()
         for ref in refs.values():
             # ADRs are not foundation roles: a proposed ADR never blocks unrelated changes.
             if component not in ref["components"] or ref["role"] == "decision":
@@ -184,12 +314,14 @@ class Kernel:
                      "Reference has no content", path=ref["path"])
                 need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE", "Reference has no agreement", entity=ref["id"])
                 decision = self.read(f".roclec/decisions/{ref['decision_id']}.json")
-                fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"))
+                fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"), ("addresses",))
                 need(decision["id"] == ref["decision_id"] and decision["kind"] == "foundation"
                      and decision["status"] == "agreed" and text(decision["actor"]) and text(decision["reason"]),
                      "FOUNDATION_INCOMPLETE", "Reference decision is not agreed", entity=ref["id"])
                 need(isinstance(decision["sources"], dict) and decision["sources"].get(ref["id"]) == sha(path.read_bytes()),
                      "FOUNDATION_INCOMPLETE", "Reference changed since its agreement", entity=ref["id"])
+                state = Rejections(self).state("reference", ref["id"], sha(path.read_bytes()), approved=True, decisions=decisions)
+                need(state == "approved", "FOUNDATION_INCOMPLETE", "Foundation reference was rejected or withdrawn", entity=ref["id"])
                 roles.add(ref["role"])
                 resolved.append({**ref, "sha256": sha(path.read_bytes())})
             except ModelError as exc:
@@ -230,7 +362,10 @@ class Kernel:
              "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2)
         semantic = record["semantic"]
         fields(semantic, ("intention", "files", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-               ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions"))
+               ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes"))
+        if "addresses" in semantic:
+            addresses(semantic["addresses"])
+        self._prototypes(semantic.get("prototypes", []))
         scope = strings(semantic["components"], nonempty=True)
         if "architecture_decisions" in semantic:
             cited = declaration(semantic["architecture_decisions"]).get("adrs", [])
@@ -258,7 +393,7 @@ class Kernel:
                 need(local_path(folder, path).is_file(), "INVALID_REFERENCE", "Captured origin file is missing",
                      entity=origin["id"], path=path, remediation="Restore the captured Markdown before sealing or approving")
         content = checked_files(folder, semantic["files"])
-        need(not any(Path(p).parts[0] in {"proposed", "revisions"} for p in content),
+        need(not any(Path(p).parts[0] in {"proposed", "revisions", "rejected"} for p in content),
              "INVALID_PATH", "Proposal documents cannot occupy snapshot namespaces", exit_code=2)
         need(isinstance(semantic["intention"], str) and semantic["intention"] in content,
              "INVALID_REFERENCE", "Change intention must name its Markdown content")
@@ -440,8 +575,12 @@ class Kernel:
         need(isinstance(record, dict), "INVALID_INPUT", "Change must be an object", exit_code=2)
         change_id = identifier(record.get("id"), "CHG")
         destination = f".roclec/changes/{change_id}"
-        need(not self.store.path(destination).exists(), "ID_COLLISION", "Change ID already exists", entity=change_id)
+        existing = self.store.path(destination).exists()
+        need(not existing or Rejections(self).revising(change_id), "ID_COLLISION", "Change ID already exists", entity=change_id)
         record, files, new_ids = self.change(change_id, source=source_file.parent, check_base=True)
+        if existing:
+            Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
+            self.preserve_integrated(record)
         registry = self.registry()
         registry["identities"].update(new_ids)
         writes = {f"{destination}/{p}": b for p, b in files.items()}
@@ -460,7 +599,7 @@ class Kernel:
         for path in sorted(directory.glob("*.json")) if directory.exists() else []:
             record = self.read(path.relative_to(self.profile.root).as_posix())
             fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
-                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes"))
+                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes", "subject", "consequence", "corrections", "criteria", "fut", "files", "addresses", "rejection"))
             fingerprint(record["id"])
             need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
             seen.add(record["id"])
@@ -468,11 +607,13 @@ class Kernel:
         for path, record in records:
             need(record["id"] == path.stem and record["id"] == digest({k: v for k, v in record.items() if k != "id"}),
                  "HASH_MISMATCH", "Decision digest does not match its record", path=path.name)
-            need(record["kind"] in {"change-approve", "change-start", "change-cancel", "fut-decide", "review-policy", "foundation"}
+            need(record["kind"] in {"change-approve", "change-start", "change-cancel", "fut-decide", "review-policy", "foundation", "rejection", "checkpoint"}
                  and text(record["actor"]) and text(record["reason"]), "INVALID_INPUT", "Invalid decision record", exit_code=2)
             if record["previous"] is not None:
                 fingerprint(record["previous"])
-            if record["kind"].startswith("change-") or record["kind"] == "review-policy":
+            if record["kind"] in {"rejection", "checkpoint"}:
+                validate_decision(record)
+            elif record["kind"].startswith("change-") or record["kind"] == "review-policy":
                 identifier(record["entity"], "CHG")
                 fingerprint(record.get("proposal_digest"))
                 if record["kind"] == "review-policy":
@@ -500,6 +641,8 @@ class Kernel:
                     adr_ids(record["supersedes"])
             need("supersedes" not in record or (record["kind"] == "foundation" and is_adr(record["entity"])),
                  "INVALID_INPUT", "Only an ADR agreement records supersedes", exit_code=2, path=path.name)
+            if "addresses" in record:
+                addresses(record["addresses"])
             chain = self._decision_chain(record)
             previous = record["previous"]
             existing = chains[chain].get(previous)
@@ -566,8 +709,10 @@ class Kernel:
              "CHANGE_CANCELED", "Canceled work requires a new change", entity=change_id)
         need(proposal_digest == record["proposal_digest"], "APPROVAL_STALE", "Approval must cite the exact proposal digest")
         self._origin_approval(record)
+        Rejections(self).require_addresses("change", change_id, proposal_digest, record["semantic"].get("addresses"))
         Adrs(self).approvable(record)
-        decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest)
+        extra = {"addresses": record["semantic"]["addresses"]} if "addresses" in record["semantic"] else {}
+        decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest, **extra)
         writes = {path: encoded(decision)}
         if new_ids:
             registry = self.registry()
@@ -588,6 +733,10 @@ class Kernel:
         approval = self.approval(change)
         need(approval is not None and approval["proposal_digest"] == change["proposal_digest"],
              "APPROVAL_STALE", "The current proposal has no matching approval", entity=change["id"])
+        decisions = self.decisions(change["id"])
+        history = [d for d in decisions if d["kind"] == "rejection" and d["subject"]["type"] == "change"]
+        need(not history or decisions.index(history[-1]) < decisions.index(approval),
+             "REJECTION_UNRESOLVED", "The current proposal was rejected after approval", entity=change["id"])
         return approval
 
     def _component(self, change, component):
@@ -607,6 +756,7 @@ class Kernel:
         if stage == "approve":
             self._origin_approval(record)
             Adrs(self).approvable(record)
+            Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
         self._approved(record)
@@ -619,6 +769,7 @@ class Kernel:
         if self.integration(change_id, component) is None:
             # An integrated component keeps its historical pins: no retroactive invalidation.
             Adrs(self).gate(record)
+            self._prototype_gate(record)
         assignments = [(r, entry) for r in self.releases() if r["record"]["component"] == component
                        for entry in r["record"]["changes"] if entry["change_id"] == change_id
                        and entry["intent_revision"] == record["proposal_digest"]]
@@ -643,8 +794,8 @@ class Kernel:
                                    "proposal_digest": record["proposal_digest"]}, {path: encoded(decision)}, self.token)
         return {**result, "status": "in-progress", "receipt": receipt}
 
-    def cancel(self, change_id, actor, reason):
-        record, _, _ = self.change(change_id)
+    def _cancelable_components(self, record):
+        change_id = record["id"]
         pending = [c for c in record["semantic"]["components"] if not self.integration(change_id, c)]
         need(bool(pending), "INVALID_REFERENCE", "Integrated work requires a reversal change")
         # Preserve the legacy seeded-reader guard as well as actual integration records.
@@ -652,6 +803,11 @@ class Kernel:
         for proposed in record["semantic"]["proposed"]:
             need(not any(current[c].get(proposed["capability_id"]) == proposed["revision"] for c in proposed["components"] if c in pending),
                  "INVALID_REFERENCE", "An integrated revision requires a new reversal change")
+        return pending
+
+    def cancel(self, change_id, actor, reason):
+        record, _, _ = self.change(change_id)
+        pending = self._cancelable_components(record)
         decision, path = self._decision("change-cancel", change_id, actor, reason,
                                         proposal_digest=record["proposal_digest"], components=pending)
         receipt = self.store.apply("change-cancel", {"id": change_id, "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
@@ -703,7 +859,14 @@ class Kernel:
             self.change(change_id, check_base=True)
         except ModelError as exc:
             issues.append(exc.issue)
+        rejections = Rejections(self)
+        rejection_state = rejections.state("change", change_id, record["proposal_digest"], approved=valid, decisions=decisions)
+        if rejection_state in {"rejected", "revised"} and status not in {"integrated", "partially-integrated", "canceled"}:
+            status = rejection_state
+        valid = valid and rejection_state not in {"rejected", "withdrawn"}
         result = {"change": record, "status": status, "components": progress, "approval": approval,
+                  "rejections": rejections.history("change", change_id, value=record["semantic"].get("addresses"),
+                                                   pin=record["proposal_digest"], decisions=decisions),
                   "approval_current": valid, "decisions": decisions, "issues": issues,
                   "origins": record["semantic"].get("origins", []),
                   "coverage": record["semantic"].get("coverage", {"criteria": [], "derived": []}),
@@ -719,9 +882,12 @@ class Kernel:
                 result["issues"].append(exc.issue)
         return result
 
-    def list_records(self, category, *, origin=None):
+    def list_records(self, category, *, origin=None, open_only=False):
         need(origin is None or (category == "changes" and text(origin)), "INVALID_INPUT",
              "Origin filtering requires a change list and an origin ID", exit_code=2)
+        need(not open_only or category == "rejections", "INVALID_INPUT", "--open requires rejections", exit_code=2)
+        if category == "rejections":
+            return self._list_rejections(open_only=open_only)
         if category == "releases":
             return [{"component": item["record"]["component"], "version": item["record"]["version"],
                      "status": item["status"]} for item in self.releases()]
@@ -1006,6 +1172,7 @@ class Kernel:
                      "ID_COLLISION", "Historical contract identity conflicts with the registry", entity=name)
         self.references()
         self.decisions()
+        Rejections(self).check()
         adr_warnings = Adrs(self).structure()
         for path in self.store.path(".roclec/futs").glob("*.json"):
             self.inspect_fut(path.stem)
