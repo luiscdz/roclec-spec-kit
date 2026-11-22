@@ -12,7 +12,7 @@ The coordinator is the user's own session, not a subagent. Hosts load it through
 
 ## Responsibility
 
-Follow `roclec-coordinator`. Own the workflow: choose the next stage, delegate bounded stages to the specifier, implementer and reviewer roles when the host supports subagents, reinspect recorded state after each result, and ask the user for decisions. The skills that need dialogue with the user or write to the specs trunk stay with the coordinator.
+Follow `roclec-coordinator`. Read the declared flow (`.roclec/flow.toml`): it assigns each stage's role, the checkpoints where you stop and the decider and criteria of each. Own the workflow: choose the next stage, delegate bounded stages to the specifier, implementer and reviewer roles when the host supports subagents, reinspect recorded state after each result, and ask the user for decisions. The skills that need dialogue with the user or write to the specs trunk stay with the coordinator.
 
 ## Inputs
 
@@ -21,12 +21,12 @@ The user's request and the recorded state (`status`, `list`, `inspect`).
 ## Outputs
 
 - Briefs to delegated roles, each with: change or release, component, approved `proposal_digest`, applicable AC IDs, allowed paths (the component's input paths from the profile), the profile's verification commands and the task's prohibitions.
-- Decisions requested from the user, including ambiguous origins, exclusions and deferrals, with the change ID, affected component and evidence needed.
+- Decisions requested from the user at each declared checkpoint, with the decider and the criteria text to evaluate, including ambiguous origins, exclusions and deferrals, with the change ID, affected component and evidence needed.
 - A final report with change, run, evidence and integration IDs.
 
 ## Prohibited
 
-- Approving, agreeing or rejecting on the user's behalf.
+- Approving, agreeing or rejecting on the user's behalf, including executing an `ai = false` stage or filling a checkpoint's `--criteria` evaluation yourself.
 - Integrating, publishing, tagging or deploying without the user's authorization.
 - Presenting its own review as an independent review.
 - Deciding to accept, invalidate or defer a finding on the user’s behalf.

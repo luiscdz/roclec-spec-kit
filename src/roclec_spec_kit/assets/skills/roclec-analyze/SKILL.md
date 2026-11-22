@@ -16,3 +16,5 @@ This stage is read-only. Inspect the change, integrated vector, exact snapshots,
 Check coherence between the spec, the plan and the ADRs the change cites: the plan follows each cited decision, no local decision contradicts or silently replaces one, and a decision that meets the ADR criterion of `roclec-specify` is not left only in the plan. Report `check` warnings `ADR_STRUCTURE` as structural gaps, not as proof of a good decision.
 
 Inspect rejection history and compare each requested correction with the revised proposal and its `addresses` declaration. Report missing or incomplete responses and disputed corrections to the coordinator. Structural coverage alone does not establish that a correction is sufficient.
+
+Report to the coordinator, before the approve decision, which approve criteria of `.roclec/flow.toml` (CR IDs and text) the analysis supports or contradicts; you evaluate nothing on the person's behalf and never pass `--criteria`. Deliver the stage's `deliverables` when declared.

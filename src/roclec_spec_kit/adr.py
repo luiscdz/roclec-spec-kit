@@ -193,7 +193,7 @@ class Adrs:
         for path in sorted(self.k.store.path(".roclec/changes").glob("*/change.json")):
             change_id = path.parent.name
             cited = self.citations(change_id, adr_id)
-            status = self.k.inspect_change(change_id)["status"] if cited else None
+            status = self.k.inspect_change(change_id, include_findings=False, include_flow=False)["status"] if cited else None
             changes.extend({"id": change_id, "revision": revision, "integrated_components": components, "status": status,
                             "sha256": pin, "pin_current": pin == entry["sha256"]} for revision, components, pin in cited)
         return {"adr": ref, "state": entry["state"], "sha256": entry["sha256"], "agreement": entry["agreement"],

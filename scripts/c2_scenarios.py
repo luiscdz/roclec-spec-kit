@@ -8,10 +8,10 @@ import sys
 import shutil
 
 try:
-    from .c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, foundation, put_json, tree, snapshot, digest,
+    from .c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
                                seed_publication, seed_current, file_hash)
 except ImportError:
-    from c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, foundation, put_json, tree, snapshot, digest,
+    from c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
                               seed_publication, seed_current, file_hash)
 
 
@@ -70,7 +70,8 @@ def setup(workspace, invoke, *, names=("engine", "viewer"), coverage=True, check
     source = workspace / "bundle"
     record = bundle(source, components=names)
     for args in (("change", "new", "--file", str(source / "change.json")),
-                 ("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic test approval")):
+                 ("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic test approval",
+                  *criteria(root, "approve"))):
         result = invoke(["--project", str(root), "--json", *args])
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
@@ -297,7 +298,8 @@ def scenarios(workspace, invoke, check):
     state = call("C2 pending revision keeps integrated history", "inspect", "--change", "CHG-001")
     check("C2 partial integration survives an unapproved pending revision", state["status"] == "partially-integrated" and not state["approval_current"]
           and state["integrations"]["engine"]["proposal_digest"] != record["proposal_digest"])
-    call("C2 explicitly approve pending revision", "change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Clarify pending participant")
+    call("C2 explicitly approve pending revision", "change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Clarify pending participant",
+         *criteria(root, "approve"))
     call("C2 rebind pending release membership only", "release", "plan", "viewer", "v1.0.0", "--change", "CHG-001")
     viewer = call("C2 fresh evidence for pending intent", "run", "verify", "CHG-001", "--component", "viewer", "--base", base, *PRODUCER)["run"]
     commit(root, "record first integration")
@@ -310,7 +312,8 @@ def scenarios(workspace, invoke, check):
     put_json(corrections, [{"id": "R-1", "description": "Clarify the historical change"}])
     call("FX integrated changes need a new change", "reject", "change", "CHG-001",
          "--digest", state["change"]["proposal_digest"], "--actor", "Fixture maintainer",
-         "--reason", "Request follow-up", "--consequence", "revise", "--corrections", corrections, expect=1)
+         "--reason", "Request follow-up", "--consequence", "revise", "--corrections", corrections,
+         *criteria(root, "approve", "rejected"), expect=1, issue="INVALID_REFERENCE")
     before = tree(root)
     call("I-026 old receipt never rolls back later index", "operation", "apply", plan_path)
     check("I-026 later index preserved", tree(root) == before)
@@ -414,7 +417,8 @@ def competing_fixture(workspace, invoke):
         source = workspace / change_id
         record = bundle(source, change_id=change_id, base=original, target=target, components=("engine",))
         must("change", "new", "--file", source / "change.json")
-        must("change", "approve", change_id, "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic evolution")
+        must("change", "approve", change_id, "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic evolution",
+             *criteria(root, "approve"))
         records.append(record)
     must("release", "plan", "engine", "v1.1.0", "--change", "CHG-002", "--change", "CHG-003")
     runs = []
@@ -515,7 +519,8 @@ def edge_scenarios(workspace, invoke, check):
     record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
     put_json(source / "change.json", record)
     must("change", "new", "--file", source / "change.json")
-    must("change", "approve", "CHG-002", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Restore historical contract")
+    must("change", "approve", "CHG-002", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Restore historical contract",
+         *criteria(root, "approve"))
     must("release", "plan", "engine", "v1.0.1", "--kind", "hotfix", "--base-tag", "v1.0.0", "--change", "CHG-002")
     run = must("run", "verify", "CHG-002", "--component", "engine", "--base", publication["commit"], *PRODUCER)["run"]
     commit(root)
@@ -753,7 +758,7 @@ def adr_scenarios(workspace, invoke, check):
         call(f"C2 ADR new {change_id}", "change", "new", "--file", folder / "change.json")
         record = json.loads((folder / "change.json").read_text())
         call(f"C2 ADR approve {change_id}", "change", "approve", change_id, "--digest", record["proposal_digest"],
-             "--actor", "fixture", "--reason", "Approved scope")
+             "--actor", "fixture", "--reason", "Approved scope", *criteria(root, "approve"))
         members.append(change_id)
         call(f"C2 ADR assign {change_id}", "release", "plan", "engine", "v1.0.0", *[a for m in members for a in ("--change", m)])
         return record
@@ -762,7 +767,8 @@ def adr_scenarios(workspace, invoke, check):
         return call(label, "check", "--change", change_id, "--component", "engine", "--gate", "implement", **kwargs)
 
     def agree(label):
-        call(label, "foundation", "agree", "--ref", "ADR-001", "--actor", "Maintainer", "--reason", "Accepted ADR")
+        call(label, "foundation", "agree", "--ref", "ADR-001", "--actor", "Maintainer", "--reason", "Accepted ADR",
+             *criteria(root, "foundation"))
 
     def integrate(change_id, run=None):
         run = run or call(f"C2 ADR verify {change_id}", "run", "verify", change_id, "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
@@ -814,7 +820,8 @@ def adr_scenarios(workspace, invoke, check):
     (root / "docs/adr/ADR-002.md").write_text(adr_markdown("ADR-002: Replacement"), encoding="utf-8")
     call("C2 ADR registers the replacement", "reference", "add", "ADR-002", "--path", "docs/adr/ADR-002.md", "--component", "engine",
          "--role", "decision", "--supersedes", "ADR-001")
-    call("C2 ADR agrees the replacement", "foundation", "agree", "--ref", "ADR-002", "--actor", "Maintainer", "--reason", "Accepted ADR")
+    call("C2 ADR agrees the replacement", "foundation", "agree", "--ref", "ADR-002", "--actor", "Maintainer", "--reason", "Accepted ADR",
+         *criteria(root, "foundation"))
     adr_path.write_text(adr_markdown("ADR-001: Edited after integration"), encoding="utf-8")
     check("C2 ADR is superseded", call("C2 ADR inspect superseded", "inspect", "--adr", "ADR-001")["data"]["state"] == "superseded", "")
     call("C2 ADR check stays green after supersession and edit", "check")
@@ -823,3 +830,114 @@ def adr_scenarios(workspace, invoke, check):
     pinned = cited["semantic"]["architecture_decisions"]["adrs"][0]["sha256"]
     check("C2 ADR integrated change keeps its pin", [(c["id"], c["status"], c["pin_current"], c["sha256"]) for c in changes
                                                       if c["id"] == "CHG-003"] == [("CHG-003", "integrated", False, pinned)], str(changes))
+
+
+MERGE = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "--no-edit")
+FLOW_ACTOR = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
+
+
+def flow_scenarios(workspace, invoke, check):
+    """FF hooks and flow edits across real Git branches merged in both orders.
+
+    Hook checkpoints are chained per (change, component); decisions on different chains never
+    fork, whichever side holds them. A flow edited on a branch is just a changed process file:
+    merging it never counts as agreement.
+    """
+    workspace = workspace / "flow"
+
+    def prepared(name):
+        root, base = setup(workspace / name, invoke)
+        call = adr_caller(root, invoke, check)
+        declare_hook(root, "pre-implement")
+        declare_hook(root, "pre-integrate", declared={"CR-005": "The tested candidate is the one to integrate."})
+        call(f"FF {name} agrees the edited flow", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
+        call(f"FF {name} regenerates the flow view", "views", "--write")
+        commit(root)
+        digest_ = json.loads((root / ".roclec/changes/CHG-001/change.json").read_text())["proposal_digest"]
+        runs = {}
+        for component in ("engine", "viewer"):
+            call(f"FF {name} pre-implement {component}", "checkpoint", "CHG-001", "--hook", "pre-implement",
+                 "--component", component, "--digest", digest_, "--outcome", "approved", *FLOW_ACTOR)
+            runs[component] = call(f"FF {name} run {component}", "run", "verify", "CHG-001", "--component", component,
+                                   "--base", base, *PRODUCER)["data"]["run"]
+        commit(root)
+        return root, base, call, runs
+
+    def integrate_hook(call, repo, label, runs, component):
+        run = runs[component]
+        return call(label, "checkpoint", "CHG-001", "--hook", "pre-integrate", "--component", component,
+                    "--digest", run["candidate"]["inputs_digest"], "--run", run["id"], "--outcome", "approved",
+                    *FLOW_ACTOR, *criteria(repo, "pre-integrate"), project=repo)
+
+    def gate(call, repo, label, component, name, **kwargs):
+        return call(label, "check", "--change", "CHG-001", "--component", component, "--gate", name, project=repo, **kwargs)
+
+    def hooks(call, repo, label):
+        """Derived hook state per stage and component; record ids and candidate digests differ per repository."""
+        stages = {row["stage"]: row for row in call(label, "inspect", "--change", "CHG-001", project=repo)["data"]["flow"]["stages"]}
+        return {(stage, component): (row["hook"]["name"], row["hook"]["status"])
+                for stage in ("implement", "integrate") for component, row in stages[stage]["components"].items()}
+
+    # 1. Checkpoints are trunk-only; starts and runs happen on branches. Trunk records the hooks of two
+    # components while two branches start them, and the merge order must not matter.
+    states = {}
+    for order in (("left", "right"), ("right", "left")):
+        tag = "-".join(order)
+        root, base, call, runs = prepared("c2-flow-" + tag)
+        trunk = git(root, "rev-parse", "HEAD")
+        trees = {}
+        for branch in ("left", "right"):
+            trees[branch] = workspace / f"{branch}-{tag}"
+            git(root, "worktree", "add", "-qb", branch, str(trees[branch]), trunk)
+        call(f"FF {tag} a branch cannot record a checkpoint", "checkpoint", "CHG-001", "--hook", "pre-integrate",
+             "--component", "engine", "--digest", runs["engine"]["candidate"]["inputs_digest"], "--run", runs["engine"]["id"],
+             "--outcome", "approved", *FLOW_ACTOR, *criteria(root, "pre-integrate"), project=trees["left"], expect=3, issue="OFF_TRUNK")
+        for branch, component in (("left", "engine"), ("right", "viewer")):
+            call(f"FF {tag} {branch} starts {component}", "change", "start", "CHG-001", "--component", component,
+                 "--actor", "Synthetic maintainer", project=trees[branch])
+            commit(trees[branch], f"start {component}")
+        gate(call, root, f"FF {tag} trunk blocks the engine integrate gate", "engine", "integrate", expect=1, issue="CHECKPOINT_REQUIRED")
+        integrate_hook(call, root, f"FF {tag} trunk records the engine checkpoint", runs, "engine")
+        commit(root, "engine checkpoint")
+        gate(call, root, f"FF {tag} the engine chain passes alone", "engine", "integrate")
+        gate(call, root, f"FF {tag} the viewer chain is independent", "viewer", "integrate", expect=1, issue="CHECKPOINT_REQUIRED")
+        integrate_hook(call, root, f"FF {tag} trunk records the viewer checkpoint", runs, "viewer")
+        commit(root, "viewer checkpoint")
+        for branch in order:
+            git(root, *MERGE, branch)
+        issues = call(f"FF {tag} merged chains check", "check")["issues"]
+        check(f"FF {tag} no DECISION_FORK", "DECISION_FORK" not in {i["code"] for i in issues}, str(issues))
+        for component in ("engine", "viewer"):
+            gate(call, root, f"FF {tag} {component} integrate gate after the merge", component, "integrate")
+        states[tag] = hooks(call, root, f"FF {tag} flow section after the merge")
+        check(f"FF {tag} every hook is done", all(row[1] == "done" for row in states[tag].values()) and len(states[tag]) == 4,
+              str(states[tag]))
+        subjects = call(f"FF {tag} subjects", "inspect", "--change", "CHG-001")["data"]["flow"]["stages"]
+        done = {r["stage"]: r for r in subjects}["integrate"]["components"]
+        check(f"FF {tag} each hook subject is its own run candidate",
+              all(done[c]["hook"]["subject"] == runs[c]["candidate"]["inputs_digest"] for c in ("engine", "viewer")), str(done))
+    check("FF derived hook state is identical across merge orders", states["left-right"] == states["right-left"], str(states))
+
+    # 3. A flow edited on a branch is not agreed by merging it.
+    root, base, call, runs = prepared("c2-flow-edit")
+    trunk = git(root, "rev-parse", "HEAD")
+    edit = workspace / "flow-edit"
+    git(root, "worktree", "add", "-qb", "flow-edit", str(edit), trunk)
+    declare_hook(edit, "handoff", declared={"CR-006": "QA can take the integrated change."}, on_reject="defer")
+    commit(edit, "edit the flow on a branch")
+    git(root, *MERGE, "flow-edit")
+    blocked = gate(call, root, "FF unagreed flow edit blocks the implement gate", "engine", "implement", expect=1, issue="FOUNDATION_INCOMPLETE")
+    check("FF the blocked gate reports the changed flow reference",
+          any(i["entity"] == "flow" and i["code"] == "FOUNDATION_INCOMPLETE" for i in blocked["issues"][0]["actual"]), str(blocked["issues"]))
+    call("FF the verify path is also blocked by the unagreed flow", "run", "verify", "CHG-001", "--component", "engine",
+         "--base", base, *PRODUCER, expect=1, issue="FOUNDATION_INCOMPLETE")
+    stale = call("FF the generated view is stale after the merge", "check")
+    check("FF stale flow view warning", [(i["code"], i["severity"]) for i in stale["issues"]] == [("FLOW_VIEW_STALE", "warning")],
+          str(stale["issues"]))
+    call("FF re-agreement evaluates the declared criteria", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
+    gate(call, root, "FF re-agreed flow reopens the implement gate", "engine", "implement")
+    persists = call("FF the stale view persists until written", "check")
+    check("FF agreement alone leaves the view warning", [i["code"] for i in persists["issues"]] == ["FLOW_VIEW_STALE"], str(persists["issues"]))
+    call("FF views --write refreshes the flow view", "views", "--write")
+    after = call("FF check is clean once agreed and regenerated", "check")
+    check("FF no warning remains", after["issues"] == [], str(after["issues"]))

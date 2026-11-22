@@ -74,7 +74,9 @@ class ServerSafetyTest(unittest.TestCase):
         body = self.client.get("/api/v1/releases", base_url="http://localhost").get_json()
         self.assertEqual(body["data"], {"releases": []})
         tree = self.client.get("/api/v1/docs/tree", base_url="http://localhost").get_json()["data"]
-        self.assertEqual(tree["children"], [])
+        # init generates only the flow view; its managed header is not taken as the title.
+        self.assertEqual([(c["path"], [(f["path"], f["title"]) for f in c["children"]]) for c in tree["children"]],
+                         [("docs", [("docs/flow.md", "Project flow")])])
 
     def test_foreign_host_origin_and_methods_are_rejected(self):
         self.assertEqual(self.client.get("/api/v1/project", base_url="http://evil.example").status_code, 421)

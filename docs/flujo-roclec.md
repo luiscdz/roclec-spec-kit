@@ -6,11 +6,62 @@ Esta guía describe el flujo nativo del perfil 3 después de [instalar las skill
 
 [Ver o descargar el SVG](diagrams/flujo-roclec.svg)
 
+## Flujo por defecto
+
+Cada proyecto declara su flujo en `.roclec/flow.toml`. Roclec lo siembra una vez con el flujo por defecto, que describe esta sección, y los refrescos no lo sobrescriben. La tabla y el diagrama siguientes se generan a partir del `flow.toml` sembrado (están en inglés, como el archivo). Un proyecto regenera su propia vista con `roclec views --write`, que escribe `docs/flow.md` (o la ruta `view` del flujo). Si el proyecto edita su flujo, su vista deja de coincidir con esta.
+
+| Step | Stage | Description | AI | Role | Skills and model | Deliverables | Human checkpoint | Criteria | On reject |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | foundation | Agree the project references (constitution, ADRs, process) before changes depend on them. | yes | coordinator | session model | — | owner | CR-001 | revise |
+| 2 | define | Capture discovery and draft the capability/change bundle with sources and acceptance criteria. | yes | specifier | session model | — | — | — | — |
+| 3 | approve | Approve the exact intent of the change; approval freezes its digest. | no: Only a person decides which intent is accepted. | owner | — | — | owner | CR-002, CR-003 | revise |
+| 4 | design | Produce and review user-facing design or prototypes before implementation. | yes | coordinator | session model | — | owner | CR-004 | revise |
+| 5 | plan | Assign the approved change to a release and plan the implementation work. | yes | implementer | session model | — | — | — | — |
+| 6 | implement | Implement the approved change within its declared scope. | yes | implementer | session model | — | — | — | — |
+| 7 | verify | Run the configured checks and record evidence covering the acceptance criteria. | yes | implementer | session model | — | — | — | — |
+| 8 | review | Independent review of the candidate; findings stay open until resolved or decided. | yes | reviewer | session model | — | — | — | — |
+| 9 | integrate | Integrate the verified, reviewed candidate per component. | yes | coordinator | session model | — | — | — | — |
+| 10 | release | Verify the combined release, prepare it and record the existing Git publication. | yes | coordinator | session model | — | — | — | — |
+
+Criterios del flujo por defecto:
+
+| ID | Text |
+| --- | --- |
+| CR-001 | The reference reflects the practice the user agreed. |
+| CR-002 | Every origin criterion is covered, excluded or deferred. |
+| CR-003 | The proposal states the intended behavior. |
+| CR-004 | The prototype matches the approved intention. |
+
+```mermaid
+flowchart LR
+  S1["1. foundation [checkpoint]"]
+  S2["2. define"]
+  S3["3. approve [person] [checkpoint]"]
+  S4["4. design [checkpoint]"]
+  S5["5. plan"]
+  S6["6. implement"]
+  S7["7. verify"]
+  S8["8. review"]
+  S9["9. integrate"]
+  S10["10. release"]
+  S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9 --> S10
+  classDef person fill:#fde68a,stroke:#92400e;
+  classDef checkpoint stroke:#1d4ed8,stroke-width:3px;
+  class S3 person;
+  class S1,S3,S4 checkpoint;
+```
+
+Las diez etapas son fijas y van en este orden; el proyecto las parametriza, pero no agrega etapas, no las reordena ni quita sus puntos de control obligatorios (fundación, aprobación y diseño). Los puntos de control opcionales de implementar, integrar y release (`pre-implement`, `pre-integrate`, `handoff`) se activan declarándolos en esas etapas. Un gancho nuevo requeriría su propio hallazgo. El detalle del archivo, los acuerdos y los comandos está en [El flujo declarado](c1.md#el-flujo-declarado).
+
+La etapa de aprobación es siempre de una persona (`ai = false`). Para una etapa sin IA, Roclec registra el actor declarado y no puede probar quién la ejecutó.
+
 ## Iniciar un cambio
 
 > Roclec, añade un filtro de registros por fecha y lleva el cambio hasta la integración.
 
-| Etapa | Trabajo del coordinador | Resultado que puedes revisar |
+El coordinador agrupa las etapas del flujo declarado en estas fases y se detiene en cada punto de control y en cada etapa sin IA.
+
+| Fase | Trabajo del coordinador | Resultado que puedes revisar |
 | --- | --- | --- |
 | Definir | Busca cambios relacionados, consulta el contrato vigente y prepara la propuesta. Aclara las decisiones que afecten el comportamiento, los permisos o el alcance, y redacta como ADR propuesto la decisión de arquitectura que lo merezca. | ID del cambio, propuesta, criterios de aceptación y ADR que aplica, o ninguno con su motivo. |
 | Aprobar y preparar | Registra la aprobación explícita de esa propuesta. Reúne las referencias de fundación, incorpora diseño cuando aplica y prepara el plan y las tareas proporcionales al cambio. Asigna la versión acordada o la que determine la política del proyecto. | Propuesta aprobada, referencias aplicables y release asignada por componente. |
@@ -57,6 +108,7 @@ Para consultar únicamente, pide «Roclec, ¿en qué estado está el cambio del 
 - **Alcance o aprobación.** El coordinador muestra la propuesta concreta y pregunta por la decisión pendiente. Si un cambio de alcance genera una revisión nueva, la aprobación debe corresponder a esa revisión.
 - **Decisiones de arquitectura.** El coordinador te presenta cada ADR propuesto con sus alternativas y consecuencias. Solo tu acuerdo lo acepta, y la implementación espera a que todos los ADR citados estén aceptados. [ADR](c1.md#decisiones-de-arquitectura-adr)
 - **Rechazos y correcciones.** Puedes rechazar una propuesta, ADR, referencia o prototipo indicando qué corregir y si deseas revisar, cancelar o diferir. El coordinador registra tu actor y motivo, conserva el contenido rechazado y presenta la revisión y las correcciones disputadas para tu decisión. [Rechazos y prototipos](c1.md#rechazos-y-prototipos)
+- **Puntos de control del flujo.** Fundación, aprobación y diseño, y los ganchos opcionales que declare el proyecto, esperan tu decisión con tu evaluación de los criterios declarados. Ni el gate ni un agente la registran por ti. [El flujo declarado](c1.md#el-flujo-declarado)
 - **Diseño, versión o política.** Intervienes si la decisión es material y el proyecto aún no tiene una regla o un acuerdo aplicable.
 - **Evidencia o aceptación externa.** Por ejemplo, una validación en un dispositivo al que el agente no tiene acceso, una revisión independiente exigida o una aprobación de Git que depende de otra persona.
 

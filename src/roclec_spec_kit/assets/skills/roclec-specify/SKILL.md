@@ -20,3 +20,5 @@ Record an ADR only when a decision affects more than one change or component, is
 Inspect rejection history before revising a proposal. Apply each requested correction or mark it disputed with a reason in `semantic.addresses`, linked to the rejection decision and covering every correction ID. Seal the revision and return disputed corrections to the coordinator for the user's decision. The structural check cannot judge whether a correction is sufficient.
 
 For a rejected proposal under revision, seal the external bundle with the same change ID and register it with `change new --file DIR/change.json`. Use the new digest for human review.
+
+Deliver what the project's `.roclec/flow.toml` declares in `deliverables` for stage `define`, at those project-relative paths, as support artifacts; framework records and their formats stay fixed. When a person must approve (stage `approve`, `ai = false`), present the digest with the CR criteria text of that point and leave the decision to the coordinator; `change approve ID --digest DIGEST --actor ACTOR --reason TEXT --criteria FILE` takes the person's own evaluation and is never run by you.

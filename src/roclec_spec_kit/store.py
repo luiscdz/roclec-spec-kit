@@ -22,6 +22,21 @@ def _hash(content):
     return None if content is None else sha(content)
 
 
+def _flow_view(payload):
+    """The generated flow view an init/views operation may write, named by its payload.
+
+    The kernel validates the path against `.roclec/flow.toml`; the store bounds it to a
+    Markdown file outside paths other writers own, so a replayed journal cannot widen
+    the namespace.
+    """
+    view = payload.get("flow_view")
+    if view is None:
+        return ()
+    need(isinstance(view, str) and view.endswith(".md") and not view.startswith((".", "specs/capabilities/"))
+         and view not in ("AGENTS.md", "CLAUDE.md"), "OPERATION_CONFLICT", "Invalid flow view target", exit_code=3, path=str(view))
+    return (view,)
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -160,7 +175,8 @@ class Store:
                 base = f".roclec/subjects/{subject['type']}/{digest(entity)}"
             snapshot = f"{base}/rejected/{subject['digest']}/"
         roots = {
-            "init": (".roclec/project.toml", ".roclec/current.json", ".roclec/references.json", ".roclec/identities.json", ".gitignore"),
+            "init": (".roclec/project.toml", ".roclec/current.json", ".roclec/references.json", ".roclec/identities.json", ".gitignore",
+                     ".roclec/flow.toml", *_flow_view(payload)),
             "change-new": (f".roclec/changes/{payload.get('id')}/", ".roclec/identities.json"),
             "change-approve": (f".roclec/changes/{payload.get('id')}/revisions/", ".roclec/decisions/", ".roclec/identities.json"),
             "change-start": (".roclec/decisions/",),
@@ -173,7 +189,7 @@ class Store:
             "fut-capture": (f".roclec/futs/{payload.get('id')}.json",),
             "fut-decide": (".roclec/decisions/",),
             "release-plan": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/release.json",),
-            "views": ("specs/capabilities/",),
+            "views": ("specs/capabilities/", *_flow_view(payload)),
             "run-verify": (f".roclec/runs/{payload.get('id')}/",),
             "run-start": (f".roclec/runs/{payload.get('id')}/start.json",),
             "evidence-record": (f".roclec/evidence/{payload.get('id')}.json",),
@@ -183,7 +199,8 @@ class Store:
             "release-record": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/publication.json",),
             "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".claude/agents/", ".codex/", ".specify/",
                                "AGENTS.md", "CLAUDE.md", ".gitignore", ".roclec/workflow.md", ".roclec/model.md", ".roclec/run", ".roclec/templates/",
-                               ".roclec/constitution.md", ".roclec/notices/", ".roclec/link.toml", ".roclec/installation.json"),
+                               ".roclec/constitution.md", ".roclec/notices/", ".roclec/link.toml", ".roclec/installation.json",
+                               ".roclec/flow.toml"),
         }
         need(kind in roots and bool(paths), "OPERATION_CONFLICT", "Unsupported write operation", exit_code=3)
         need(kind in DELETING or None not in paths.values(), "OPERATION_CONFLICT",

@@ -158,7 +158,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
         for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
-                     'agents.py', 'adr.py', 'findings.py', 'rejection.py', 'assets/templates/adr-template.md',
+                     'agents.py', 'adr.py', 'findings.py', 'rejection.py', 'flow.py', 'assets/project/flow.toml', 'assets/templates/adr-template.md',
                      'assets/project/model.md', 'assets/skills/roclec-reviewer/references/report-template.md',
                      *(f'assets/skills/roclec-{skill}/SKILL.md' for skill in ('analyze', 'clarify', 'coordinator', 'prototype', 'specify')),
                      *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
@@ -169,7 +169,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     rejection_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check,
                         lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace))
     from c2_scenarios import (scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios,
-                              branch_scenarios, findings_scenarios)
+                              branch_scenarios, findings_scenarios, flow_scenarios)
 
     def c2_check(name, condition, evidence=''):
         cases.append({'scope': 'C2-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -179,6 +179,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     c2_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     branch_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     findings_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    flow_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     execution_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c2_faults import capture_scenarios, lock_scenarios, scenarios as fault_scenarios
     fault_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
@@ -209,6 +210,8 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     review_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_scenarios import adr_scenarios as c3_adr_scenarios
     c3_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
+    from c3_scenarios import hook_scenarios
+    hook_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_installation import scenarios as install_scenarios, verified_restore_scenarios
     verified_restore_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
                                lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c3_check)

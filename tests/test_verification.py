@@ -7,10 +7,10 @@ import sys
 import tempfile
 import unittest
 
-from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios, findings_scenarios
+from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios, findings_scenarios, flow_scenarios
 from test_kernel import invoke
 from scripts.c2_faults import capture_scenarios, scenarios as fault_scenarios
-from scripts.c1_scenarios import bundle, digest, put_json, snapshot, tree
+from scripts.c1_scenarios import bundle, criteria, digest, put_json, snapshot, tree
 from roclec_spec_kit.agents import contracts
 from roclec_spec_kit.verification import REVIEW_ROLES, RUN_ROLES
 
@@ -25,6 +25,10 @@ class VerificationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             findings_scenarios(Path(directory), invoke,
                                lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
+
+    def test_flow_hooks_and_edits_across_branches_and_merges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            flow_scenarios(Path(directory), invoke, lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
 
     def test_public_c2_scenarios(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -71,7 +75,8 @@ class VerificationTest(unittest.TestCase):
             shutil.copytree(altered, working, dirs_exist_ok=True)
             before = tree(root)
             rejected = invoke(["--project", str(root), "--json", "change", "approve", "CHG-001", "--digest", record["proposal_digest"],
-                               "--actor", "fixture user", "--reason", "Attempt to redefine completed scope"])
+                               "--actor", "fixture user", "--reason", "Attempt to redefine completed scope",
+                               *criteria(root, "approve")])
             self.assertEqual(rejected.returncode, 1, rejected.stdout)
             self.assertEqual(tree(root), before)
             shutil.rmtree(working)

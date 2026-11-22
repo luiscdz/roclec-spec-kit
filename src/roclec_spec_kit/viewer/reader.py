@@ -65,7 +65,10 @@ def entities_in(*values):
 
 def title_of(markdown, fallback):
     for line in markdown.splitlines():
-        line = line.strip().lstrip("#").strip()
+        line = line.strip()
+        if line.startswith("<!--") and line.endswith("-->"):
+            continue  # Managed-view headers and other one-line comments are not titles.
+        line = line.lstrip("#").strip()
         if line:
             return line[:140]
     return fallback

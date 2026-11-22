@@ -31,6 +31,7 @@ roclec_spec_kit = [
   "assets/skills/*/SKILL.md",
   "assets/skills/*/references/*.md",
   "assets/project/*.md",
+  "assets/project/*.toml",
   "assets/profiles/*.json",
   "assets/templates/*.md",
   "assets/notices/*",
