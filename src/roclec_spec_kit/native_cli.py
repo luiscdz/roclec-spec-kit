@@ -13,6 +13,7 @@ import traceback
 from . import __version__
 from .config import ConfigError, load_profile
 from .external_skills import SkillLockError
+from .flow import HOOKS
 from .kernel import Kernel
 from .model import ModelError, need, read_json
 from .store import Store
@@ -28,8 +29,13 @@ def subject_decision_arguments(parser):
         parser.add_argument(f"--{name}", required=True)
 
 
-def rejection_arguments(parser, *, required=False):
-    parser.add_argument("--consequence", choices=("revise", "cancel", "defer"), required=required)
+def json_file(path, default=None):
+    return read_json(path.resolve()) if path else default
+
+
+def rejection_arguments(parser):
+    parser.add_argument("--consequence", choices=("revise", "cancel", "defer"),
+                        help="Default: on_reject of the decision point in the project flow")
     parser.add_argument("--corrections", type=Path, help="JSON list of requested corrections")
     parser.add_argument("--fut", help="Captured FUT for a deferred rejection")
     parser.add_argument("--criteria", type=Path, help="JSON list of evaluated criteria")
@@ -39,9 +45,8 @@ def rejection_arguments(parser, *, required=False):
 def record_rejection(kernel, args, subject_type):
     return kernel.reject(subject_type, args.entity, args.digest, args.actor, args.reason,
                          consequence=args.consequence, fut=args.fut,
-                         corrections=read_json(args.corrections.resolve()) if args.corrections else [],
-                         criteria=read_json(args.criteria.resolve()) if args.criteria else [],
-                         addresses=read_json(args.addresses.resolve()) if args.addresses else None)
+                         corrections=json_file(args.corrections, []),
+                         criteria=json_file(args.criteria), addresses=json_file(args.addresses))
 
 
 def build_parser():
@@ -79,14 +84,18 @@ def build_parser():
     for name in ("ref", "actor", "reason"):
         agree.add_argument(f"--{name}", required=True)
     agree.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
+    agree.add_argument("--criteria", type=Path, help="JSON list evaluating the foundation criteria of the flow")
     rejection = sub.add_parser("reject", help="Record a human rejection of an exact revision")
     rejection.add_argument("subject_type", choices=("change", "adr", "reference", "prototype"))
     rejection.add_argument("entity", help="Change or reference ID, or project-relative prototype path")
     subject_decision_arguments(rejection)
-    rejection_arguments(rejection, required=True)
-    checkpoint = sub.add_parser("checkpoint", help="Record a human decision on a prototype revision")
-    checkpoint.add_argument("entity", metavar="PATH")
+    rejection_arguments(rejection)
+    checkpoint = sub.add_parser("checkpoint", help="Record a human decision on a prototype revision or a flow hook")
+    checkpoint.add_argument("entity", metavar="PATH|CHG-NNN", help="Prototype path, or the change of a --hook checkpoint")
     checkpoint.add_argument("--outcome", choices=("approved", "rejected"), required=True)
+    checkpoint.add_argument("--hook", choices=tuple(HOOKS), help="Flow hook of a change component")
+    checkpoint.add_argument("--component", help="Component of a --hook checkpoint")
+    checkpoint.add_argument("--run", help="Passed run whose candidate a pre-integrate checkpoint decides")
     subject_decision_arguments(checkpoint)
     rejection_arguments(checkpoint)
     reference = sub.add_parser("reference")
@@ -109,6 +118,7 @@ def build_parser():
     approve = csub.add_parser("approve")
     approve.add_argument("id")
     approve.add_argument("--digest", required=True)
+    approve.add_argument("--criteria", type=Path, help="JSON list evaluating the approve criteria of the flow")
     for command in (approve, csub.add_parser("cancel")):
         if command is not approve:
             command.add_argument("id")
@@ -244,15 +254,19 @@ def execute(args):
     if command == "reject":
         return record_rejection(kernel, args, args.subject_type)
     if command == "checkpoint":
+        if args.hook:
+            return kernel.stage_checkpoint(args.entity, args.hook, args.component, args.digest, args.actor, args.reason,
+                                           outcome=args.outcome, criteria=json_file(args.criteria), run=args.run,
+                                           consequence=args.consequence, corrections=json_file(args.corrections, []),
+                                           fut=args.fut, addresses=json_file(args.addresses))
+        need(args.component is None and args.run is None, "INVALID_INPUT",
+             "--component and --run apply only to a --hook checkpoint", exit_code=2)
         if args.outcome == "rejected":
-            need(args.consequence is not None, "INVALID_INPUT",
-                 "A rejected checkpoint needs --consequence", exit_code=2)
             return record_rejection(kernel, args, "prototype")
-        need(all(value is None for value in (args.consequence, args.corrections, args.fut, args.criteria)),
+        need(all(value is None for value in (args.consequence, args.corrections, args.fut)),
              "INVALID_INPUT", "Rejection details apply only to a rejected checkpoint", exit_code=2)
-        addresses = read_json(args.addresses.resolve()) if args.addresses else None
-        return kernel.checkpoint(args.entity, args.digest, args.actor, args.reason,
-                                 outcome=args.outcome, addresses=addresses)
+        return kernel.checkpoint(args.entity, args.digest, args.actor, args.reason, outcome=args.outcome,
+                                 addresses=json_file(args.addresses), criteria=json_file(args.criteria))
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:
@@ -305,8 +319,8 @@ def execute(args):
         return result
     if command == "foundation":
         if action == "agree":
-            addresses = read_json(args.addresses.resolve()) if args.addresses else None
-            return kernel.agree_foundation(args.ref, args.actor, args.reason, addresses=addresses)
+            return kernel.agree_foundation(args.ref, args.actor, args.reason, addresses=json_file(args.addresses),
+                                           criteria=json_file(args.criteria))
         return kernel.foundation(args.component, args.change)
     if command == "reference":
         return kernel.write_reference(action, args.id, args.path, args.component, args.role, args.supersedes)
@@ -317,7 +331,7 @@ def execute(args):
         if action == "new":
             return kernel.new_change(args.file.resolve())
         if action == "approve":
-            return kernel.approve(args.id, args.digest, args.actor, args.reason)
+            return kernel.approve(args.id, args.digest, args.actor, args.reason, criteria=json_file(args.criteria))
         if action == "start":
             return kernel.start(args.id, args.component, args.actor)
         return kernel.cancel(args.id, args.actor, args.reason)
@@ -373,6 +387,48 @@ def findings_table(rows, indent):
         print(indent + "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip())
 
 
+def conformance_table(flow, indent):
+    """Compact rendering of the `inspect --change` flow section; --json keeps every field."""
+    print(f"{indent}sha256: {flow['sha256']}")
+    print(f"{indent}agreed: {flow['agreed']}")
+    print(f"{indent}approved_under: {flow['approved_under'] or '—'}")
+    for issue in flow["agreement_issues"]:
+        print(f"{indent}{issue['code']}: {issue['message']}")
+
+    def short(value):
+        return "—" if value is None else value[:12] if len(value) == 64 else value
+
+    def detail(entry):
+        if "pending" in entry:
+            return f"{entry['pending']['decider']} decides " + (
+                ", ".join(c["id"] for c in entry["pending"]["criteria"]) or "(no criteria)")
+        if "issue" in entry:
+            return entry["issue"]["code"]
+        if "canceled" in entry:
+            return "canceled"
+        return ", ".join(f"{c['id']} {c['status']}" for c in entry["criteria"])
+
+    cells = [("Stage", "AI", "Component", "Status", "Record", "Actor", "Detail")]
+    notes = []
+    for stage in flow["stages"]:
+        ai = "yes" if stage["ai"] else "no"
+        entries = ([("—", stage["change"])] if "change" in stage else sorted(stage["components"].items()))
+        for component, entry in entries:
+            cells.append((stage["stage"], ai, component, entry["status"], short(entry["record"]), entry["actor"] or "—",
+                          detail(entry)))
+            if "hook" in entry:
+                hook = entry["hook"]
+                cells.append((f"  {hook['name']}", "no", component, hook["status"], short(hook["record"]),
+                              hook["actor"] or "—", detail(hook)))
+        if "limitation" in stage:
+            notes.append(f"{stage['stage']}: {stage['limitation']}")
+    widths = [max(map(len, column)) for column in zip(*cells)]
+    for line in cells:
+        print(indent + "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip())
+    for note in notes:
+        print(f"{indent}Note — {note}")
+
+
 def human_output(value, depth=0):
     indent = "  " * depth
     if isinstance(value, dict) and value:
@@ -381,6 +437,9 @@ def human_output(value, depth=0):
                     isinstance(row, dict) and "state_records" in row for row in item):
                 print(f"{indent}{key}:")
                 findings_table(item, indent + "  ")
+            elif key == "flow" and isinstance(item, dict) and isinstance(item.get("stages"), list):
+                print(f"{indent}{key}:")
+                conformance_table(item, indent + "  ")
             elif isinstance(item, (dict, list)) and item:
                 print(f"{indent}{key}:")
                 human_output(item, depth + 1)

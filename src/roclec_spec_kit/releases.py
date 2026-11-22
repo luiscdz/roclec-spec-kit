@@ -138,11 +138,15 @@ class Releases:
         repo = self.k.profile.repo(component)
         ref = self.k.profile.components[component]["target_ref"]
         tip = target_tip(repo, ref)
+        # Hooks are read from the agreed flow: an unagreed edit can neither add nor drop a handoff.
+        self.k.agreed_flow(component)
         for member in record["changes"]:
             integration = self.k.integration(member["change_id"], component, member["intent_revision"])
             need(tip and git(repo, "merge-base", "--is-ancestor", integration["candidate"]["head"], tip, check=False).returncode == 0,
                  "TARGET_NOT_INTEGRATED", "Release member is no longer in the configured target history",
                  entity=member["change_id"], actual=ref)
+            # A declared handoff hook needs a human approval of each member's integration record.
+            self.k.require_checkpoint(member["change_id"], component, "handoff", integration["digest"])
         self.version(record)
         verified = Verification(self.k, release={"component": component, "version": version}).verify(None, component, run_id=run_id, final=True)
         findings = self.findings(component, version)

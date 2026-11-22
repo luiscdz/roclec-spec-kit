@@ -145,13 +145,17 @@ class Verification:
         # ADRs of this component are classified like its references; their state is the ADR gate's concern.
         reference_paths |= {(self.k.profile.root / r["path"]).resolve() for r in self.k.references().values()
                             if r["role"] == "decision" and component in r["components"]}
+        # The generated flow view is operational like capability views; foundation already required a valid flow.
+        flow_view = self.k._flow_view()
+        flow_view = (self.k.profile.root / flow_view[1]).resolve() if flow_view else None
         files, categories, unknown = {}, {}, []
         for relative in sorted(paths):
             # Operational records do not attest code or invalidate themselves.
             absolute = repo / relative
             if absolute.is_relative_to(self.k.profile.root / ".roclec/runtime"):
                 continue
-            metadata = absolute.is_relative_to(self.k.profile.root / ".roclec") or absolute.is_relative_to(self.k.profile.root / "specs/capabilities")
+            metadata = (absolute.is_relative_to(self.k.profile.root / ".roclec") or absolute.is_relative_to(self.k.profile.root / "specs/capabilities")
+                        or absolute.resolve() == flow_view)
             if metadata:
                 categories[relative] = "operational"
                 continue

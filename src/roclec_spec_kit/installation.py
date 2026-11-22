@@ -159,6 +159,9 @@ def install(kernel, *, into=None, restore=False, adapter=False):
             target = f".roclec/templates/{template.name}"
             if not store.path(target).exists():
                 writes[target] = template.read_bytes()
+        # Consumer-owned like templates: seeded once, never managed, compared or pruned.
+        if not store.path(".roclec/flow.toml").exists():
+            writes[".roclec/flow.toml"] = assets.joinpath("project/flow.toml").read_bytes()
         if not store.path(".roclec/constitution.md").exists() and not store.path(".specify/memory/constitution.md").exists():
             writes[".roclec/constitution.md"] = assets.joinpath("templates/constitution-template.md").read_bytes()
     for notice in assets.joinpath("notices").iterdir():

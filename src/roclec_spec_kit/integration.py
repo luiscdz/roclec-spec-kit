@@ -40,6 +40,8 @@ class Integration:
         record, files, _ = self.k.change(change_id, check_base=True, check_component=component)
         self.k.preserve_integrated(record)
         verified = self.v.verify(change_id, component, run_id=run_id, final=True)
+        # A declared pre-integrate hook needs a human approval of exactly this run's candidate.
+        self.k.require_checkpoint(change_id, component, "pre-integrate", verified["candidate"]["inputs_digest"], run=run_id)
         repo = self.k.profile.repo(component)
         target_ref = self.k.profile.components[component]["target_ref"]
         target_commit = target_tip(repo, target_ref)

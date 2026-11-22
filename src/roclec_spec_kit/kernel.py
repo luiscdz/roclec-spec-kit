@@ -6,10 +6,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections import defaultdict
+from importlib.resources import files as package_files
 import copy
 import re
 import subprocess
 
+from . import flow as project_flow
 from .adr import Adrs, adr_ids, declaration, in_folder, is_adr, supersession
 from .config import Profile, load_profile, validate_profile
 from .model import (ModelError, checked_files, digest, encoded, fields, fingerprint, identifier,
@@ -17,10 +19,14 @@ from .model import (ModelError, checked_files, digest, encoded, fields, fingerpr
                     validate_contract, validate_delta, version_key)
 from .store import Store
 from .origins import captured_paths, validate_coverage
-from .rejection import Rejections, addresses, validate_decision
+from .rejection import Rejections, addresses, evaluations, is_stage, validate_decision
 
-FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design"}
+FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design", "process"}
 REFERENCE_ID = r"[a-z][a-z0-9-]*"
+# Section 7.6: a stage with ai = false is attributed, not proven.
+HUMAN_STAGE_LIMITATION = ("Roclec records the actor declared in this stage's decisions; "
+                          "it cannot prove who performed a stage with ai = false.")
+STAGE_HOOKS = {stage: hook for hook, stage in project_flow.HOOKS.items()}
 
 
 class Kernel:
@@ -59,11 +65,27 @@ class Kernel:
                   ".roclec/identities.json": encoded({"model_schema": 2, "identities": {}})}
         for relative in writes:
             need(not store.path(relative).exists(), "UNMANAGED_FILE", "Initialization would overwrite an existing file", path=relative)
+        # The flow is consumer-owned: seed it when absent, keep (after validating) an existing one.
+        payload = {"profile": data}
+        source = store.path(project_flow.FLOW_PATH)
+        if source.is_file():
+            flow_bytes = source.read_bytes()
+        else:
+            flow_bytes = package_files("roclec_spec_kit").joinpath("assets/project/flow.toml").read_bytes()
+            writes[project_flow.FLOW_PATH] = flow_bytes
+        flow = project_flow.parse(flow_bytes, profile.root)
+        # Never overwrite an existing view at init; `views --write` owns regeneration.
+        view = store.path(flow["view"])
+        if not view.exists():
+            writes[flow["view"]] = project_flow.render(flow, profile.data)
+            payload["flow_view"] = flow["view"]
         ignore = store.path(".gitignore")
         ignored = ignore.read_bytes() if ignore.exists() else b""
         if b".roclec/runtime/" not in ignored.splitlines():
             writes[".gitignore"] = ignored + (b"\n" if ignored and not ignored.endswith(b"\n") else b"") + b".roclec/runtime/\n"
-        receipt = store.apply("init", {"profile": data}, writes, token)
+        receipt = store.apply("init", payload, writes, token,
+                              validate=lambda: need(view.exists() == ("flow_view" not in payload), "BASE_CONFLICT",
+                                                    "Project inputs changed during validation", exit_code=3, path=flow["view"]))
         return {"profile_schema": 3, "components": sorted(profile.components), "receipt": receipt, "increment": "C3"}
 
     def current(self):
@@ -103,7 +125,12 @@ class Kernel:
     def references(self):
         return self._validate_references(self.read(".roclec/references.json"))
 
-    def _validate_references(self, record):
+    def _validate_references(self, record, *, writing=False):
+        """Validate references.json; `writing` also requires a process reference to cover every component.
+
+        Reading accepts a process reference that predates a newly configured component, so the
+        project stays usable and `foundation check` reports that component as missing `process`.
+        """
         fields(record, ("model_schema", "references"))
         need(isinstance(record["references"], list), "INVALID_INPUT", "references must be a list", exit_code=2)
         refs = {}
@@ -125,9 +152,44 @@ class Kernel:
                  exit_code=2, entity=ref["id"])
             if decision:
                 adr_ids(ref["supersedes"])
+            if ref["role"] == "process":
+                self._process_reference(ref, refs, writing=writing)
             refs[ref["id"]] = ref
         supersession(refs)
         return refs
+
+    def _process_reference(self, ref, refs, *, writing):
+        every = sorted(self.profile.components)
+        command = (f"reference add {ref['id']} --path {project_flow.FLOW_PATH} --role process "
+                   + " ".join(f"--component {c}" for c in every))
+        other = [r["id"] for r in refs.values() if r["role"] == "process"]
+        need(not other, "INVALID_REFERENCE", "Only one process reference may exist", entity=ref["id"],
+             actual=sorted(other + [ref["id"]]), remediation=f"Keep the single process reference {other[0] if other else ''}; "
+             "use reference update to change it.")
+        need(ref["path"] == project_flow.FLOW_PATH, "INVALID_REFERENCE", "The process reference must be the project flow",
+             entity=ref["id"], expected=project_flow.FLOW_PATH, actual=ref["path"], remediation=command)
+        need(not writing or sorted(ref["components"]) == every, "INVALID_REFERENCE",
+             "The process reference must apply to every configured component", entity=ref["id"],
+             expected=every, actual=sorted(ref["components"]), remediation=command)
+
+    def _flow(self):
+        """Return (parsed flow, raw bytes) from one read; FLOW_MISSING or FLOW_INVALID otherwise."""
+        path = self.store.path(project_flow.FLOW_PATH)
+        if not path.is_file():
+            project_flow.load(self.profile.root)  # Raises FLOW_MISSING with its remediation.
+        raw = path.read_bytes()
+        return project_flow.parse(raw, self.profile.root), raw
+
+    def _evaluate(self, point, criteria, outcome, flow=None):
+        """Evaluate a decision's criteria against the current flow; return (criteria, flow sha256).
+
+        Exactly the criteria declared for `point` (D28); the sha pins the flow bytes evaluated.
+        """
+        if flow is None:
+            flow = self._flow()
+        parsed, raw = flow
+        rows = project_flow.evaluate(parsed, point, [] if criteria is None else criteria, outcome=outcome)
+        return rows, sha(raw)
 
     def write_reference(self, action, ref_id, path, components, role, supersedes=()):
         refs = self.references()
@@ -143,7 +205,7 @@ class Kernel:
             ref["supersedes"] = sorted(supersedes)
         refs[ref_id] = ref
         record = {"model_schema": 2, "references": [refs[key] for key in sorted(refs)]}
-        self._validate_references(record)
+        self._validate_references(record, writing=True)
         folder = self.profile.adr["path"]
         need(role != "decision" or in_folder(path, folder), "INVALID_PATH",
              "An ADR must be a Markdown file inside the configured ADR folder", exit_code=2, entity=ref_id,
@@ -151,11 +213,15 @@ class Kernel:
         source = self.store.path(path)
         need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
              "Reference requires an existing nonempty source", path=path)
+        if role == "process":
+            project_flow.parse(source.read_bytes(), self.profile.root)
         receipt = self.store.apply("reference-" + action, {"id": ref_id},
                                    {".roclec/references.json": encoded(record)}, self.token)
         return {"reference": ref, "receipt": receipt}
 
-    def reject(self, subject_type, entity, subject_digest, actor, reason, *, consequence, corrections=(), fut=None, criteria=(), addresses=None):
+    def reject(self, subject_type, entity, subject_digest, actor, reason, *, consequence=None, corrections=(), fut=None,
+               criteria=None, addresses=None):
+        need(subject_type in project_flow.SUBJECT_POINTS, "INVALID_INPUT", "Unknown rejection subject", exit_code=2)
         service = Rejections(self)
         if subject_type == "change":
             need(not any(d["kind"] == "change-cancel" for d in self.decisions(entity)), "CHANGE_CANCELED",
@@ -165,18 +231,23 @@ class Kernel:
         service.withdrawn(subject_type, entity)
         fingerprint(subject_digest)
         need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
+        flow = self._flow()
+        point = project_flow.SUBJECT_POINTS[subject_type]
+        if consequence is None:
+            # The flow declares the default consequence of rejecting at this point.
+            consequence = project_flow.point(flow[0], point)["on_reject"]
         need(consequence in {"revise", "cancel", "defer"}, "INVALID_INPUT", "Unknown rejection consequence", exit_code=2)
-        from .rejection import corrections as validate_corrections, criteria as validate_criteria
+        from .rejection import corrections as validate_corrections
         validate_corrections(corrections, consequence)
-        validate_criteria(criteria)
         need((consequence == "defer") == (fut is not None), "INVALID_INPUT", "Only defer requires a FUT", exit_code=2)
         if fut is not None:
             self.inspect_fut(fut)
         pin, files = service.subject(subject_type, entity)
         need(pin == subject_digest, "APPROVAL_STALE", "Rejection must cite the current subject digest", expected=pin, actual=subject_digest)
+        evaluated, flow_pin = self._evaluate(point, criteria, "rejected", flow)
         subject = {"type": subject_type, "entity": entity, "digest": pin}
         extra = {"subject": subject, "consequence": consequence, "corrections": list(corrections),
-                 "criteria": list(criteria), "files": {p: sha(b) for p, b in files.items()}}
+                 "criteria": evaluated, "flow": flow_pin, "files": {p: sha(b) for p, b in files.items()}}
         if fut is not None:
             extra["fut"] = fut
         if addresses is not None:
@@ -200,7 +271,9 @@ class Kernel:
             writes[f".roclec/decisions/{cancellation['id']}.json"] = encoded(cancellation)
             result["cancellation"] = cancellation
         if subject_type == "prototype":
-            checkpoint, _ = self._decision("checkpoint", entity, actor, reason, subject=subject, outcome="rejected", rejection=decision["id"])
+            # The paired checkpoint repeats the rejection's evaluation; decisions() checks they match.
+            checkpoint, _ = self._decision("checkpoint", entity, actor, reason, subject=subject, outcome="rejected",
+                                           rejection=decision["id"], criteria=evaluated, flow=flow_pin)
             checkpoint["previous"] = decision["id"]
             checkpoint["id"] = digest({k: v for k, v in checkpoint.items() if k != "id"})
             writes[f".roclec/decisions/{checkpoint['id']}.json"] = encoded(checkpoint)
@@ -209,17 +282,162 @@ class Kernel:
         result["receipt"] = self.store.apply("reject", {"id": entity, "subject": subject, "source_guards": source_guards}, writes, self.token)
         return result
 
-    def checkpoint(self, entity, subject_digest, actor, reason, *, outcome, addresses=None):
+    def checkpoint(self, entity, subject_digest, actor, reason, *, outcome, addresses=None, criteria=None):
         need(outcome == "approved", "INVALID_INPUT", "Use reject prototype with corrections for a rejected checkpoint", exit_code=2)
         service = Rejections(self)
         pin, _ = service.subject("prototype", entity)
         need(pin == subject_digest, "APPROVAL_STALE", "Checkpoint must cite current prototype bytes", expected=pin, actual=subject_digest)
         service.require_addresses("prototype", entity, pin, addresses)
+        evaluated, flow_pin = self._evaluate("design", criteria, outcome)
         extra = {"addresses": addresses} if addresses is not None else {}
         decision, path = self._decision("checkpoint", entity, actor, reason,
-                                        subject={"type": "prototype", "entity": entity, "digest": pin}, outcome=outcome, **extra)
+                                        subject={"type": "prototype", "entity": entity, "digest": pin}, outcome=outcome,
+                                        criteria=evaluated, flow=flow_pin, **extra)
         receipt = self.store.apply("checkpoint", {"id": entity, "source_guards": {entity: pin}}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "receipt": receipt}
+
+    def _stage_checkpoints(self, change_id, hook, component, decisions=None):
+        decisions = self.decisions(change_id) if decisions is None else decisions
+        return [d for d in decisions if d["entity"] == change_id and is_stage(d)
+                and d["hook"] == hook and d["component"] == component]
+
+    def stage_checkpoint(self, change_id, hook, component, subject_digest, actor, reason, *, outcome, criteria=None,
+                         run=None, consequence=None, corrections=(), fut=None, addresses=None):
+        """Human decision at a flow hook on one change component (section 7.3).
+
+        Subjects are immutable records: the proposal (pre-implement), a passed run candidate
+        (pre-integrate) or the integration record (handoff). A rejection is the same decision
+        with outcome rejected; `cancel` pairs a change-cancel for this component in one operation.
+        """
+        need(hook in project_flow.HOOKS, "INVALID_INPUT", "Unknown checkpoint hook", exit_code=2,
+             expected=sorted(project_flow.HOOKS), actual=hook)
+        need(outcome in {"approved", "rejected"}, "INVALID_INPUT", "outcome must be approved or rejected", exit_code=2)
+        need((run is not None) == (hook == "pre-integrate"), "INVALID_INPUT",
+             "--run is required for pre-integrate and applies to no other hook", exit_code=2)
+        need(outcome == "rejected" or (consequence is None and not corrections and fut is None), "INVALID_INPUT",
+             "Rejection details apply only to a rejected checkpoint", exit_code=2)
+        need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
+        record, _, _ = self.change(change_id)
+        self._component(record, component)
+        entity = f"{change_id}/{component}/{hook}"
+        decisions = self.decisions(change_id)
+        need(not any(d["kind"] == "change-cancel" and component in d["components"] for d in decisions),
+             "CHANGE_CANCELED", "Canceled work requires a new change", entity=change_id)
+        flow = self._flow()
+        point = project_flow.point(flow[0], hook)
+        stage = project_flow.HOOKS[hook]
+        need(point is not None, "INVALID_REFERENCE", f"The current flow declares no {hook} checkpoint", entity=entity,
+             path=project_flow.FLOW_PATH, remediation=f"Declare checkpoint on [stages.{stage}] and agree the flow, "
+             "or record nothing: an undeclared hook blocks nothing.")
+        if hook == "pre-implement":
+            self._approved(record)
+            pin = record["proposal_digest"]
+        elif hook == "pre-integrate":
+            from .verification import Verification
+            identifier(run, "RUN")
+            attempt = Verification(self).read_run(run)
+            need(attempt.get("release") is None and (attempt["change_id"], attempt["component"]) == (change_id, component),
+                 "INVALID_REFERENCE", "Run belongs to another change, component or a release", entity=run)
+            need(attempt["status"] == "pass", "CANDIDATE_INCOMPLETE", "Run did not pass", entity=run, actual=attempt["status"])
+            need(attempt["candidate"]["inputs"]["proposal_digest"] == record["proposal_digest"], "EVIDENCE_STALE",
+                 "Run tested another proposal revision", entity=run)
+            pin = attempt["candidate"]["inputs_digest"]
+        else:
+            integration = self.integration(change_id, component)
+            need(integration is not None, "INVALID_REFERENCE", "Handoff needs the integrated component", entity=entity,
+                 remediation=f"Integrate first: roclec integrate prepare {change_id} --component {component} ...")
+            pin = integration["digest"]
+        fingerprint(subject_digest)
+        need(subject_digest == pin, "APPROVAL_STALE", "Checkpoint must cite the current subject digest", entity=entity,
+             expected=pin, actual=subject_digest)
+        extra = {}
+        if outcome == "rejected":
+            consequence = consequence or point["on_reject"]
+            need(consequence in {"revise", "cancel", "defer"}, "INVALID_INPUT", "Unknown rejection consequence", exit_code=2)
+            # The integration record is immutable and integrated work is never canceled: QA findings go
+            # to a follow-up fix change captured as a FUT, and the change may leave its planning release.
+            need(hook != "handoff" or consequence == "defer", "INVALID_INPUT",
+                 "A handoff rejection can only defer to a follow-up change", exit_code=2, entity=entity, actual=consequence,
+                 remediation="Capture the follow-up fix as a FUT and reject with --consequence defer --fut FUT-NNN; "
+                             "then remove the change from the planning release with release plan if it must not ship.")
+            from .rejection import corrections as validate_corrections
+            validate_corrections(corrections, consequence)
+            need((consequence == "defer") == (fut is not None), "INVALID_INPUT", "Only defer requires a FUT", exit_code=2)
+            if fut is not None:
+                self.inspect_fut(fut)
+                extra["fut"] = fut
+            if consequence == "cancel":
+                pending = self._cancelable_components(record)
+                need(component in pending, "INVALID_REFERENCE", "Integrated work requires a reversal change", entity=entity,
+                     remediation="Propose a new change that reverses the integrated behavior.")
+            extra.update(consequence=consequence, corrections=list(corrections))
+        prior = [d for d in self._stage_checkpoints(change_id, hook, component, decisions) if d["outcome"] == "rejected"]
+        Rejections.require_stage(prior, pin, addresses, approving=outcome == "approved", entity=entity)
+        if addresses is not None:
+            extra["addresses"] = addresses
+        if run is not None:
+            extra["run"] = run
+        evaluated, flow_pin = self._evaluate(hook, criteria, outcome, flow)
+        subject = {"type": "stage", "entity": change_id, "digest": pin}
+        decision, path = self._decision("checkpoint", change_id, actor, reason, subject=subject, hook=hook,
+                                        component=component, outcome=outcome, criteria=evaluated, flow=flow_pin, **extra)
+        writes = {path: encoded(decision)}
+        result = {"decision": decision}
+        if outcome == "rejected" and consequence == "cancel":
+            cancellation, cancel_path = self._decision("change-cancel", change_id, actor, reason,
+                                                       proposal_digest=record["proposal_digest"], components=[component])
+            writes[cancel_path] = encoded(cancellation)
+            result["cancellation"] = cancellation
+        result["receipt"] = self.store.apply("checkpoint", {"id": change_id, "hook": hook, "component": component,
+                                                            "subject": subject}, writes, self.token)
+        return result
+
+    def require_checkpoint(self, change_id, component, hook, pin, *, run=None):
+        """CHECKPOINT_REQUIRED unless the current flow leaves `hook` undeclared or it is approved on `pin`."""
+        point = project_flow.point(self._flow()[0], hook)
+        if point is None:
+            return None
+        chain = self._stage_checkpoints(change_id, hook, component)
+        rows = [d for d in chain if d["subject"]["digest"] == pin]
+        # An approval only counts after the latest revise rejection of this hook/component: an older
+        # approval of these same bytes cannot bypass corrections requested on a later subject. Any
+        # approval recorded after that rejection had to address it (Rejections.require_stage).
+        revise = [index for index, d in enumerate(chain) if d["outcome"] == "rejected" and d["consequence"] == "revise"]
+        if rows and rows[-1]["outcome"] == "approved" and chain.index(rows[-1]) > max(revise, default=-1):
+            return rows[-1]
+        subject = {"pre-implement": "proposal", "pre-integrate": "run candidate", "handoff": "integration record"}[hook]
+        evaluation = (f" --criteria <JSON evaluating {', '.join(point['criteria'])}>" if point["criteria"] else "")
+        command = (f"roclec checkpoint {change_id} --hook {hook} --component {component} --digest {pin}"
+                   + (f" --run {run}" if run else "") + " --outcome approved --actor <person> --reason <why>" + evaluation)
+        raise ModelError("CHECKPOINT_REQUIRED", f"The {hook} checkpoint needs an approval of the current {subject}",
+                         entity=f"{change_id}/{component}/{hook}", expected=pin,
+                         actual=rows[-1]["outcome"] if rows else None,
+                         remediation=f"Ask the {point['decider']} to decide, then record it: {command}")
+
+    def _handoff_deferred(self, change_id, component, integration, decisions=None):
+        """True when the latest handoff checkpoint on this integration record is a deferred rejection."""
+        rows = [d for d in self._stage_checkpoints(change_id, "handoff", component, decisions)
+                if d["subject"]["digest"] == integration["digest"]]
+        return bool(rows) and rows[-1]["outcome"] == "rejected" and rows[-1]["consequence"] == "defer"
+
+    def agreed_flow(self, component):
+        """FOUNDATION_INCOMPLETE unless the process reference of `component` is agreed on the current flow bytes."""
+        parsed, raw = self._flow()
+        refs = [r for r in self.references().values() if r["role"] == "process" and component in r["components"]]
+        every = " ".join(f"--component {c}" for c in sorted(self.profile.components))
+        need(bool(refs), "FOUNDATION_INCOMPLETE", "Missing agreed process reference", entity=component,
+             remediation=f"roclec reference add flow --path {project_flow.FLOW_PATH} --role process {every}, then "
+                         "roclec foundation agree --ref flow with the user.")
+        ref = refs[0]
+        agree = (f"Agree the current flow with the user: roclec foundation agree --ref {ref['id']} --actor <person> "
+                 "--reason <why> --criteria <JSON evaluating the foundation criteria>.")
+        decision = self.read(f".roclec/decisions/{ref['decision_id']}.json") if ref["decision_id"] else None
+        need(decision is not None and decision.get("kind") == "foundation" and decision.get("status") == "agreed"
+             and (decision.get("sources") or {}).get(ref["id"]) == sha(raw)
+             and Rejections(self).state("reference", ref["id"], sha(raw), approved=True) == "approved",
+             "FOUNDATION_INCOMPLETE", "The project flow changed since its agreement", entity=ref["id"],
+             path=project_flow.FLOW_PATH, remediation=agree)
+        return parsed
 
     def inspect_reference(self, ref_id):
         ref = self.references().get(ref_id)
@@ -237,7 +455,7 @@ class Kernel:
         source = self.store.path(entity)
         pin = sha(source.read_bytes()) if source.is_file() else None
         decisions = self.decisions(entity)
-        checkpoints = [d for d in decisions if d["kind"] == "checkpoint"]
+        checkpoints = [d for d in decisions if d["kind"] == "checkpoint" and d["subject"]["type"] == "prototype"]
         approved = bool(checkpoints and checkpoints[-1]["outcome"] == "approved" and checkpoints[-1]["subject"]["digest"] == pin)
         service = Rejections(self)
         return {"path": entity, "sha256": pin, "state": service.state("prototype", entity, pin, approved=approved),
@@ -260,6 +478,8 @@ class Kernel:
                 value, pin = record["semantic"].get("addresses"), record["proposal_digest"]
             result.extend(row for row in Rejections(self).history(kind, entity, value=value, pin=pin)
                           if not open_only or row["open"])
+        for entity in sorted({d["entity"] for d in self.decisions() if is_stage(d) and d["outcome"] == "rejected"}):
+            result.extend(row for row in Rejections(self).stage_history(entity) if not open_only or row["open"])
         return sorted(result, key=lambda row: (row["entity"], row["id"]))
 
     def _prototypes(self, value):
@@ -278,7 +498,7 @@ class Kernel:
             need(view["state"] == "approved" and view["sha256"] == entry["sha256"], "PROTOTYPE_NOT_APPROVED",
                  "Cited prototype needs approval on its current pinned bytes", path=entry["path"], actual=view["state"])
 
-    def agree_foundation(self, ref_id, actor, reason, *, addresses=None):
+    def agree_foundation(self, ref_id, actor, reason, *, addresses=None, criteria=None):
         need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
         refs = self.references()
         need(ref_id in refs, "INVALID_REFERENCE", "Unknown foundation reference", entity=ref_id)
@@ -287,11 +507,16 @@ class Kernel:
         need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
         content = source.read_bytes()
         need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
+        if ref["role"] == "process":
+            # Agreement freezes exactly these bytes, so they must be a valid flow.
+            project_flow.parse(content, self.profile.root)
         Rejections(self).require_addresses("adr" if ref["role"] == "decision" else "reference", ref_id, sha(content), addresses)
+        evaluated, flow_pin = self._evaluate("foundation", criteria, "approved")
         extra = {"supersedes": list(ref["supersedes"])} if ref["role"] == "decision" else {}
         if addresses is not None:
             extra["addresses"] = addresses
-        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)}, **extra)
+        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)},
+                                        criteria=evaluated, flow=flow_pin, **extra)
         decision_id = decision["id"]
         ref["decision_id"] = decision_id
         writes = {".roclec/references.json": encoded({"model_schema": 2, "references": [refs[k] for k in sorted(refs)]}),
@@ -303,6 +528,7 @@ class Kernel:
         self.profile.repo(component)
         refs = self.references()
         roles, resolved, issues = set(), [], []
+        invalid_flow = False
         decisions = self.decisions()
         for ref in refs.values():
             # ADRs are not foundation roles: a proposed ADR never blocks unrelated changes.
@@ -314,7 +540,8 @@ class Kernel:
                      "Reference has no content", path=ref["path"])
                 need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE", "Reference has no agreement", entity=ref["id"])
                 decision = self.read(f".roclec/decisions/{ref['decision_id']}.json")
-                fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"), ("addresses",))
+                fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"),
+                       ("addresses", "criteria", "flow"))
                 need(decision["id"] == ref["decision_id"] and decision["kind"] == "foundation"
                      and decision["status"] == "agreed" and text(decision["actor"]) and text(decision["reason"]),
                      "FOUNDATION_INCOMPLETE", "Reference decision is not agreed", entity=ref["id"])
@@ -322,15 +549,27 @@ class Kernel:
                      "FOUNDATION_INCOMPLETE", "Reference changed since its agreement", entity=ref["id"])
                 state = Rejections(self).state("reference", ref["id"], sha(path.read_bytes()), approved=True, decisions=decisions)
                 need(state == "approved", "FOUNDATION_INCOMPLETE", "Foundation reference was rejected or withdrawn", entity=ref["id"])
+                if ref["role"] == "process":
+                    # Agreed bytes can still fail later checks (e.g. a deleted agent binding).
+                    invalid_flow = True
+                    project_flow.parse(path.read_bytes(), self.profile.root)
+                    invalid_flow = False
                 roles.add(ref["role"])
                 resolved.append({**ref, "sha256": sha(path.read_bytes())})
             except ModelError as exc:
                 issues.append(exc.issue)
-        required = {"context", "principles", "architecture", "stack", "engineering", "verification"}
+        required = {"context", "principles", "architecture", "stack", "engineering", "verification", "process"}
         if self.profile.components[component]["user_facing"]:
             required.add("design")
+        if invalid_flow:
+            roles.add("process")  # Already reported as FLOW_INVALID, not as missing.
         for role in sorted(required - roles):
-            issues.append(ModelError("FOUNDATION_INCOMPLETE", f"Missing agreed {role} reference", entity=component).issue)
+            remediation = (f"Run `roclec skills` if {project_flow.FLOW_PATH} is missing, then `roclec reference add flow "
+                           f"--path {project_flow.FLOW_PATH} --role process "
+                           + " ".join(f"--component {c}" for c in sorted(self.profile.components))
+                           + "` and `roclec foundation agree --ref flow` with the user.") if role == "process" else None
+            issues.append(ModelError("FOUNDATION_INCOMPLETE", f"Missing agreed {role} reference", entity=component,
+                                     remediation=remediation).issue)
         if not self.profile.components[component]["verification"]:
             issues.append(ModelError("FOUNDATION_INCOMPLETE", "Declare executable verification checks before implementation", entity=component).issue)
         if change:
@@ -590,7 +829,18 @@ class Kernel:
 
     @staticmethod
     def _decision_chain(record):
-        return (record["entity"], record.get("component") if record["kind"] == "change-start" else None)
+        """Chains order decisions and detect forks from merged histories.
+
+        Change-level decisions share (CHG, None); each component's start is (CHG, component) because
+        starts happen on feature branches. Hook checkpoints are trunk-only but per component: they
+        chain on (CHG, "checkpoint:<component>"), so one component's hooks never fork with another
+        component's hooks, with the change's approvals or with a start recorded on a branch.
+        """
+        if record["kind"] == "change-start":
+            return (record["entity"], record.get("component"))
+        if record["kind"] == "checkpoint" and (record.get("subject") or {}).get("type") == "stage":
+            return (record["entity"], f"checkpoint:{record.get('component')}")
+        return (record["entity"], None)
 
     def decisions(self, entity=None):
         chains = defaultdict(dict)
@@ -599,7 +849,8 @@ class Kernel:
         for path in sorted(directory.glob("*.json")) if directory.exists() else []:
             record = self.read(path.relative_to(self.profile.root).as_posix())
             fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
-                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes", "subject", "consequence", "corrections", "criteria", "fut", "files", "addresses", "rejection"))
+                   ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes", "subject", "consequence", "corrections", "criteria", "fut", "files", "addresses", "rejection", "flow",
+                    "hook", "run"))
             fingerprint(record["id"])
             need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
             seen.add(record["id"])
@@ -613,6 +864,9 @@ class Kernel:
                 fingerprint(record["previous"])
             if record["kind"] in {"rejection", "checkpoint"}:
                 validate_decision(record)
+                if is_stage(record):
+                    need(record["component"] in self.profile.components, "INVALID_REFERENCE", "Unknown checkpoint component",
+                         entity=record["id"])
             elif record["kind"].startswith("change-") or record["kind"] == "review-policy":
                 identifier(record["entity"], "CHG")
                 fingerprint(record.get("proposal_digest"))
@@ -639,6 +893,19 @@ class Kernel:
                     need("supersedes" in record, "INVALID_INPUT", "An ADR agreement must record its supersedes list",
                          exit_code=2, entity=ref, path=path.name)
                     adr_ids(record["supersedes"])
+            # Decisions evaluated against the flow pin its bytes and record their criteria (D28). Records
+            # made before FF keep neither: they stay valid and are never re-evaluated against today's flow.
+            evaluated = {"change-approve", "foundation", "checkpoint", "rejection"}
+            if "flow" in record:
+                need(record["kind"] in evaluated, "INVALID_INPUT", "Only an evaluated decision pins the flow",
+                     exit_code=2, path=path.name)
+                fingerprint(record["flow"])
+            if "criteria" in record:
+                need(record["kind"] in evaluated, "INVALID_INPUT", "Only an evaluated decision records criteria",
+                     exit_code=2, path=path.name)
+                evaluations(record["criteria"], approved=record["kind"] != "rejection" and record.get("outcome") != "rejected")
+            need(not {"hook", "run"} & record.keys() or (record["kind"] == "checkpoint" and is_stage(record)),
+                 "INVALID_INPUT", "Only a hook checkpoint names a hook or run", exit_code=2, path=path.name)
             need("supersedes" not in record or (record["kind"] == "foundation" and is_adr(record["entity"])),
                  "INVALID_INPUT", "Only an ADR agreement records supersedes", exit_code=2, path=path.name)
             if "addresses" in record:
@@ -650,6 +917,14 @@ class Kernel:
                  entity="/".join(filter(None, chain)),
                  expected=previous, actual=sorted([existing["id"], record["id"]]) if existing else None)
             chains[chain][previous] = record
+        by_id = {record["id"]: record for _, record in records}
+        for path, record in records:
+            if record["kind"] == "checkpoint" and "rejection" in record and {"criteria", "flow"} & record.keys():
+                paired = by_id.get(record["rejection"])
+                need(paired is not None and paired["kind"] == "rejection"
+                     and all(record.get(key) == paired.get(key) for key in ("criteria", "flow")),
+                     "INVALID_REFERENCE", "Paired checkpoint evaluation differs from its rejection", entity=record["id"],
+                     path=path.name)
         result = []
         for chain, successors in sorted(chains.items(), key=lambda item: (item[0][0], item[0][1] or "")):
             previous, ordered = None, []
@@ -702,7 +977,7 @@ class Kernel:
             need(pointer == record["id"], "INVALID_ORIGIN", "FUT origin resolves to another target", entity=origin["id"],
                  expected=record["id"], actual=pointer, remediation="Use a FUT promoted or duplicate toward this change")
 
-    def approve(self, change_id, proposal_digest, actor, reason):
+    def approve(self, change_id, proposal_digest, actor, reason, *, criteria=None):
         record, files, new_ids = self.change(change_id, check_base=True)
         self.preserve_integrated(record)
         need(not any(d["kind"] == "change-cancel" for d in self.decisions(change_id)),
@@ -711,8 +986,12 @@ class Kernel:
         self._origin_approval(record)
         Rejections(self).require_addresses("change", change_id, proposal_digest, record["semantic"].get("addresses"))
         Adrs(self).approvable(record)
+        # The approval records the flow it was given under and the evaluation of its criteria;
+        # agreement of that flow is enforced at implement.
+        evaluated, flow_pin = self._evaluate("approve", criteria, "approved")
         extra = {"addresses": record["semantic"]["addresses"]} if "addresses" in record["semantic"] else {}
-        decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest, **extra)
+        decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest,
+                                        criteria=evaluated, flow=flow_pin, **extra)
         writes = {path: encoded(decision)}
         if new_ids:
             registry = self.registry()
@@ -757,6 +1036,7 @@ class Kernel:
             self._origin_approval(record)
             Adrs(self).approvable(record)
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
+            self._flow()
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
         self._approved(record)
@@ -766,10 +1046,12 @@ class Kernel:
         if foundation["issues"]:
             raise ModelError("FOUNDATION_INCOMPLETE", "Resolve foundation before implementation", entity=component,
                              actual=foundation["issues"])
-        if self.integration(change_id, component) is None:
+        integrated = self.integration(change_id, component) is not None
+        if not integrated:
             # An integrated component keeps its historical pins: no retroactive invalidation.
             Adrs(self).gate(record)
             self._prototype_gate(record)
+            self.require_checkpoint(change_id, component, "pre-implement", record["proposal_digest"])
         assignments = [(r, entry) for r in self.releases() if r["record"]["component"] == component
                        for entry in r["record"]["changes"] if entry["change_id"] == change_id
                        and entry["intent_revision"] == record["proposal_digest"]]
@@ -782,7 +1064,11 @@ class Kernel:
             need(satisfied, "DEPENDENCY_PENDING", "Explicit dependency is not satisfied", actual=dep)
         if stage in {"verify", "integrate"}:
             from .verification import Verification
-            return {**Verification(self).verify(change_id, component, final=stage == "integrate"), "gate": stage}
+            verified = Verification(self).verify(change_id, component, final=stage == "integrate")
+            if stage == "integrate" and not integrated:
+                self.require_checkpoint(change_id, component, "pre-integrate", verified["candidate"]["inputs_digest"],
+                                        run=verified["run_id"])
+            return {**verified, "gate": stage}
         return {"change": change_id, "component": component, "gate": stage, "release": assignments[0][0]["record"]["version"]}
 
     def start(self, change_id, component, actor):
@@ -813,7 +1099,7 @@ class Kernel:
         receipt = self.store.apply("change-cancel", {"id": change_id, "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "status": "canceled" if len(pending) == len(record["semantic"]["components"]) else "partially-integrated", "receipt": receipt}
 
-    def inspect_change(self, change_id, *, deep=True, include_findings=True):
+    def inspect_change(self, change_id, *, deep=True, include_findings=True, include_flow=True):
         from .verification import Verification
         record, _, _ = self.change(change_id)
         approval = self.approval(record)
@@ -880,7 +1166,264 @@ class Kernel:
                                       for row in Verification(self).findings(change_id, component)]
             except ModelError as exc:
                 result["issues"].append(exc.issue)
+        if include_flow:
+            result["flow"] = self._conformance(record, decisions, approval, valid, rejection_state)
         return result
+
+    # Section 7.6: per-stage conformance. Read-only and deterministic: it reads records only, never
+    # executes checks, queries Git or remotes, or writes. Any unreadable record becomes a blocked
+    # entry carrying its issue, and a missing or invalid flow is reported as {"error": issue}.
+
+    @staticmethod
+    def _entry(status, record=None, actor=None, criteria=(), **extra):
+        return {"status": status, "record": record, "actor": actor, "criteria": list(criteria), **extra}
+
+    @staticmethod
+    def _point(checkpoint, texts):
+        """What a pending human point presents: its decider and each criterion with its text."""
+        return {"decider": checkpoint["decider"],
+                "criteria": [{"id": cid, "text": texts[cid]} for cid in checkpoint["criteria"]]}
+
+    def _decided(self, status, decision, **extra):
+        return self._entry(status, decision["id"], decision["actor"], decision.get("criteria", []), **extra)
+
+    def _hook_entry(self, chain, hook, point, pin, texts, *, integrated):
+        """Non-raising state of one declared hook on one component; mirrors require_checkpoint."""
+        base = {"name": hook, "subject": pin}
+        if pin is not None:
+            rows = [d for d in chain if d["subject"]["digest"] == pin]
+            revise = [i for i, d in enumerate(chain) if d["outcome"] == "rejected" and d["consequence"] == "revise"]
+            if rows and rows[-1]["outcome"] == "approved" and chain.index(rows[-1]) > max(revise, default=-1):
+                return self._decided("done", rows[-1], **base)
+            latest = chain[-1] if chain else None
+            if latest and latest["outcome"] == "rejected" and (latest["subject"]["digest"] == pin
+                                                              or latest["consequence"] == "cancel"):
+                return self._decided("blocked", latest, consequence=latest["consequence"], **base)
+        if integrated and hook != "handoff":
+            # The gates skip these hooks once a component is integrated (no retroactive invalidation).
+            return self._entry("n/a", **base)
+        return self._entry("pending", pending=self._point(point, texts), **base)
+
+    def _conformance(self, record, decisions, approval, approval_current, rejection_state):
+        try:
+            parsed, raw = self._flow()
+        except ModelError as exc:
+            return {"error": exc.issue}
+        from .causality import one_head, scoped_heads
+        from .findings import OPEN, SEVERITIES
+        from .verification import Verification
+        verifier = Verification(self)
+        change_id, pin = record["id"], record["proposal_digest"]
+        components = sorted(record["semantic"]["components"])
+        texts = parsed["criteria"]
+        agreement = []
+        for component in components:
+            try:
+                self.agreed_flow(component)
+            except ModelError as exc:
+                if exc.issue not in agreement:
+                    agreement.append(exc.issue)
+        current_approval = approval is not None and approval["proposal_digest"] == pin
+        canceled = {c: d["id"] for d in decisions if d["kind"] == "change-cancel" for c in d["components"]}
+        by_id = {d["id"]: d for d in self.decisions()}
+        stage_rows = defaultdict(list)
+        for d in decisions:
+            if d["entity"] == change_id and is_stage(d):
+                stage_rows[(d["hook"], d["component"])].append(d)
+        integrations, latest_runs = {}, {}
+        for component in components:
+            try:
+                integrations[component] = self.integration(change_id, component)
+            except ModelError:
+                integrations[component] = None  # Reported by the integrate stage.
+
+        def guarded(build, component):
+            try:
+                entry = build(component)
+            except ModelError as exc:
+                return self._entry("blocked", issue=exc.issue)
+            return withdrawn(entry, component)
+
+        def withdrawn(entry, component):
+            # A canceled component never proceeds: what it still awaited is blocked, not pending.
+            if component not in canceled or entry["status"] != "pending":
+                return entry
+            return {**{k: v for k, v in entry.items() if k != "pending"}, "status": "blocked",
+                    "canceled": canceled[component]}
+
+        def hook_entry(stage, component, subject):
+            hook = STAGE_HOOKS[stage]
+            point = project_flow.point(parsed, hook)
+            if point is None:
+                return {}
+            entry = self._hook_entry(stage_rows[(hook, component)], hook, point, subject, texts,
+                                     integrated=integrations[component] is not None)
+            return {"hook": withdrawn(entry, component)}
+
+        def effective(component):
+            integration = integrations[component]
+            return integration["proposal_digest"] if integration else pin
+
+        def foundation(component):
+            # Summarized: which references are agreed on their current bytes and what is still missing.
+            # The record is the agreement of the process reference, i.e. of the flow itself.
+            view = self.foundation(component)
+            extra = {"agreed": sorted(r["id"] for r in view["references"]), "issues": view["issues"]}
+            if view["issues"]:
+                extra["pending"] = self._point(project_flow.point(parsed, "foundation"), texts)
+            status = "pending" if view["issues"] else "done"
+            process = next((r for r in view["references"] if r["role"] == "process"), None)
+            if process is None:
+                return self._entry(status, **extra)
+            return self._decided(status, by_id[process["decision_id"]], **extra)
+
+        def design(component):
+            if not self.profile.components[component]["user_facing"]:
+                return self._entry("n/a")
+            cited = record["semantic"].get("prototypes", [])
+            if not cited:
+                return self._entry("n/a", prototypes=[])
+            rows, states = [], []
+            for entry in cited:
+                view = self.inspect_prototype(entry["path"])
+                checkpoint = view["checkpoint"]
+                state = view["state"] if view["sha256"] == entry["sha256"] else "changed"
+                states.append(state)
+                rows.append({"path": entry["path"], "sha256": entry["sha256"], "state": state,
+                             "checkpoint": checkpoint["id"] if checkpoint else None,
+                             "actor": checkpoint["actor"] if checkpoint else None,
+                             "criteria": checkpoint.get("criteria", []) if checkpoint else []})
+            if all(state == "approved" for state in states):
+                single = rows[0] if len(rows) == 1 else {"checkpoint": None, "actor": None, "criteria": []}
+                return self._entry("done", single["checkpoint"], single["actor"], single["criteria"], prototypes=rows)
+            if any(state in {"rejected", "withdrawn"} for state in states):
+                return self._entry("blocked", prototypes=rows)
+            return self._entry("pending", prototypes=rows,
+                               pending=self._point(project_flow.point(parsed, "design"), texts))
+
+        def plan(component):
+            rows = [{"version": r["record"]["version"], "status": r["status"], "intent_revision": m["intent_revision"]}
+                    for r in self.releases() if r["record"]["component"] == component
+                    for m in r["record"]["changes"] if m["change_id"] == change_id]
+            matching = [row for row in rows if row["intent_revision"] == effective(component)]
+            status = "done" if len(matching) == 1 else "blocked" if matching else "pending"
+            return self._entry(status, f"{component}/{matching[0]['version']}" if len(matching) == 1 else None,
+                               releases=rows)
+
+        def implement(component):
+            digest_ = effective(component)
+            starts = [d for d in decisions if d["kind"] == "change-start" and d["component"] == component
+                      and d["proposal_digest"] == digest_]
+            runs = [a["id"] for a in verifier.attempts(change_id, component)
+                    if a["candidate"]["inputs"]["proposal_digest"] == digest_]
+            hook = hook_entry("implement", component, digest_)
+            if starts:
+                return self._entry("done", starts[-1]["id"], starts[-1]["actor"], start=starts[-1]["id"], **hook)
+            if runs or integrations[component]:
+                # Starting is optional: a recorded run of this revision shows the work was implemented.
+                return self._entry("done", runs[0] if runs else None, start=None, **hook)
+            return self._entry("pending", start=None, **hook)
+
+        def verify(component):
+            integration = integrations[component]
+            if integration:
+                latest_runs[component] = (integration["run_id"], "pass", integration["candidate"]["inputs_digest"])
+                return self._entry("done", integration["run_id"], run_status="pass")
+            attempts = verifier.attempts(change_id, component)
+            if not attempts:
+                return self._entry("pending", run_status=None)
+            head = one_head(verifier.run_heads(attempts), "run")
+            if not self.store.path(f".roclec/runs/{head['id']}/manifest.json").is_file():
+                return self._entry("pending", head["id"], run_status="unfinished")
+            run = verifier.read_run(head["id"])
+            current = run["candidate"]["inputs"]["proposal_digest"] == pin
+            latest_runs[component] = (run["id"], run["status"], run["candidate"]["inputs_digest"]) if current else None
+            status = "pending" if not current else "done" if run["status"] == "pass" else "blocked"
+            return self._entry(status, run["id"], run_status=run["status"], current=current)
+
+        def review(component):
+            policy = verifier.policy(change_id)
+            reports = verifier.evidence(change_id, component)
+            reviews = [{"id": r["id"], "actor": r["actor"], "role": r.get("role"), "outcome": r["outcome"],
+                        "run": r["run_id"], "candidate": r["candidate_digest"]}
+                       for r in reports if r["kind"] == "independent-review"]
+            findings = verifier.findings(change_id, component)
+            material = [row["key"] for row in findings if row["status"] in OPEN
+                        and SEVERITIES.index(row["severity"]) >= SEVERITIES.index(self.profile.material_severity)]
+            extra = {"policy": policy["id"], "enabled": policy["enabled"], "reviews": reviews,
+                     "open_findings": [row["key"] for row in findings if row["status"] in OPEN]}
+            if not policy["enabled"]:
+                return self._entry("n/a", **extra)
+            integration = integrations[component]
+            if integration:
+                accepted = [r for r in reviews if r["id"] in integration["evidence"] and r["outcome"] == "ready"]
+                return self._entry("done", accepted[-1]["id"] if accepted else None,
+                                   accepted[-1]["actor"] if accepted else None, **extra)
+            # Current reviews: the head of each reviewer scope that cites the latest run's candidate.
+            latest = latest_runs.get(component)
+            heads = {r["id"] for scope, rows in scoped_heads(reports, verifier.report_scopes).items()
+                     if scope[0] == "review" for r in rows}
+            current = [r for r in reviews if latest and r["candidate"] == latest[2] and r["id"] in heads]
+            if material or any(r["outcome"] != "ready" for r in current):
+                return self._entry("blocked", **extra)
+            if current:
+                return self._entry("done", current[-1]["id"], current[-1]["actor"], **extra)
+            return self._entry("pending", **extra)
+
+        def integrate(component):
+            integration = integrations[component]
+            if integration is None:
+                self.integration(change_id, component)  # Surfaces an unreadable record as blocked.
+                latest = latest_runs.get(component)
+                subject = latest[2] if latest and latest[1] == "pass" else None
+                return self._entry("pending", **hook_entry("integrate", component, subject))
+            return self._entry("done", integration["digest"], run=integration["run_id"],
+                               target_commit=integration["target_commit"],
+                               **hook_entry("integrate", component, integration["candidate"]["inputs_digest"]))
+
+        def release(component):
+            integration = integrations[component]
+            rows = []
+            for r in self.releases():
+                if r["record"]["component"] != component or not any(m["change_id"] == change_id for m in r["record"]["changes"]):
+                    continue
+                publication = r["publication"]
+                rows.append({"version": r["record"]["version"], "status": r["status"],
+                             "publication": {"tag": publication["tag"], "commit": publication["commit"]} if publication else None})
+            published = [row for row in rows if row["publication"]]
+            hook = hook_entry("release", component, integration["digest"] if integration else None)
+            if published:
+                return self._entry("done", f"{component}/{published[0]['version']}", releases=rows, **hook)
+            return self._entry("pending", releases=rows, **hook)
+
+        builders = {"foundation": foundation, "design": design, "plan": plan, "implement": implement,
+                    "verify": verify, "review": review, "integrate": integrate, "release": release}
+        stages = []
+        for row in parsed["stages"]:
+            name = row["name"]
+            stage = {"stage": name, "ai": row["ai"], "role": row["role"]}
+            if not row["ai"]:
+                stage.update(reason=row["reason"], limitation=HUMAN_STAGE_LIMITATION)
+            checkpoint = row.get("checkpoint")
+            stage["checkpoint"] = {**checkpoint, "hook": STAGE_HOOKS.get(name)} if checkpoint else None
+            if name == "define":
+                stage["change"] = self._entry("done", pin, sealed=True)
+            elif name == "approve":
+                if approval_current:
+                    stage["change"] = self._decided("done", approval, flow=approval.get("flow"))
+                else:
+                    rejected = [d for d in decisions if d["kind"] == "rejection" and d["subject"]["type"] == "change"]
+                    if rejection_state in {"rejected", "withdrawn"} and rejected:
+                        stage["change"] = self._decided("blocked", rejected[-1], consequence=rejected[-1]["consequence"])
+                    elif canceled and set(components) <= canceled.keys():
+                        stage["change"] = self._entry("blocked", canceled=canceled[components[0]])
+                    else:
+                        stage["change"] = self._entry("pending", pending=self._point(checkpoint, texts))
+            else:
+                stage["components"] = {c: guarded(builders[name], c) for c in components}
+            stages.append(stage)
+        return {"sha256": sha(raw), "agreed": not agreement, "agreement_issues": agreement,
+                "approved_under": approval.get("flow") if current_approval else None, "stages": stages}
 
     def list_records(self, category, *, origin=None, open_only=False):
         need(origin is None or (category == "changes" and text(origin)), "INVALID_INPUT",
@@ -892,7 +1435,7 @@ class Kernel:
             return [{"component": item["record"]["component"], "version": item["record"]["version"],
                      "status": item["status"]} for item in self.releases()]
         if category == "changes":
-            items = (self.inspect_change(path.parent.name, include_findings=False)
+            items = (self.inspect_change(path.parent.name, include_findings=False, include_flow=False)
                      for path in sorted(self.store.path(".roclec/changes").glob("*/change.json")))
             return [{"id": item["change"]["id"], "status": item["status"], "components": item["components"],
                      "approval_current": item["approval_current"]}
@@ -1119,8 +1662,13 @@ class Kernel:
             removed = [m for m in same[0]["record"]["changes"] if m not in members]
             for member in removed:
                 decisions = self.decisions(member["change_id"])
-                need(self.integration(member["change_id"], component) is None,
-                     "CHANGE_IN_PROGRESS", "An integrated release member cannot be removed")
+                integration = self.integration(member["change_id"], component)
+                if integration is not None and self._handoff_deferred(member["change_id"], component, integration, decisions):
+                    continue  # The user deferred this member at handoff; it may leave the planning release.
+                need(integration is None, "CHANGE_IN_PROGRESS", "An integrated release member cannot be removed",
+                     entity=member["change_id"],
+                     remediation="Only a deferred handoff rejection (checkpoint --hook handoff --outcome rejected "
+                                 "--consequence defer --fut FUT-NNN) lets integrated work leave a planning release.")
                 started = any(d["kind"] == "change-start" and d["component"] == component
                               and d["proposal_digest"] == member["intent_revision"] for d in decisions)
                 from .verification import Verification
@@ -1130,7 +1678,32 @@ class Kernel:
                 replacement = any(m["change_id"] == member["change_id"] for m in members)
                 need(not started or canceled or replacement, "CHANGE_IN_PROGRESS",
                      "Cancel pending work before removing assignment, or bind its newly approved revision explicitly")
-        receipt = self.store.apply("release-plan", {"component": component, "version": version, "record": record},
+        payload = {"component": component, "version": version, "record": record}
+        if same:
+            receipts = self.store.path(".roclec/receipts")
+            names = sorted(p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []
+            target = f".roclec/releases/{component}/{version}/release.json"
+            reused = None
+            if same[0]["record"] == record:
+                # An unchanged repeat replays the receipt that wrote the current bytes, so it stays idempotent.
+                current = sha(self.store.path(target).read_bytes())  # Actual bytes: a reformatted file must not replay.
+                for name in names:
+                    previous = read_json(receipts / name)
+                    if (isinstance(previous, dict) and previous.get("kind") == "release-plan"
+                            and isinstance(previous.get("payload"), dict)
+                            and previous["payload"].get("component") == component
+                            and previous["payload"].get("version") == version
+                            and previous["payload"].get("record") == record
+                            and previous.get("writes", {}).get(target) == current):
+                        reused = previous["payload"]
+                        break
+            if reused is not None:
+                payload = reused
+            else:
+                # A re-plan may restore an earlier membership byte for byte (e.g. after a deferred handoff);
+                # without a fresh generation the store would refuse to replay that earlier, diverged receipt.
+                payload["generation"] = digest({"inputs": self.token, "receipts": names})
+        receipt = self.store.apply("release-plan", payload,
                                    {f".roclec/releases/{component}/{version}/release.json": encoded(record)}, self.token)
         return {"release": record, "status": "planning", "receipt": receipt}
 
@@ -1226,6 +1799,7 @@ class Kernel:
         from .releases import Releases
         for path in self.store.path(".roclec/releases").glob("*/*/preparations/*.json"):
             Releases(self).preparation(path.parent.parent.parent.name, path.parent.parent.name, path.stem)
+        warnings.extend(self._flow_warnings())
         return {"profile_schema": 3, "current": current, "release_count": len(releases),
                 "increment": "C3", "run_count": len(run_paths), "unfinished_runs": sorted(unfinished),
                 "warnings": warnings,
@@ -1305,6 +1879,42 @@ class Kernel:
                  projection(record, self.store.path(f".roclec/changes/{record['id']}")),
                  "INVALID_REFERENCE", "An integrated obligation needs a new change; rebase only pending participants", entity=component)
 
+    def _flow_view(self):
+        """Return (flow, view path, existing bytes, status), or None when the flow file is missing."""
+        try:
+            flow, _ = self._flow()
+        except ModelError as exc:
+            if exc.issue["code"] == "FLOW_MISSING":
+                return None
+            raise
+        relative = flow["view"]
+        path = self.store.path(relative)
+        existing = path.read_bytes() if path.is_file() else None
+        status = "edited" if path.exists() and existing is None else \
+            project_flow.view_status(flow, self.profile.data, existing)
+        return flow, relative, existing, status
+
+    def _flow_warnings(self):
+        def warning(code, message, remediation, **context):
+            return {**ModelError(code, message, remediation=remediation, **context).issue, "severity": "warning"}
+        view = self._flow_view()
+        if view is None:
+            components = " ".join(f"--component {c}" for c in sorted(self.profile.components))
+            return [warning("FLOW_MISSING", f"{project_flow.FLOW_PATH} does not exist",
+                            f"Run `roclec skills` to seed the default flow, then `roclec reference add flow --path "
+                            f"{project_flow.FLOW_PATH} --role process {components}` and `roclec foundation agree --ref flow`.",
+                            path=project_flow.FLOW_PATH, entity="flow")]
+        flow, relative, _, status = view
+        result = list(flow["warnings"])
+        if status in {"stale", "missing"}:
+            result.append(warning("FLOW_VIEW_STALE", f"Generated flow view is {status}", "Run `roclec views --write`.",
+                                  path=relative, entity="flow", actual=status))
+        elif status == "edited":
+            result.append(warning("FLOW_VIEW_EDITED", "Generated flow view has local edits or is not a Roclec view",
+                                  f"Move the edits into {project_flow.FLOW_PATH}, delete {relative} and run `roclec views --write`.",
+                                  path=relative, entity="flow"))
+        return result
+
     def views(self, write=False):
         current = self.current()["components"]
         caps = sorted({cap for capabilities in current.values() for cap in capabilities})
@@ -1332,9 +1942,30 @@ class Kernel:
                      "UNMANAGED_FILE", "View is unmanaged or has local edits; resolve them before regenerating", path=relative)
             stale.append(relative)
             writes[relative] = rendered
+        payload, observed = {"sources": current}, {}
+        flow_view = self._flow_view()  # Skipped when the flow file is missing; `check` warns.
+        if flow_view is not None:
+            flow, relative, existing, status = flow_view
+            need(status != "edited", "UNMANAGED_FILE", "Flow view is unmanaged or has local edits; resolve them before regenerating",
+                 path=relative, remediation=f"Move the edits into {project_flow.FLOW_PATH}, delete {relative} and retry.")
+            if status != "current":
+                stale.append(relative)
+                writes[relative] = project_flow.render(flow, self.profile.data)
+                payload["flow_view"] = relative
+                # Restoring a deleted or edited view repeats earlier bytes; without a fresh
+                # generation the store would refuse to replay the diverged earlier receipt.
+                receipts = self.store.path(".roclec/receipts")
+                payload["generation"] = digest({"inputs": self.token, "receipts": sorted(
+                    p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []})
+                observed[relative] = existing
+        count = len(caps) + (flow_view is not None)
         if writes and write:
-            receipt = self.store.apply("views", {"sources": current}, writes, self.token)
-            return {"views": len(caps), "written": sorted(writes), "receipt": receipt}
-        need(not stale, "VIEW_STALE", "Generated capability views need regeneration", actual=stale,
+            # The flow view is outside the store token; recheck its bytes under the lock.
+            def unchanged():
+                need(all((self.store.path(p).read_bytes() if self.store.path(p).is_file() else None) == b
+                         for p, b in observed.items()), "BASE_CONFLICT", "Project inputs changed during validation", exit_code=3)
+            receipt = self.store.apply("views", payload, writes, self.token, validate=unchanged)
+            return {"views": count, "written": sorted(writes), "receipt": receipt}
+        need(not stale, "VIEW_STALE", "Generated views need regeneration", actual=stale,
              remediation="views --write")
-        return {"views": len(caps), "written": []}
+        return {"views": count, "written": []}

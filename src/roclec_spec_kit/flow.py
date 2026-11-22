@@ -1,0 +1,353 @@
+"""Explicit, bounded project flow: parse, validate, evaluate and render ``.roclec/flow.toml``.
+
+Pure module: no writes, no kernel state. Public API (stable):
+
+* ``FLOW_PATH``, ``DEFAULT_VIEW``, ``STAGES`` (canonical order), ``HOOKS``, ``DECISION_STAGES``
+* ``parse(raw: bytes, root: Path | None = None) -> dict``: decode + validate. The result is
+  normalized (defaults filled, ``stages`` a list in canonical order) and carries ``"warnings"``
+  (issue dicts, code ``FLOW_CRITERION_UNUSED``). ``root`` enables the agent-binding file check.
+* ``load(root: Path) -> dict``: read ``root/FLOW_PATH`` (``FLOW_MISSING`` when absent).
+* ``point(flow, name) -> dict | None``: checkpoint of a stage or hook name (``None`` if undeclared).
+* ``evaluate(flow, name, evaluations, *, outcome) -> list``: check criteria evaluations of a decision.
+  A rejection cites at least one ``not-met`` criterion only when the point declares criteria.
+* ``SUBJECT_POINTS``: decision point of each rejectable subject type.
+* ``render(flow, profile_data) -> bytes``: generated Markdown view with a managed-view header.
+* ``view_status(flow, profile_data, existing) -> "current"|"stale"|"missing"|"edited"``.
+
+Every failure is a ``model.ModelError`` with exit code 2 unless noted.
+"""
+from __future__ import annotations
+
+import re
+import tomllib
+from pathlib import Path
+
+from .model import ModelError, need, sha, text
+
+FLOW_PATH = ".roclec/flow.toml"
+DEFAULT_VIEW = "docs/flow.md"
+STAGES = ("foundation", "define", "approve", "design", "plan", "implement", "verify", "review",
+          "integrate", "release")
+HOOKS = {"pre-implement": "implement", "pre-integrate": "integrate", "handoff": "release"}
+DECISION_STAGES = ("foundation", "approve", "design")
+OPTIONAL_CHECKPOINT = tuple(HOOKS.values())
+FORBIDDEN_CHECKPOINT = tuple(s for s in STAGES if s not in DECISION_STAGES + OPTIONAL_CHECKPOINT)
+ON_REJECT = ("revise", "cancel", "defer")
+EVIDENCE = ("required", "optional")
+STATUSES = ("met", "not-met", "n/a")
+# change approve/reject change -> approve; foundation agree/reject adr|reference -> foundation; prototypes -> design.
+SUBJECT_POINTS = {"change": "approve", "adr": "foundation", "reference": "foundation", "prototype": "design"}
+
+ROLE_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
+RESERVED_RE = re.compile(r"roclec-[a-z]+\Z")
+CRITERION_RE = re.compile(r"CR-[0-9]{3,}\Z")
+SKILL_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
+HEADER_RE = re.compile(rb"<!-- roclec-managed-view sha256=([0-9a-f]{64}) -->\Z")
+
+
+def _fail(code, message, entity, remediation, **context):
+    raise ModelError(code, message, exit_code=2, entity=entity, path=FLOW_PATH,
+                     remediation=remediation, **context)
+
+
+def _need(condition, message, entity, remediation, **context):
+    if not condition:
+        _fail("FLOW_INVALID", message, entity, remediation, **context)
+
+
+def _table(value, entity, allowed, required=()):
+    _need(isinstance(value, dict), f"{entity} must be a table", entity, f"Write {entity} as a TOML table.")
+    unknown = sorted(set(value) - set(allowed))
+    _need(not unknown, f"Unknown key(s) in {entity}: {', '.join(unknown)}", entity,
+          f"Use only: {', '.join(allowed)}.", expected=list(allowed), actual=unknown)
+    missing = [key for key in required if key not in value]
+    _need(not missing, f"Missing key(s) in {entity}: {', '.join(missing)}", entity,
+          f"Add: {', '.join(missing)}.", expected=list(required), actual=sorted(value))
+    return value
+
+
+def _relative_path(value, entity, suffix=None):
+    ok = (isinstance(value, str) and value.strip() == value and value and "\\" not in value
+          and "\x00" not in value and not value.startswith("/") and not re.match(r"[A-Za-z]:", value))
+    parts = value.split("/") if ok else []
+    ok = ok and all(p not in ("", ".", "..") for p in parts)
+    _need(ok, f"{entity} must be a project-relative path without '..', absolute or backslash parts",
+          entity, "Use a path like docs/name.md relative to the project root.", actual=value)
+    if suffix:
+        _need(value.endswith(suffix), f"{entity} must end with {suffix}", entity,
+              f"Use a {suffix} path.", actual=value)
+    return value
+
+
+def _unique_list(value, entity, pattern=None, item="item"):
+    _need(isinstance(value, list), f"{entity} must be a list", entity, f"Write {entity} as a TOML array.")
+    _need(len(value) == len(set(map(str, value))), f"{entity} has duplicates", entity,
+          "List each entry once.", actual=value)
+    for entry in value:
+        _need(isinstance(entry, str) and (pattern is None or pattern.match(entry)),
+              f"Invalid {item} in {entity}", entity,
+              f"Each {item} must match {pattern.pattern.rstrip('Z').rstrip(chr(92))}." if pattern else "Use strings.",
+              actual=entry)
+    return list(value)
+
+
+def _binding(root, name):
+    return (root / ".claude" / "agents" / f"{name}.md").is_file() or \
+        (root / ".codex" / "agents" / f"{name}.toml").is_file()
+
+
+def validate(data, root: Path | None = None):
+    """Validate decoded TOML; return ``(normalized, warnings)``."""
+    from .agents import contracts
+    builtin = tuple(contracts())
+    _table(data, "flow", ("schema", "view", "roles", "criteria", "stages"), ("schema", "stages"))
+    _need(type(data["schema"]) is int and data["schema"] == 1, "Unsupported flow schema", "schema",
+          "Set schema = 1.", expected=1, actual=data["schema"])
+    view = _relative_path(data.get("view", DEFAULT_VIEW), "view", ".md")
+    # Hidden top-level folders (.roclec/, .claude/, .codex/, .agents/, .specify/...) belong to Roclec,
+    # its installer or other tools; a generated document there would collide with their writers.
+    _need(not view.startswith("."), "view must not be under a hidden folder such as .roclec/ or .claude/", "view",
+          f"Use a path such as {DEFAULT_VIEW}.", actual=view)
+    # Other writers own these paths: capability views and the root instruction blocks.
+    _need(not view.startswith("specs/capabilities/") and view not in ("AGENTS.md", "CLAUDE.md"),
+          "view collides with a file Roclec generates for another purpose", "view",
+          f"Use a path such as {DEFAULT_VIEW}.", actual=view)
+
+    roles = {}
+    for name, row in _items(data.get("roles", {}), "roles"):
+        entity = f"roles.{name}"
+        _need(ROLE_RE.match(name), f"Invalid role name {name}", entity, "Use [a-z][a-z0-9-]*.")
+        _need(name not in builtin and not RESERVED_RE.match(name),
+              f"Role {name} reuses a built-in or reserved Roclec name", entity,
+              f"Rename it; built-in roles are {', '.join(builtin)} and roclec-* is reserved.")
+        row = _table(row, entity, ("kind", "description"), ("kind",))
+        _need(row["kind"] in ("human", "agent"), "kind must be human or agent", f"{entity}.kind",
+              'Set kind = "human" or "agent".', actual=row["kind"])
+        if "description" in row:
+            _need(text(row["description"]), "description must be nonempty text", f"{entity}.description",
+                  "Write a short description or remove it.")
+        if row["kind"] == "agent" and root is not None:
+            _need(_binding(root, name), f"Agent role {name} has no host binding", entity,
+                  f"Create .claude/agents/{name}.md or .codex/agents/{name}.toml, or use kind = \"human\".")
+        roles[name] = dict(row)
+    humans = {n for n, r in roles.items() if r["kind"] == "human"}
+    agents = {n for n, r in roles.items() if r["kind"] == "agent"}
+
+    criteria = {}
+    for cid, row in _items(data.get("criteria", {}), "criteria"):
+        entity = f"criteria.{cid}"
+        _need(CRITERION_RE.match(cid), f"Invalid criterion id {cid}", entity, "Use CR-NNN (three or more digits).")
+        row = _table(row, entity, ("text",), ("text",))
+        _need(text(row["text"]), "text must be nonempty", f"{entity}.text", "Write the criterion text.")
+        criteria[cid] = row["text"]
+
+    declared = _items(data["stages"], "stages")
+    names = [n for n, _ in declared]
+    unknown = [n for n in names if n not in STAGES]
+    _need(not unknown, f"Unknown stage(s): {', '.join(unknown)}", f"stages.{unknown[0] if unknown else ''}",
+          f"Stages are fixed: {', '.join(STAGES)}.", expected=list(STAGES), actual=names)
+    missing = [s for s in STAGES if s not in names]
+    _need(not missing, f"Mandatory gate missing: {', '.join(missing)}", f"stages.{missing[0] if missing else ''}",
+          f"Declare every stage: {', '.join(STAGES)}.", expected=list(STAGES), actual=names)
+    by_name = dict(declared)
+
+    stages, used = [], set()
+    for name in STAGES:
+        entity = f"stages.{name}"
+        row = _table(by_name[name], entity, ("description", "ai", "reason", "role", "deliverables",
+                                              "session_evidence", "skills", "checkpoint"),
+                     ("description", "ai", "role"))
+        _need(text(row["description"]), "description must be nonempty text", f"{entity}.description",
+              "Describe what the stage does.")
+        _need(isinstance(row["ai"], bool), "ai must be true or false", f"{entity}.ai", "Set ai = true or false.")
+        if row["ai"]:
+            _need("reason" not in row, "reason is only allowed when ai = false", f"{entity}.reason",
+                  "Remove reason or set ai = false.")
+        else:
+            _need(text(row.get("reason")), "ai = false requires a reason", f"{entity}.reason",
+                  "Explain why a person must perform this stage.")
+        _need(name != "approve" or row["ai"] is False, "approve must have ai = false", f"{entity}.ai",
+              "Only a person approves; set ai = false.")
+        role = row["role"]
+        _need(isinstance(role, str), "role must be a role name", f"{entity}.role", "Name a declared or built-in role.")
+        if row["ai"]:
+            _need(role in builtin or role in agents, f"AI stage role {role} is not a built-in or declared agent role",
+                  f"{entity}.role", f"Use one of {', '.join(builtin)} or declare [roles.{role}] with kind = \"agent\".")
+        else:
+            _need(role in humans, f"Human stage role {role} is not a declared human role", f"{entity}.role",
+                  f"Declare [roles.{role}] with kind = \"human\".")
+        deliverables = _unique_list(row.get("deliverables", []), f"{entity}.deliverables", item="path")
+        for path in deliverables:
+            _relative_path(path, f"{entity}.deliverables")
+        evidence = row.get("session_evidence", "optional")
+        _need(evidence in EVIDENCE, "session_evidence must be required or optional", f"{entity}.session_evidence",
+              'Use "required" or "optional".', actual=evidence)
+        skills = _unique_list(row.get("skills", []), f"{entity}.skills", SKILL_RE, "skill name")
+        result = dict(name=name, description=row["description"], ai=row["ai"], role=role,
+                      deliverables=deliverables, session_evidence=evidence, skills=skills)
+        if not row["ai"]:
+            result["reason"] = row["reason"]
+        checkpoint = row.get("checkpoint")
+        if name in DECISION_STAGES:
+            _need(checkpoint is not None, f"Stage {name} requires a human checkpoint", f"{entity}.checkpoint",
+                  'Add checkpoint = { decider = "<human role>", criteria = [], on_reject = "revise" }.')
+        if name in FORBIDDEN_CHECKPOINT:
+            _need(checkpoint is None, f"Stage {name} cannot declare a checkpoint", f"{entity}.checkpoint",
+                  "Remove the checkpoint; this stage has no human decision point.")
+        if checkpoint is not None:
+            ent = f"{entity}.checkpoint"
+            checkpoint = _table(checkpoint, ent, ("decider", "criteria", "on_reject"), ("decider", "on_reject"))
+            _need(isinstance(checkpoint["decider"], str) and checkpoint["decider"] in humans, "decider must be a declared human role", f"{ent}.decider",
+                  "Declare the decider under [roles] with kind = \"human\".", actual=checkpoint["decider"])
+            _need(checkpoint["on_reject"] in ON_REJECT, "on_reject must be revise, cancel or defer",
+                  f"{ent}.on_reject", f"Use one of {', '.join(ON_REJECT)}.", actual=checkpoint["on_reject"])
+            # Handoff decides an immutable integration record: only a deferral to a follow-up change applies.
+            _need(name != "release" or checkpoint["on_reject"] == "defer", "The handoff checkpoint can only defer",
+                  f"{ent}.on_reject", 'Set on_reject = "defer"; QA findings go to a follow-up change captured as a FUT.',
+                  actual=checkpoint["on_reject"])
+            cited = _unique_list(checkpoint.get("criteria", []), f"{ent}.criteria", CRITERION_RE, "criterion id")
+            undefined = [c for c in cited if c not in criteria]
+            _need(not undefined, f"Undefined criterion: {', '.join(undefined)}", f"{ent}.criteria",
+                  "Define it under [criteria.<ID>] or remove it.", actual=undefined)
+            used.update(cited)
+            result["checkpoint"] = dict(decider=checkpoint["decider"], criteria=cited,
+                                        on_reject=checkpoint["on_reject"])
+        stages.append(result)
+
+    warnings = [ModelError("FLOW_CRITERION_UNUSED", f"Criterion {cid} is not cited by any checkpoint",
+                           entity=f"criteria.{cid}", path=FLOW_PATH,
+                           remediation="Cite it in a checkpoint or remove it.").issue | {"severity": "warning"}
+                for cid in sorted(criteria) if cid not in used]
+    return dict(schema=1, view=view, roles=roles, criteria=criteria, stages=stages), warnings
+
+
+def _items(value, entity):
+    _need(isinstance(value, dict), f"{entity} must be a table", entity, f"Write [{entity}.<name>] tables.")
+    return sorted(value.items()) if entity != "stages" else list(value.items())
+
+
+def parse(raw: bytes, root: Path | None = None) -> dict:
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        _fail("FLOW_INVALID", f"{FLOW_PATH} is not valid UTF-8 TOML: {error}", "flow",
+              f"Fix the syntax of {FLOW_PATH} or restore it with `roclec skills`.")
+    flow, warnings = validate(data, root)
+    flow["warnings"] = warnings
+    return flow
+
+
+def load(root: Path) -> dict:
+    path = Path(root) / FLOW_PATH
+    if not path.is_file():
+        raise ModelError("FLOW_MISSING", f"{FLOW_PATH} does not exist", exit_code=2, path=FLOW_PATH,
+                         entity="flow", remediation="Run `roclec skills` to seed the default flow.")
+    return parse(path.read_bytes(), Path(root))
+
+
+def point(flow, name):
+    stage = HOOKS.get(name, name)
+    if stage not in DECISION_STAGES + OPTIONAL_CHECKPOINT:
+        _fail("FLOW_INVALID", f"Unknown decision point {name}", "point",
+              f"Use one of: {', '.join(DECISION_STAGES + OPTIONAL_CHECKPOINT + tuple(HOOKS))}.")
+    for row in flow["stages"]:
+        if row["name"] == stage:
+            return row.get("checkpoint")
+    return None
+
+
+def evaluate(flow, name, evaluations, *, outcome):
+    checkpoint = point(flow, name)
+    expected = sorted(checkpoint["criteria"]) if checkpoint else []
+    need(isinstance(evaluations, list) and all(isinstance(r, dict) for r in evaluations), "INVALID_INPUT",
+         "evaluations must be a list of objects", exit_code=2)
+    rows = []
+    for row in evaluations:
+        need(set(row) <= {"id", "status", "reason"} and {"id", "status"} <= set(row) and isinstance(row["id"], str)
+             and row["status"] in STATUSES and ("reason" not in row or isinstance(row["reason"], str)),
+             "INVALID_INPUT", "Each evaluation needs id and status (met|not-met|n/a) and an optional reason",
+             exit_code=2, actual=row)
+        need(row["status"] != "n/a" or text(row.get("reason")), "CRITERIA_REASON_REQUIRED",
+             f"Criterion {row['id']} is n/a and needs a reason", exit_code=2, entity=row["id"],
+             remediation="Explain why the criterion does not apply.")
+        rows.append({k: v for k, v in row.items() if k != "reason" or text(v)})
+    actual = sorted(r["id"] for r in rows)
+    need(actual == expected, "CRITERIA_MISMATCH",
+         f"Evaluations must cover exactly the criteria declared for {name}", exit_code=2, entity=name,
+         expected=expected, actual=actual,
+         remediation="Evaluate every declared criterion once" + (", and no others." if expected else
+                                                               "; this point declares none."))
+    need(outcome in ("approved", "rejected"), "INVALID_INPUT", "outcome must be approved or rejected", exit_code=2)
+    failing = [r["id"] for r in rows if r["status"] == "not-met"]
+    if outcome == "approved":
+        need(not failing, "CRITERIA_NOT_MET", f"Cannot approve with not-met criteria: {', '.join(failing)}",
+             exit_code=2, entity=name, actual=failing, remediation="Reject, or revise until the criteria are met.")
+    else:
+        # A point without criteria can still be rejected; its evaluation is then the empty list.
+        need(failing or not expected, "CRITERIA_REQUIRED", "A rejection must cite at least one not-met criterion", exit_code=2,
+             entity=name, expected=expected, remediation="Mark the unmet criterion as not-met with its reason.")
+    return sorted(rows, key=lambda r: r["id"])
+
+
+def _cell(value):
+    return str(value).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+
+
+def _model(row, flow, profile_data):
+    if flow["roles"].get(row["role"], {}).get("kind") == "human" or not row["ai"]:
+        return "—"
+    pinned = (profile_data or {}).get("agents", {}).get(row["role"], {})
+    pairs = [f"{host} `{pinned[host]}`" for host in sorted(pinned)]
+    return ", ".join(pairs) if pairs else "session model"
+
+
+def _body(flow, profile_data):
+    lines = ["# Project flow", "",
+             f"Generated from `{FLOW_PATH}` by `roclec views --write`. Do not edit by hand.", "",
+             "| Step | Stage | Description | AI | Role | Skills and model | Deliverables | Human checkpoint | Criteria | On reject |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    hook_of = {stage: hook for hook, stage in HOOKS.items()}
+    for number, row in enumerate(flow["stages"], 1):
+        cp = row.get("checkpoint")
+        ai = "yes" if row["ai"] else f"no: {row['reason']}"
+        extra = ", ".join(f"`{s}`" for s in row["skills"])
+        skills = (extra + "<br>" if extra else "") + _model(row, flow, profile_data)
+        deliverables = ", ".join(f"`{d}`" for d in row["deliverables"]) or "—"
+        if cp:
+            hook = f" ({hook_of[row['name']]})" if row["name"] in hook_of else ""
+            cells = [cp["decider"] + hook, ", ".join(cp["criteria"]) or "—", cp["on_reject"]]
+        else:
+            cells = ["—", "—", "—"]
+        values = [number, row["name"], row["description"], ai, row["role"], skills, deliverables, *cells]
+        lines.append("| " + " | ".join(_cell(v) for v in values) + " |")
+    lines += ["", "## Criteria", "", "| ID | Text |", "| --- | --- |"]
+    lines += [f"| {cid} | {_cell(t)} |" for cid, t in sorted(flow["criteria"].items())] or ["| — | — |"]
+    lines += ["", "## Diagram", "", "```mermaid", "flowchart LR"]
+    for number, row in enumerate(flow["stages"], 1):
+        marks = (" [person]" if not row["ai"] else "") + (" [checkpoint]" if row.get("checkpoint") else "")
+        lines.append(f'  S{number}["{number}. {row["name"]}{marks}"]')
+    lines.append("  " + " --> ".join(f"S{n}" for n in range(1, len(flow["stages"]) + 1)))
+    lines += ["  classDef person fill:#fde68a,stroke:#92400e;", "  classDef checkpoint stroke:#1d4ed8,stroke-width:3px;"]
+    people = [f"S{n}" for n, r in enumerate(flow["stages"], 1) if not r["ai"]]
+    checks = [f"S{n}" for n, r in enumerate(flow["stages"], 1) if r.get("checkpoint")]
+    if people:
+        lines.append(f"  class {','.join(people)} person;")
+    if checks:
+        lines.append(f"  class {','.join(checks)} checkpoint;")
+    lines += ["```", ""]
+    return "\n".join(lines).encode("utf-8")
+
+
+def render(flow, profile_data) -> bytes:
+    body = _body(flow, profile_data)
+    return f"<!-- roclec-managed-view sha256={sha(body)} -->\n".encode() + body
+
+
+def view_status(flow, profile_data, existing):
+    if existing is None:
+        return "missing"
+    header, _, body = existing.partition(b"\n")
+    match = HEADER_RE.match(header)
+    if not match or match.group(1).decode() != sha(body):
+        return "edited"
+    return "current" if existing == render(flow, profile_data) else "stale"

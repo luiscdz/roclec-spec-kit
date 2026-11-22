@@ -9,7 +9,7 @@ import unittest
 from roclec_spec_kit.config import ADR_DEFAULTS, validate_profile
 from roclec_spec_kit.model import ModelError
 from scripts import c1_scenarios, c2_scenarios, c3_scenarios
-from scripts.c1_scenarios import adr_markdown as scenario_adr_markdown, bundle, digest, file_hash, put_json, snapshot, tree
+from scripts.c1_scenarios import adr_markdown as scenario_adr_markdown, bundle, criteria, digest, file_hash, put_json, snapshot, tree
 from scripts.c2_scenarios import PRODUCER, commit, git, setup
 from test_kernel import invoke
 
@@ -133,7 +133,8 @@ class AdrCase(unittest.TestCase):
         return self.call(*args, **kwargs)
 
     def agree(self, adr_id, **kwargs):
-        return self.call("foundation", "agree", "--ref", adr_id, "--actor", "Maintainer", "--reason", "Accepted ADR", **kwargs)
+        return self.call("foundation", "agree", "--ref", adr_id, "--actor", "Maintainer", "--reason", "Accepted ADR",
+                         *criteria(self.root, "foundation"), **kwargs)
 
     def adr(self, adr_id):
         return self.call("inspect", "--adr", adr_id)["data"]
@@ -160,7 +161,7 @@ class AdrCase(unittest.TestCase):
 
     def approve(self, record, **kwargs):
         return self.call("change", "approve", record["id"], "--digest", record["proposal_digest"], "--actor", "Maintainer",
-                         "--reason", "Approved scope", **kwargs)
+                         "--reason", "Approved scope", *criteria(self.root, "approve"), **kwargs)
 
     def assign(self, change_id):
         self.members.append(change_id)

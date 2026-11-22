@@ -1,7 +1,18 @@
-"""Human rejection records, immutable source copies and correction links."""
+"""Human rejection records, immutable source copies and correction links.
+
+Stage checkpoints (hooks pre-implement, pre-integrate and handoff on a change component) are
+``checkpoint`` decisions with subject type ``stage``: the approval and the rejection are the same
+record (``outcome``), they carry their own corrections/consequence and never pair with a
+``rejection`` record or a frozen copy, because their subjects are already immutable records.
+"""
 import re
 
+from .flow import HOOKS
 from .model import digest, fields, fingerprint, identifier, need, read_json, sha, text
+
+STAGE_FIELDS = ("model_schema", "id", "kind", "entity", "previous", "actor", "reason", "subject", "hook", "component",
+                "outcome", "criteria", "flow")
+STAGE_OPTIONAL = ("run", "consequence", "corrections", "fut", "addresses")
 
 
 def corrections(value, consequence):
@@ -33,7 +44,8 @@ def addresses(value):
     return value
 
 
-def criteria(value):
+def evaluations(value, *, approved):
+    """Shape of recorded criteria evaluations; never re-evaluated against the current flow."""
     need(isinstance(value, (list, tuple)), "INVALID_INPUT", "Criteria must be a list", exit_code=2)
     ids = []
     for row in value:
@@ -43,26 +55,74 @@ def criteria(value):
         need(row["status"] != "n/a" or text(row.get("reason")), "INVALID_INPUT", "n/a requires a reason", exit_code=2)
         need("reason" not in row or text(row["reason"]), "INVALID_INPUT", "Criterion reason must be nonempty", exit_code=2)
         ids.append(row["id"])
-    need(len(ids) == len(set(ids)) and (not value or any(r["status"] == "not-met" for r in value)),
-         "INVALID_INPUT", "A rejection must cite a not-met criterion with unique IDs", exit_code=2)
+    need(len(ids) == len(set(ids)), "INVALID_INPUT", "Criterion evaluations need unique IDs", exit_code=2)
+    failing = any(r["status"] == "not-met" for r in value)
+    if approved:
+        need(not failing, "INVALID_INPUT", "An approval cannot record a not-met criterion", exit_code=2)
+    else:
+        need(not value or failing, "INVALID_INPUT", "A rejection must cite a not-met criterion", exit_code=2)
+
+
+def criteria(value):
+    evaluations(value, approved=False)
+
+
+def stage_key(record):
+    return record["entity"], record["hook"], record["component"]
+
+
+def is_stage(record):
+    return record["kind"] == "checkpoint" and record["subject"]["type"] == "stage"
+
+
+def validate_stage(record):
+    fields(record, STAGE_FIELDS, STAGE_OPTIONAL)
+    identifier(record["entity"], "CHG")
+    need(isinstance(record["hook"], str) and record["hook"] in HOOKS and text(record["component"])
+         and isinstance(record["outcome"], str) and record["outcome"] in {"approved", "rejected"},
+         "INVALID_INPUT", "Invalid stage checkpoint", exit_code=2)
+    need(("run" in record) == (record["hook"] == "pre-integrate"), "INVALID_INPUT",
+         "Only a pre-integrate checkpoint names its run", exit_code=2)
+    if "run" in record:
+        identifier(record["run"], "RUN")
+    fingerprint(record["flow"])
+    approved = record["outcome"] == "approved"
+    evaluations(record["criteria"], approved=approved)
+    if approved:
+        need(not {"consequence", "corrections", "fut"} & record.keys(), "INVALID_INPUT",
+             "An approved checkpoint has no rejection details", exit_code=2)
+        return
+    need(isinstance(record.get("consequence"), str) and record["consequence"] in {"revise", "cancel", "defer"},
+         "INVALID_INPUT", "Invalid rejection consequence", exit_code=2)
+    corrections(record.get("corrections"), record["consequence"])
+    need((record["consequence"] == "defer") == ("fut" in record), "INVALID_INPUT", "Only defer requires a FUT", exit_code=2)
+    if "fut" in record:
+        identifier(record["fut"], "FUT")
 
 
 def validate_decision(record):
     subject = record.get("subject")
     fields(subject, ("type", "entity", "digest"))
-    need(text(subject["type"]) and subject["type"] in {"change", "adr", "reference", "prototype"}
+    types = {"prototype", "stage"} if record["kind"] == "checkpoint" else {"change", "adr", "reference", "prototype"}
+    need(text(subject["type"]) and subject["type"] in types
          and text(subject["entity"]) and subject["entity"] == record["entity"],
          "INVALID_INPUT", "Invalid rejection subject", exit_code=2)
     fingerprint(subject["digest"])
-    if subject["type"] == "change":
+    if subject["type"] in {"change", "stage"}:
         identifier(subject["entity"], "CHG")
     if subject["type"] == "adr":
         need(re.fullmatch(r"ADR-[0-9]{3,}", subject["entity"]) is not None, "INVALID_INPUT", "Invalid ADR subject", exit_code=2)
     if "addresses" in record:
         addresses(record["addresses"])
+    if subject["type"] == "stage":
+        validate_stage(record)
+        return
+    need(not {"hook", "run"} & record.keys(), "INVALID_INPUT", "Only stage checkpoints name a hook or run", exit_code=2)
     if record["kind"] == "checkpoint":
-        need(subject["type"] == "prototype" and text(record.get("outcome")) and record["outcome"] in {"approved", "rejected"},
+        need(text(record.get("outcome")) and record["outcome"] in {"approved", "rejected"},
              "INVALID_INPUT", "Invalid prototype checkpoint", exit_code=2)
+        if "criteria" in record:
+            evaluations(record["criteria"], approved=record["outcome"] == "approved")
         return
     need(text(record.get("consequence")) and record["consequence"] in {"revise", "cancel", "defer"}, "INVALID_INPUT", "Invalid rejection consequence", exit_code=2)
     corrections(record.get("corrections"), record["consequence"])
@@ -134,11 +194,52 @@ class Rejections:
              "CORRECTIONS_REQUIRED", "Declare every correction from the latest rejection", entity=entity,
              expected={"rejection": latest["id"], "corrections": sorted(expected)})
 
+    @staticmethod
+    def require_stage(prior, pin, value, *, approving, entity):
+        """FX correction rules for one hook/component; `prior` are its earlier rejected checkpoints, in order."""
+        if value is not None:
+            addresses(value)
+        need(not any(d["consequence"] == "cancel" for d in prior), "SUBJECT_WITHDRAWN",
+             "A canceled stage cannot be decided again", entity=entity)
+        pending = [d for d in prior if d["consequence"] == "revise"]
+        need(value is None or bool(pending), "INVALID_REFERENCE", "Correction responses cite no prior rejection", entity=entity)
+        need(not approving or pin not in {d["subject"]["digest"] for d in pending}, "REJECTION_UNRESOLVED",
+             "This exact subject was rejected for revision; approve a new revision", entity=entity, actual=pin)
+        if not pending or (value is None and not approving):
+            return
+        latest = pending[-1]
+        expected = {r["id"] for r in latest["corrections"]}
+        need(pin != latest["subject"]["digest"], "REJECTION_UNRESOLVED", "A rejected subject requires a new revision", entity=entity)
+        need(value is not None and value["rejection"] == latest["id"] and {r["id"] for r in value["corrections"]} == expected,
+             "CORRECTIONS_REQUIRED", "Declare every correction from the latest rejection", entity=entity,
+             expected={"rejection": latest["id"], "corrections": sorted(expected)})
+
+    def stage_history(self, entity, *, decisions=None):
+        """Rejected stage checkpoints of a change with their revision, supersession and open state."""
+        records = [d for d in (self.k.decisions(entity) if decisions is None else decisions)
+                   if d["entity"] == entity and is_stage(d)]
+        result = []
+        for index, record in enumerate(records):
+            if record["outcome"] != "rejected":
+                continue
+            later = [d for d in records[index + 1:] if stage_key(d) == stage_key(record)]
+            linked = [d for d in later if (d.get("addresses") or {}).get("rejection") == record["id"]
+                      and d["subject"]["digest"] != record["subject"]["digest"]
+                      and {x["id"] for x in d["addresses"]["corrections"]} == {x["id"] for x in record["corrections"]}]
+            resolved = linked[-1] if linked else None
+            revision = {"digest": resolved["subject"]["digest"], "addresses": resolved["addresses"],
+                        "decision": resolved["id"]} if resolved else None
+            superseding = next((d for d in later if d["outcome"] == "rejected"), None)
+            superseded_by = superseding["id"] if revision is None and superseding is not None else None
+            result.append({**record, "revision": revision, "superseded_by": superseded_by,
+                           "open": record["consequence"] == "revise" and revision is None and superseded_by is None})
+        return result
+
     def history(self, kind, entity, *, value=None, pin=None, decisions=None):
         records = self.k.decisions(entity) if decisions is None else decisions
         revisions = []
         for d in records:
-            if d["kind"] in {"foundation", "checkpoint", "change-approve", "rejection"} and d.get("addresses"):
+            if d["kind"] in {"foundation", "checkpoint", "change-approve", "rejection"} and d.get("addresses") and not is_stage(d):
                 revisions.append({"digest": d.get("proposal_digest") or (d.get("subject") or {}).get("digest") or d.get("sources", {}).get(entity),
                                   "addresses": d["addresses"], "decision": d["id"]})
         if kind == "change":
@@ -179,7 +280,7 @@ class Rejections:
         if relevant:
             rejection_index = decisions.index(relevant[-1])
             accepting_kind = {"change": "change-approve", "adr": "foundation", "reference": "foundation", "prototype": "checkpoint"}[kind]
-            accepted = any(d["kind"] == accepting_kind
+            accepted = any(d["kind"] == accepting_kind and not (d["kind"] == "checkpoint" and is_stage(d))
                            and d.get("outcome", "approved") != "rejected"
                            and (d.get("proposal_digest") or d.get("subject", {}).get("digest") or d.get("sources", {}).get(entity)) == pin
                            for d in decisions[rejection_index + 1:])
@@ -197,6 +298,16 @@ class Rejections:
         for record in records:
             chain = self.k._decision_chain(record)
             previous = preceding.get(chain)
+            if is_stage(record):
+                # Hook checkpoints have their own chain per change component, in decision order.
+                prior = [d for d in records[:records.index(record)] if is_stage(d) and d["outcome"] == "rejected"
+                         and stage_key(d) == stage_key(record)]
+                approving = record["outcome"] == "approved"
+                if approving or "addresses" in record:
+                    self.require_stage(prior, record["subject"]["digest"], record.get("addresses"),
+                                       approving=approving, entity=record["id"])
+                preceding[chain] = record
+                continue
             if record["kind"] == "checkpoint" and record["outcome"] == "rejected":
                 need(previous is not None and previous["kind"] == "rejection"
                      and previous["id"] == record.get("rejection") and previous["subject"] == record["subject"],
@@ -231,6 +342,13 @@ class Rejections:
                          "CORRECTIONS_REQUIRED", "Approval must address the preceding rejection", entity=record["id"])
             preceding[chain] = record
         for record in records:
+            if is_stage(record) and record["outcome"] == "rejected":
+                if "fut" in record:
+                    self.k.inspect_fut(record["fut"])
+                need(record["consequence"] != "cancel" or any(
+                    d["kind"] == "change-cancel" and d["entity"] == record["entity"] and record["component"] in d["components"]
+                    for d in records), "INVALID_REFERENCE", "Canceling stage rejection lacks its change cancellation", entity=record["id"])
+                continue
             if record["kind"] == "rejection" and (record["subject"]["type"] == "prototype"
                 or (record["subject"]["type"] == "change" and record["consequence"] == "cancel")):
                 need(any(d["previous"] == record["id"] and self.k._decision_chain(d) == self.k._decision_chain(record) for d in records),
