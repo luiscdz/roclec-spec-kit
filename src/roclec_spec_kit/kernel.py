@@ -657,7 +657,8 @@ class Kernel:
         receipt = self.store.apply("change-cancel", {"id": change_id, "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "status": "canceled" if len(pending) == len(record["semantic"]["components"]) else "partially-integrated", "receipt": receipt}
 
-    def inspect_change(self, change_id, *, deep=True):
+    def inspect_change(self, change_id, *, deep=True, include_findings=True):
+        from .verification import Verification
         record, _, _ = self.change(change_id)
         approval = self.approval(record)
         valid = approval is not None and approval["proposal_digest"] == record["proposal_digest"]
@@ -702,12 +703,21 @@ class Kernel:
             self.change(change_id, check_base=True)
         except ModelError as exc:
             issues.append(exc.issue)
-        return {"change": record, "status": status, "components": progress, "approval": approval,
-                "approval_current": valid, "decisions": decisions, "issues": issues,
-                "origins": record["semantic"].get("origins", []),
-                "coverage": record["semantic"].get("coverage", {"criteria": [], "derived": []}),
-                "integrations": {c: r for c, r in integrated.items() if r},
-                "architecture_decisions": Adrs(self).declared(record)}
+        result = {"change": record, "status": status, "components": progress, "approval": approval,
+                  "approval_current": valid, "decisions": decisions, "issues": issues,
+                  "origins": record["semantic"].get("origins", []),
+                  "coverage": record["semantic"].get("coverage", {"criteria": [], "derived": []}),
+                  "architecture_decisions": Adrs(self).declared(record),
+                  "integrations": {c: r for c, r in integrated.items() if r},
+                  "review_policy": Verification(self).policy(change_id)}
+        if include_findings:
+            result["findings"] = []
+            try:
+                result["findings"] = [row for component in sorted(progress)
+                                      for row in Verification(self).findings(change_id, component)]
+            except ModelError as exc:
+                result["issues"].append(exc.issue)
+        return result
 
     def list_records(self, category, *, origin=None):
         need(origin is None or (category == "changes" and text(origin)), "INVALID_INPUT",
@@ -716,7 +726,7 @@ class Kernel:
             return [{"component": item["record"]["component"], "version": item["record"]["version"],
                      "status": item["status"]} for item in self.releases()]
         if category == "changes":
-            items = (self.inspect_change(path.parent.name)
+            items = (self.inspect_change(path.parent.name, include_findings=False)
                      for path in sorted(self.store.path(".roclec/changes").glob("*/change.json")))
             return [{"id": item["change"]["id"], "status": item["status"], "components": item["components"],
                      "approval_current": item["approval_current"]}
@@ -1040,8 +1050,10 @@ class Kernel:
         for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
             report = verifier.read_evidence(path, runs)
             reports[scope(report)].append(report)
+        from .findings import project as project_findings
         for records in reports.values():
             scoped_heads(records, verifier.report_scopes)
+            project_findings(records)
         for path in self.store.path(".roclec/integrations").glob("*/*/*.json"):
             self.integration(path.parent.parent.name, path.parent.name, path.stem)
         from .releases import Releases
@@ -1063,7 +1075,7 @@ class Kernel:
             return None
         record = self.read(path.relative_to(self.profile.root).as_posix())
         fields(record, ("model_schema", "change_id", "component", "proposal_digest", "run_id", "candidate", "evidence", "policy_id", "contracts", "digest",
-                        "target_ref", "target_commit"), ("baseline_release",))
+                        "target_ref", "target_commit"), ("baseline_release", "finding_state"))
         need(text(record["target_ref"]) and record["target_ref"].startswith("refs/remotes/")
              and text(record["target_commit"]) and re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", record["target_commit"]),
              "INVALID_REFERENCE", "Integration requires a frozen target tracking ref and commit")
@@ -1072,6 +1084,8 @@ class Kernel:
              and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),
              "HASH_MISMATCH", "Integration record integrity mismatch")
         identifier(record["run_id"], "RUN")
+        if "finding_state" in record:
+            fingerprint(record["finding_state"])
         from .verification import Verification
         run = Verification(self).read_run(record["run_id"])
         candidate = record["candidate"]

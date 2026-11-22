@@ -124,6 +124,13 @@ class Releases:
                                  "backport": resolved_backport, "requirement_ids": fix["requirement_ids"], "acceptance_ids": fix["acceptance_ids"]})
         return included
 
+    def findings(self, component, version):
+        record = self.k.release(component, version)["record"]
+        own = Verification(self.k, release={"component": component, "version": version}).findings(None, component)
+        members = [row for member in record["changes"]
+                   for row in Verification(self.k).findings(member["change_id"], component)]
+        return sorted([*members, *own], key=lambda row: row["key"])
+
     def gate(self, component, version, run_id=None):
         from .integration import target_tip
         context = self.context(component, version, unpublished=True)
@@ -138,8 +145,13 @@ class Releases:
                  entity=member["change_id"], actual=ref)
         self.version(record)
         verified = Verification(self.k, release={"component": component, "version": version}).verify(None, component, run_id=run_id, final=True)
+        findings = self.findings(component, version)
+        from .findings import OPEN
         fixes = self.fixes(record, verified["candidate"], verified["evidence"])
-        return {**verified, "gate": "release", "context": context, "fixes": fixes, "limitations": self.limitations(record)}
+        return {**verified, "gate": "release", "context": context, "fixes": fixes,
+                "findings": findings, "finding_state": digest(findings),
+                "limitations": [{"code": "FINDING_OPEN", "key": row["key"]} for row in findings if row["status"] in OPEN]
+                + self.limitations(record)}
 
     def limitations(self, record):
         """Non-blocking: approved members that applied an ADR superseded since then."""
@@ -155,10 +167,12 @@ class Releases:
     def preparation(self, component, version, preparation):
         fingerprint(preparation)
         record = self.k.read(f".roclec/releases/{component}/{version}/preparations/{preparation}.json")
-        fields(record, ("model_schema", "component", "version", "release_digest", "contracts", "candidate", "run_id", "evidence", "policy_id", "fixes"))
+        fields(record, ("model_schema", "component", "version", "release_digest", "contracts", "candidate", "run_id", "evidence", "policy_id", "fixes"), ("finding_state",))
         need(digest(record) == preparation and (record["component"], record["version"]) == (component, version),
              "HASH_MISMATCH", "Preparation differs from its immutable identity")
         candidate = record["candidate"]
+        if "finding_state" in record:
+            fingerprint(record["finding_state"])
         run = Verification(self.k).read_run(record["run_id"])
         need(candidate["inputs_digest"] == digest(candidate["inputs"])
              and run.get("release") == {"component": component, "version": version}
@@ -188,7 +202,7 @@ class Releases:
         candidate = gate["candidate"]
         record = {"model_schema": 2, "component": component, "version": version,
                   "release_digest": gate["context"]["release_digest"], "contracts": gate["context"]["contracts"],
-                  "candidate": candidate, "run_id": run_id, "evidence": gate["evidence"], "policy_id": gate["policy_id"], "fixes": gate["fixes"]}
+                  "candidate": candidate, "run_id": run_id, "evidence": gate["evidence"], "policy_id": gate["policy_id"], "fixes": gate["fixes"], "finding_state": gate["finding_state"]}
         preparation = digest(record)
         writes = {f".roclec/releases/{component}/{version}/preparations/{preparation}.json": encoded(record)}
         need(not self.store.path(next(iter(writes))).exists(), "OPERATION_CONFLICT", "Identical preparation already exists", exit_code=3)
@@ -201,7 +215,8 @@ class Releases:
         candidate = gate["candidate"]
         need(prepared["release_digest"] == gate["context"]["release_digest"] and prepared["contracts"] == gate["context"]["contracts"]
              and candidate["inputs_digest"] == prepared["candidate"]["inputs_digest"]
-             and gate["policy_id"] == prepared["policy_id"] and gate["evidence"] == prepared["evidence"] and gate["fixes"] == prepared["fixes"],
+             and gate["policy_id"] == prepared["policy_id"] and gate["evidence"] == prepared["evidence"] and gate["fixes"] == prepared["fixes"]
+             and gate["finding_state"] == prepared.get("finding_state", digest([])),
              "EVIDENCE_STALE", "Preparation no longer matches the release, candidate or review policy")
         resolved = self.resolve(component, commit)
         need(resolved == prepared["candidate"]["head"] and tag == version and self.resolve(component, f"refs/tags/{tag}") == resolved,
@@ -215,7 +230,7 @@ class Releases:
                        "release_digest": prepared["release_digest"], "contracts": prepared["contracts"], "commit": resolved,
                        "tag": tag, "remote": remote, "evidence": {"preparation": preparation, "run_id": prepared["run_id"],
                        "candidate": prepared["candidate"], "evidence_ids": prepared["evidence"], "policy_id": prepared["policy_id"],
-                       "fixes": gate["fixes"], "query": query, "actor": actor, "reason": reason}}
+                       "fixes": gate["fixes"], "finding_state": gate["finding_state"], "query": query, "actor": actor, "reason": reason}}
         inputs = {"preparation": preparation, "commit": resolved, "tag": tag, "remote": remote, "actor": actor, "reason": reason,
                   "candidate": candidate, "query": query}
         writes = {f".roclec/releases/{component}/{version}/publication.json": encoded(publication)}

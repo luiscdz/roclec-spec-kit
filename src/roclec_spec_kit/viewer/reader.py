@@ -158,7 +158,8 @@ class Reader:
             for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
                 try:
                     report = self.verifier.read_evidence(path, runs)
-                    result[report["id"]] = report
+                    if report["kind"] != "finding-decision":
+                        result[report["id"]] = report
                 except ModelError as exc:
                     invalid.append({"id": path.stem, "issue": exc.issue})
             return {"reports": result, "invalid": invalid}

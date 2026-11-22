@@ -29,6 +29,7 @@ The user's request and the recorded state (`status`, `list`, `inspect`).
 - Approving, agreeing or rejecting on the user's behalf.
 - Integrating, publishing, tagging or deploying without the user's authorization.
 - Presenting its own review as an independent review.
+- Deciding to accept, invalidate or defer a finding on the user’s behalf.
 
 ## Escalation
 

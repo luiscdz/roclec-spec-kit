@@ -18,7 +18,7 @@ A coordinator brief with: change or release, component, run ID, candidate digest
 
 ## Outputs
 
-- One review evidence record with verdict `ready`, `changes-needed` or `incomplete`, stable findings, and the role and context that produced it.
+- One review evidence record with verdict `ready`, `changes-needed` or `incomplete`, structured findings, resolutions of open findings in scope, and the role and context that produced it.
 - The limits of the review, including what could not be verified.
 
 ## Prohibited

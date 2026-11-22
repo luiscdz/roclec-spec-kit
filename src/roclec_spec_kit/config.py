@@ -14,6 +14,7 @@ CONFIG_PATH = Path(".roclec/project.toml")
 LINK_PATH = Path(".roclec/link.toml")
 DEFAULT_LOG_QUOTA = 16 * 1024 * 1024
 DEFAULT_MAX_LOG_BYTES = 0
+FINDING_SEVERITIES = ("info", "minor", "major", "blocker")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -130,6 +131,14 @@ class Profile:
     def components(self):
         return self.data["components"]
 
+    @property
+    def review_enabled(self) -> bool:
+        return self.data.get("review", {}).get("enabled", True)
+
+    @property
+    def material_severity(self) -> str:
+        return self.data.get("review", {}).get("material_severity", "major")
+
     def repo(self, component: str) -> Path:
         from .model import need
         need(component in self.components, "INVALID_REFERENCE", "Unknown component", entity=component)
@@ -208,12 +217,18 @@ def validate_profile(root: Path, data: dict) -> Profile:
          exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
          remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
     fields(data, ("schema", "name", "components", "trunk_ref"),
-           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr"))
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr", "review"))
     validate_ref(data["trunk_ref"], "refs/heads/")
     if "agents" in data:
         validate_agents(data["agents"])
     if "adr" in data:
         validate_adr(data["adr"])
+    review = data.get("review", {})
+    fields(review, (), ("enabled", "material_severity"))
+    need(type(review.get("enabled", True)) is bool, "INVALID_INPUT", "review.enabled must be boolean", exit_code=2)
+    need(review.get("material_severity", "major") in FINDING_SEVERITIES,
+         "INVALID_INPUT", "Unknown review.material_severity", exit_code=2,
+         expected=list(FINDING_SEVERITIES), actual=review.get("material_severity"))
     quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
     excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),

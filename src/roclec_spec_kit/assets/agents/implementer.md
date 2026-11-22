@@ -19,14 +19,14 @@ A coordinator brief with: change ID, component, approved `proposal_digest`, appl
 ## Outputs
 
 - A candidate and a `run verify` record for the component and digest in the brief.
-- A summary of the diff and of what remains unverified, including ACs without meaningful checks.
+- A summary of the diff and of what remains unverified, including ACs without meaningful checks and the finding keys addressed.
 
 ## Prohibited
 
 - Committing outside the project's Git policy.
 - Editing files of other components or outside the allowed paths.
 - Changing approved intent; a needed change of behavior goes back to the coordinator.
-- Recording approvals, reviews of its own work, integrations or publications.
+- Recording approvals, reviews of its own work, finding resolutions, integrations or publications.
 
 ## Escalation
 

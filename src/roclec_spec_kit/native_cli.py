@@ -32,7 +32,12 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
-    listing.add_argument("category", choices=("adrs", "changes", "futs", "releases", "runs"))
+    listing.add_argument("category", choices=("adrs", "changes", "futs", "releases", "runs", "findings"))
+    scope = listing.add_mutually_exclusive_group()
+    scope.add_argument("--change")
+    scope.add_argument("--release")
+    listing.add_argument("--component")
+    listing.add_argument("--open", action="store_true", help="Show only open or still-open findings")
     listing.add_argument("--origin", help="Filter changes by source identifier")
     init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
@@ -196,6 +201,11 @@ def execute(args):
     if command == "status":
         return kernel.status()
     if command == "list":
+        if args.category == "findings":
+            need(args.origin is None, "INVALID_INPUT", "--origin applies only to changes", exit_code=2)
+            return {"findings": list_findings(kernel, args)}
+        need(all(value is None for value in (args.change, args.release, args.component)) and not args.open,
+             "INVALID_INPUT", "Finding filters require list findings", exit_code=2)
         return {args.category: kernel.list_records(args.category, origin=args.origin)}
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
@@ -280,11 +290,47 @@ def execute(args):
     raise ModelError("INVALID_INPUT", "Unknown command", exit_code=2)
 
 
+def list_findings(kernel, args):
+    need((args.change is None) != (args.release is None), "INVALID_INPUT",
+         "Select --change or --release for findings", exit_code=2)
+    if args.release is not None:
+        from .releases import Releases
+        need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
+        findings = Releases(kernel).findings(args.component, args.release)
+    else:
+        need(args.component is None, "INVALID_INPUT", "--component applies to release findings", exit_code=2)
+        from .verification import Verification
+        record, _, _ = kernel.change(args.change)
+        verifier = Verification(kernel)
+        findings = [row for component in sorted(record["semantic"]["components"])
+                    for row in verifier.findings(args.change, component)]
+    if args.open:
+        findings = [row for row in findings if row["status"] in {"open", "still-open"}]
+    return findings
+
+
+def findings_table(rows, indent):
+    headings = ("Key", "Component", "Severity", "Location", "Status", "State record")
+    cells = [headings]
+    for row in rows:
+        location = row["location"]
+        cells.append((row["key"], row["component"], row["severity"],
+                      f"{location['path']}:{location['line']}" if location else "—",
+                      row["status"], ", ".join(row["state_records"])))
+    widths = [max(map(len, column)) for column in zip(*cells)]
+    for line in cells:
+        print(indent + "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip())
+
+
 def human_output(value, depth=0):
     indent = "  " * depth
     if isinstance(value, dict) and value:
         for key, item in value.items():
-            if isinstance(item, (dict, list)) and item:
+            if key == "findings" and isinstance(item, list) and item and all(
+                    isinstance(row, dict) and "state_records" in row for row in item):
+                print(f"{indent}{key}:")
+                findings_table(item, indent + "  ")
+            elif isinstance(item, (dict, list)) and item:
                 print(f"{indent}{key}:")
                 human_output(item, depth + 1)
             else:

@@ -13,6 +13,7 @@ import subprocess
 
 from .causality import one_head, record_id, scoped_heads
 from .config import DEFAULT_LOG_QUOTA
+from .findings import OPEN, SEVERITIES, finding_key, project as project_findings, validate_findings, validate_resolutions
 from .run_logs import execute as execute_check
 from .model import (ModelError, digest, encoded, fields, fingerprint, identifier,
                     local_path, need, read_json, schema, sha, strings, text, version_key)
@@ -90,7 +91,8 @@ class Verification:
             adopted = {c: p["id"] for c, p in policies.items() if p and p["enabled"]}
             return {"id": digest(adopted), "enabled": bool(adopted), "members": adopted}
         records = [d for d in self.k.decisions(change_id) if d["kind"] == "review-policy"]
-        return records[-1] if records else None
+        return records[-1] if records else {"id": digest({"change_id": change_id, "enabled": self.k.profile.review_enabled, "source": "profile"}),
+                                                  "enabled": self.k.profile.review_enabled, "source": "profile"}
 
     def set_policy(self, change_id, enabled, actor, reason):
         record, _, _ = self.k.change(change_id)
@@ -187,6 +189,8 @@ class Verification:
 
     @staticmethod
     def report_scopes(report):
+        if report["kind"] == "finding-decision":
+            return []
         if report["kind"] == "independent-review":
             return [("review", report["actor"])]
         return [("observation", ac) for ac in report["acceptance_ids"]]
@@ -285,7 +289,7 @@ class Verification:
             need(record["change_id"] is None and record["release"]["component"] == record["component"], "INVALID_REFERENCE", "Invalid release run scope")
         else:
             identifier(record["change_id"], "CHG")
-        need(record["component"] in self.k.profile.components, "INVALID_REFERENCE", "Unknown run component")
+        need(text(record["component"]) and record["component"] in self.k.profile.components, "INVALID_REFERENCE", "Unknown run component")
         candidate = record["candidate"]
         fields(candidate, ("model_schema", "change_id", "component", "head", "base", "dirty", "categories", "inputs", "inputs_digest"), ("release",))
         schema(candidate)
@@ -351,8 +355,10 @@ class Verification:
 
     def record_evidence(self, file):
         record = read_json(file)
+        if isinstance(record, dict) and record.get("kind") == "finding-decision":
+            return self.record_finding_decision(record)
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
-                        "outcome", "acceptance_ids", "checks", "limitations", "findings"), ("policy_id", "release", "role"))
+                        "outcome", "acceptance_ids", "checks", "limitations", "findings"), ("policy_id", "release", "role", "resolutions"))
         schema(record)
         need(record["kind"] in {"manual", "automated-import", "independent-review"}, "INVALID_INPUT", "Unknown evidence kind", exit_code=2)
         need(text(record["actor"]) and text(record["context"]), "INVALID_INPUT", "Declare observer and context", exit_code=2)
@@ -364,18 +370,17 @@ class Verification:
             declared(record["role"], record["context"], REVIEW_ROLES, "review")
         for key in ("checks", "limitations"):
             need(isinstance(record[key], list) and all(text(s) for s in record[key]), "INVALID_INPUT", f"{key} must be strings", exit_code=2)
-        need(isinstance(record["findings"], list), "INVALID_INPUT", "findings must be a list", exit_code=2)
-        ids = []
-        for finding in record["findings"]:
-            fields(finding, ("id", "description"))
-            need(text(finding["id"]) and text(finding["description"]), "INVALID_INPUT", "Findings need stable IDs and text", exit_code=2)
-            ids.append(finding["id"])
-        need(len(ids) == len(set(ids)), "ID_COLLISION", "Duplicate finding ID")
+        validate_findings(record["findings"])
+        need(review or not record.get("resolutions"), "INVALID_INPUT", "Only reviewers can resolve findings", exit_code=2)
+        validate_resolutions(record.get("resolutions", []), record["candidate_digest"])
         need(record["outcome"] in ({"ready", "changes-needed", "incomplete"} if review else {"pass", "fail", "incomplete"}),
              "INVALID_INPUT", "Invalid evidence outcome", exit_code=2)
         run = self.read_run(record["run_id"])
         context = Verification(self.k, release=run.get("release"))
         need(context.same_scope(record, run["change_id"], run["component"]), "INVALID_REFERENCE", "Evidence scope differs from run")
+        if context.release and (record["findings"] or record.get("resolutions")):
+            need(self.k.release(**context.release)["publication"] is None,
+                 "VERSION_INVALID", "Published release findings are immutable")
         if review:
             need("producer" in run, "EVIDENCE_STALE", "The run has no declared producer context to review against",
                  entity=run["id"], remediation=RERUN_ATTRIBUTED)
@@ -388,23 +393,53 @@ class Verification:
              "EVIDENCE_STALE", "Evidence must reference the current exact candidate")
         applicable = context.acceptance(context.target(record["change_id"]), record["component"])
         need(set(strings(record["acceptance_ids"])) <= set(applicable), "INVALID_REFERENCE", "Evidence cites an inapplicable AC")
+        for finding in record["findings"]:
+            need(set(finding["acceptance_ids"]) <= set(applicable), "INVALID_REFERENCE", "Finding cites an inapplicable AC")
         if review:
             policy = context.policy(record["change_id"])
             need(record.get("policy_id") == (policy["id"] if policy else None), "EVIDENCE_STALE", "Review policy changed")
             record["policy_id"] = policy["id"] if policy else None
-        heads = scoped_heads(context.evidence(record["change_id"], record["component"]), self.report_scopes)
+        existing = context.evidence(record["change_id"], record["component"])
+        rows = project_findings(existing)
+        prior = {row["key"]: row for row in rows}
+        for finding in record["findings"]:
+            if "recurs_from" in finding:
+                need(finding["recurs_from"] in prior and prior[finding["recurs_from"]]["status"] == "fixed",
+                     "INVALID_REFERENCE", "A recurrence must cite a previously fixed finding in this scope")
+        witnesses = {finding["id"]: prior[finding["recurs_from"]]["state_record"]
+                     for finding in record["findings"] if "recurs_from" in finding}
+        if witnesses:
+            record["recurrence_witnesses"] = witnesses
+        if review:
+            resolved = {item["finding"] for item in record.get("resolutions", [])}
+            missing = sorted(row["key"] for row in rows if row["status"] in OPEN and row["key"] not in resolved)
+            need(not missing, "FINDING_RESOLUTION_REQUIRED", "Review must resolve every open finding in its scope", actual=missing)
+        changes = {item["finding"] for item in record.get("resolutions", [])}
+        by_key = {row["key"]: row for row in rows}
+        need(changes <= by_key.keys(), "INVALID_REFERENCE", "Resolution cites a finding outside this scope", actual=sorted(changes - by_key.keys()))
+        human = sorted(key for key in changes if by_key[key]["requires_human"])
+        need(not human, "FINDING_DECISION_REQUIRED", "Conflicting user dispositions require a user decision", actual=human)
+        closed = sorted(key for key in changes if by_key[key]["status"] not in OPEN)
+        need(not closed, "INVALID_REFERENCE", "Closed findings keep their resolution; record a new recurring finding", actual=closed)
+        record["finding_parents"] = {key: by_key[key]["state_records"] for key in sorted(changes)}
+        heads = scoped_heads(existing, self.report_scopes)
         supersedes = sorted({r["id"] for scope in self.report_scopes(record) for r in heads.get(scope, [])})
         record.update(id=record_id("EVD"), executed_by_roclec=False, supersedes=supersedes)
         record["digest"] = digest(record)
+        project_findings([*existing, record])
         receipt = self.store.apply("evidence-record", {"id": record["id"]},
                                    {f".roclec/evidence/{record['id']}.json": encoded(record)}, self.k.token)
         return {"evidence": record, "receipt": receipt}
 
     def read_evidence(self, path, runs=None):
         record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
+        if record.get("kind") == "finding-decision":
+            self.validate_finding_decision(record, stored=True)
+            need(record["id"] == path.stem, "INVALID_REFERENCE", "Evidence identity differs from its path")
+            return record
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
                         "outcome", "acceptance_ids", "checks", "limitations", "findings", "id", "digest", "executed_by_roclec",
-                        "supersedes"), ("policy_id", "release", "role"))
+                        "supersedes"), ("policy_id", "release", "role", "resolutions", "finding_parents", "recurrence_witnesses"))
         identifier(record["id"], "EVD")
         if "release" not in record:
             identifier(record["change_id"], "CHG")
@@ -422,13 +457,80 @@ class Verification:
             need(isinstance(record[key], list) and all(text(v) for v in record[key]), "INVALID_INPUT", "Invalid observation strings", exit_code=2)
         need(record.get("id") == path.stem and record.get("digest") == digest({k: v for k, v in record.items() if k != "digest"}),
              "HASH_MISMATCH", "Evidence integrity mismatch")
+        validate_findings(record["findings"], historical=True)
+        validate_resolutions(record.get("resolutions", []), record["candidate_digest"])
+        need(record["kind"] == "independent-review" or not record.get("resolutions"),
+             "INVALID_INPUT", "Only reviewers can resolve findings", exit_code=2)
         source = self.read_run(record["run_id"]) if runs is None else runs.get(record["run_id"])
         need(source is not None, "INVALID_REFERENCE", "Evidence requires a finalized run", entity=record["id"])
         need((source["change_id"], source["component"], source["candidate"]["inputs_digest"]) ==
              (record["change_id"], record["component"], record["candidate_digest"]),
              "INVALID_REFERENCE", "Evidence differs from its source run candidate")
         need(record.get("release") == source.get("release"), "INVALID_REFERENCE", "Evidence release scope differs from run")
+        if record.get("resolutions"):
+            need(record.get("role") in REVIEW_ROLES and "producer" in source, "INVALID_INPUT", "Finding resolutions require an attributed reviewer and run", exit_code=2)
+            need(not same_context(record["context"], source["producer"]["context"]), "SELF_REVIEW_DECLARED", "Finding resolver declared the producer context")
         return record
+
+    def validate_finding_decision(self, record, *, stored=False):
+        required = ("model_schema", "kind", "change_id", "component", "actor", "reason", "findings", "status")
+        if stored:
+            required += ("id", "digest", "executed_by_roclec", "supersedes", "finding_parents")
+        fields(record, required, ("release", "fut_id", "severity"))
+        schema(record)
+        need(record["kind"] == "finding-decision" and text(record["actor"]) and text(record["reason"]),
+             "INVALID_INPUT", "Finding decisions need a declared actor and reason", exit_code=2)
+        need(record["status"] in ("accepted", "invalid", "deferred"), "INVALID_INPUT", "Unknown finding decision status", exit_code=2)
+        need(text(record["component"]) and record["component"] in self.k.profile.components, "INVALID_REFERENCE", "Unknown finding component")
+        if "release" in record:
+            fields(record["release"], ("component", "version"))
+            need(record["change_id"] is None and record["component"] == record["release"]["component"],
+                 "INVALID_REFERENCE", "Finding decision release scope differs from component")
+            version_key(record["release"]["version"])
+            if not stored:
+                release = self.k.release(**record["release"])
+                need(release["publication"] is None, "VERSION_INVALID", "Published release findings are immutable")
+        else:
+            identifier(record["change_id"], "CHG")
+            if not stored:
+                change, _, _ = self.k.change(record["change_id"])
+                need(record["component"] in change["semantic"]["components"], "INVALID_REFERENCE", "Finding component is outside change")
+        for key in strings(record["findings"], nonempty=True):
+            finding_key(key)
+        if "severity" in record:
+            need(record["severity"] in SEVERITIES, "INVALID_INPUT", "Unknown finding severity", exit_code=2)
+        need((record["status"] == "deferred") == ("fut_id" in record),
+             "INVALID_INPUT", "Deferred findings require an existing FUT", exit_code=2)
+        if "fut_id" in record:
+            identifier(record["fut_id"], "FUT")
+            future = self.k._fut_record(self.k.read(f".roclec/futs/{record['fut_id']}.json"))
+            need(future["id"] == record["fut_id"], "INVALID_REFERENCE", "FUT identity mismatch")
+        if stored:
+            identifier(record["id"], "EVD")
+            need(record["executed_by_roclec"] is False and record["supersedes"] == [],
+                 "INVALID_INPUT", "Finding decision is a declared user decision", exit_code=2)
+            need(record["digest"] == digest({key: value for key, value in record.items() if key != "digest"}),
+                 "HASH_MISMATCH", "Finding decision integrity mismatch")
+
+    def record_finding_decision(self, record):
+        self.validate_finding_decision(record)
+        context = Verification(self.k, release=record.get("release"))
+        existing = context.evidence(record["change_id"], record["component"])
+        rows = {row["key"]: row for row in project_findings(existing)}
+        missing = set(record["findings"]) - rows.keys()
+        need(not missing, "INVALID_REFERENCE", "Finding decision cites findings outside its scope", actual=sorted(missing))
+        fixed = sorted(key for key in record["findings"] if rows[key]["status"] == "fixed")
+        need(not fixed, "INVALID_REFERENCE", "Fixed findings keep their history; record a new recurrence", actual=fixed)
+        record.update(id=record_id("EVD"), executed_by_roclec=False, supersedes=[],
+                      finding_parents={key: rows[key]["state_records"] for key in record["findings"]})
+        record["digest"] = digest(record)
+        project_findings([*existing, record])
+        receipt = self.store.apply("evidence-record", {"id": record["id"]},
+                                   {f".roclec/evidence/{record['id']}.json": encoded(record)}, self.k.token)
+        return {"evidence": record, "receipt": receipt}
+
+    def findings(self, change_id, component):
+        return project_findings(self.evidence(change_id, component))
 
     def evidence(self, change_id, component):
         records = [record for record in (self.read_evidence(p) for p in self.store.path(".roclec/evidence").glob("EVD-*.json"))
@@ -472,7 +574,11 @@ class Verification:
         missing = set(self.acceptance(self.target(change_id), component)) - covered
         need(not missing, "COVERAGE_MISSING", "Checks passing does not cover every applicable AC", actual=sorted(missing))
         policy = self.policy(change_id)
+        findings = self.findings(change_id, component)
         if policy and policy["enabled"]:
+            material = [row["key"] for row in findings if row["status"] in OPEN
+                        and SEVERITIES.index(row["severity"]) >= SEVERITIES.index(self.k.profile.material_severity)]
+            need(not material, "FINDINGS_OPEN", "Material review findings remain open", actual=material)
             reviews = [one_head(heads, scope) for scope in sorted(heads) if scope[0] == "review"]
             current = [r for r in reviews if r["candidate_digest"] == candidate["inputs_digest"] and r.get("policy_id") == policy["id"]]
             # A review is compared with the run it cites and with the gated run.
@@ -493,4 +599,5 @@ class Verification:
             live.update(r["id"] for r in accepted)
         return {"change": change_id, "component": component, "status": "verified", "run_id": run["id"],
                 "candidate": candidate, "policy_id": policy["id"] if policy else None,
-                "evidence": sorted(live), **self.extras()}
+                "evidence": sorted(live), "findings": findings, "finding_state": digest(findings),
+                "limitations": [row["key"] for row in findings if row["status"] in OPEN], **self.extras()}

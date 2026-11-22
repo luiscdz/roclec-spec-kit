@@ -158,12 +158,14 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
         for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
-                     'agents.py', 'adr.py', 'assets/templates/adr-template.md', *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
+                     'agents.py', 'adr.py', 'findings.py', 'assets/templates/adr-template.md',
+                     'assets/skills/roclec-reviewer/references/report-template.md',
+                     *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
     from c1_scenarios import adr_scenarios as c1_adr_scenarios
     c1_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
-    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios
+    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios, findings_scenarios
 
     def c2_check(name, condition, evidence=''):
         cases.append({'scope': 'C2-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -172,6 +174,7 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
 
     c2_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     branch_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    findings_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     execution_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c2_faults import capture_scenarios, lock_scenarios, scenarios as fault_scenarios
     fault_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
