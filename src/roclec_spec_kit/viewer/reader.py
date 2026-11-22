@@ -161,7 +161,8 @@ class Reader:
             for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
                 try:
                     report = self.verifier.read_evidence(path, runs)
-                    if report["kind"] != "finding-decision":
+                    # Finding decisions and agent sessions are not observation reports.
+                    if report["kind"] not in {"finding-decision", "agent-session"}:
                         result[report["id"]] = report
                 except ModelError as exc:
                     invalid.append({"id": path.stem, "issue": exc.issue})

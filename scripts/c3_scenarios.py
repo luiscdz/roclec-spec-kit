@@ -6,10 +6,10 @@ from pathlib import Path
 
 try:
     from .c1_scenarios import tree, bundle, criteria, declare_hook, snapshot, digest, put_json, adr_bundle, adr_caller, adr_markdown
-    from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
+    from .c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding, session_lifecycle
 except ImportError:
     from c1_scenarios import tree, bundle, criteria, declare_hook, snapshot, digest, put_json, adr_bundle, adr_caller, adr_markdown
-    from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding
+    from c2_scenarios import PRODUCER, setup, commit, git, prepared_fixture, finding, session_lifecycle
 
 
 def scenarios(workspace, invoke, check):
@@ -628,3 +628,58 @@ def conformance(data):
 def file_sha(path):
     import hashlib
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def session_release_scenarios(workspace, invoke, check):
+    """FL `release record` demands a release session when the seeded flow requires one, with a real disposable remote."""
+    state = session_lifecycle(workspace / "c3-sessions", invoke, check)
+    root, call, record, run = state["root"], state["call"], state["record"], state["run"]
+    workspace = state["workspace"]
+    prepare_plan = workspace / "release-prepare.json"
+    prepared = call("FL C3 export release preparation", "release", "prepare", "engine", "v1.0.0", "--run", run["id"],
+                    "--out", prepare_plan)["data"]["plan"]
+    preparation, shipped = prepared["inputs"]["preparation"], prepared["inputs"]["candidate"]["head"]
+    call("FL C3 apply release preparation", "operation", "apply", prepare_plan)
+    commit(root)
+    remote = workspace / "remote.git"
+    remote.mkdir()
+    git(remote, "init", "--bare", "-q")
+    git(root, "remote", "add", "origin", str(remote))
+    record_plan = workspace / "release-record.json"
+    publish = ("release", "record", "engine", "v1.0.0", "--preparation", preparation, "--commit", shipped, "--tag", "v1.0.0",
+               "--remote", "origin", "--actor", "fixture publisher", "--reason", "Disposable Git harness publication",
+               "--out", record_plan)
+    issue = call("FL C3 release record demands the release session", *publish, expect=1, issue="SESSION_REQUIRED")["issues"][0]
+    check("FL C3 the demand names the release", issue["expected"] == "release" and issue["entity"] == "engine/v1.0.0"
+          and "evidence record --kind agent-session" in issue["remediation"], str(issue))
+    check("FL C3 the rejected record exports no plan", not record_plan.exists(), "")
+    git(root, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "tag", "-a", "v1.0.0", shipped,
+        "-m", "Synthetic annotated publication")
+    git(root, "push", "origin", "refs/tags/v1.0.0")
+    call("FL C3 a session of another release does not count", "evidence", "record", "--kind", "agent-session", "--file",
+         _release_meta(workspace, "v9.0.0"), "--transcript", _release_transcript(workspace), expect=2, issue="INVALID_REFERENCE")
+    record("FL C3 import the release session", "release", "coordinator", release={"component": "engine", "version": "v1.0.0"})
+    commit(root)
+    exported = call("FL C3 release record passes with the release session", *publish)["data"]["plan"]
+    check("FL C3 the exported plan names the prepared commit", exported["inputs"]["query"]["refs"]["refs/tags/v1.0.0^{}"] == shipped, "")
+    call("FL C3 apply the publication record", "operation", "apply", record_plan)
+    published = call("FL C3 inspect the publication", "inspect", "--release", "v1.0.0", "--component", "engine")["data"]
+    check("FL C3 publication freezes the prepared commit", published["status"] == "published"
+          and published["publication"]["commit"] == shipped, str(published["status"]))
+    check("FL C3 the published consumer is clean", [i for i in call("FL C3 final check", "check")["issues"]
+                                                   if i["code"] not in {"FLOW_VIEW_STALE", "SESSION_REDACTION_EMPTY"}] == [], "")
+
+
+def _release_meta(workspace, version):
+    path = workspace / "inputs" / "other-release.json"
+    put_json(path, {"model_schema": 2, "host": "claude-code", "host_session_id": "other-release", "actor": "Fixture agent",
+                    "role": "coordinator", "model": "fixture-model", "started_at": "2026-01-31T09:00:00Z",
+                    "ended_at": "2026-01-31T09:30:00Z", "stage": "release",
+                    "release": {"component": "engine", "version": version}})
+    return path
+
+
+def _release_transcript(workspace):
+    path = workspace / "inputs" / "other-release.jsonl"
+    path.write_bytes(b"user: do the fixture work\nassistant: done\n")
+    return path

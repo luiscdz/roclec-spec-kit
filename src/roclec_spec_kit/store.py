@@ -45,7 +45,7 @@ class Store:
         return local_path(self.root, relative)
 
     def guard_branch(self, kind, profile=None):
-        if kind in {"change-start", "run-start", "run-verify", "evidence-record", "skills-install"}:
+        if kind in {"change-start", "run-start", "run-verify", "evidence-record", "session-record", "skills-install"}:
             return
         if profile is None:
             profile = tomllib.loads(self.path(".roclec/project.toml").read_text(encoding="utf-8"))
@@ -176,7 +176,7 @@ class Store:
             snapshot = f"{base}/rejected/{subject['digest']}/"
         roots = {
             "init": (".roclec/project.toml", ".roclec/current.json", ".roclec/references.json", ".roclec/identities.json", ".gitignore",
-                     ".roclec/flow.toml", *_flow_view(payload)),
+                     ".roclec/flow.toml", "docs/flow-retro.md", *_flow_view(payload)),
             "change-new": (f".roclec/changes/{payload.get('id')}/", ".roclec/identities.json"),
             "change-approve": (f".roclec/changes/{payload.get('id')}/revisions/", ".roclec/decisions/", ".roclec/identities.json"),
             "change-start": (".roclec/decisions/",),
@@ -193,6 +193,8 @@ class Store:
             "run-verify": (f".roclec/runs/{payload.get('id')}/",),
             "run-start": (f".roclec/runs/{payload.get('id')}/start.json",),
             "evidence-record": (f".roclec/evidence/{payload.get('id')}.json",),
+            # An agent session record and its optional versioned transcript copy; the original stays in runtime.
+            "session-record": (f".roclec/evidence/{payload.get('id')}.json", f".roclec/evidence/{payload.get('id')}.session"),
             "review-policy": (".roclec/decisions/",),
             "integrate": (".roclec/contracts/", ".roclec/current.json", ".roclec/integrations/"),
             "release-prepare": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/preparations/",),
@@ -200,7 +202,7 @@ class Store:
             "skills-install": (".agents/skills/", ".claude/skills/", ".claude/commands/", ".claude/agents/", ".codex/", ".specify/",
                                "AGENTS.md", "CLAUDE.md", ".gitignore", ".roclec/workflow.md", ".roclec/model.md", ".roclec/run", ".roclec/templates/",
                                ".roclec/constitution.md", ".roclec/notices/", ".roclec/link.toml", ".roclec/installation.json",
-                               ".roclec/flow.toml"),
+                               ".roclec/flow.toml", "docs/flow-retro.md"),
         }
         need(kind in roots and bool(paths), "OPERATION_CONFLICT", "Unsupported write operation", exit_code=3)
         need(kind in DELETING or None not in paths.values(), "OPERATION_CONFLICT",

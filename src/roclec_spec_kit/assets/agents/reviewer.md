@@ -19,6 +19,7 @@ A coordinator brief with: change or release, component, run ID, candidate digest
 ## Outputs
 
 - One review evidence record with verdict `ready`, `changes-needed` or `incomplete`, structured findings, resolutions of open findings in scope, and the role and context that produced it.
+- Your host and host session id, so the coordinator can record the session; cite its EVD id as `context` when the review stage requires sessions.
 - The limits of the review, including what could not be verified.
 
 ## Prohibited

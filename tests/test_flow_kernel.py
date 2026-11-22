@@ -19,6 +19,8 @@ except ModuleNotFoundError:  # run as tests.test_flow_kernel
     from tests.test_kernel import invoke
 
 DEFAULT = files("roclec_spec_kit").joinpath("assets/project/flow.toml").read_bytes()
+# The seeded flow with session demands lifted (TL.4 is covered by test_session_links).
+OPTIONAL = DEFAULT.replace(b'session_evidence = "required"', b'session_evidence = "optional"')
 FLOW = ".roclec/flow.toml"
 BOTH = ("--component", "engine", "--component", "viewer")
 ACTOR = ("--actor", "Maintainer", "--reason", "Reviewed")
@@ -61,7 +63,7 @@ class FlowKernelTest(unittest.TestCase):
         return payload
 
     def write_flow(self, mutate=None, raw=None):
-        data = raw if raw is not None else DEFAULT.decode()
+        data = raw if raw is not None else OPTIONAL.decode()
         if mutate:
             data = mutate(data)
         (self.root / FLOW).write_text(data, encoding="utf-8")

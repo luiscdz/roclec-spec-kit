@@ -941,3 +941,414 @@ def flow_scenarios(workspace, invoke, check):
     call("FF views --write refreshes the flow view", "views", "--write")
     after = call("FF check is clean once agreed and regenerated", "check")
     check("FF no warning remains", after["issues"] == [], str(after["issues"]))
+
+
+# ---- FL (M-34): agent sessions, citations, gate demands, storage policies and flow learning ----
+
+SESSION_TRANSCRIPT = b"user: do the fixture work\nassistant: done\n"
+SESSION_IGNORED = {"FLOW_VIEW_STALE", "SESSION_REDACTION_EMPTY"}  # Expected warnings of these fixtures.
+
+
+def fl_caller(root, invoke, check):
+    """call(label, *args, expect, issue, recorded, project) -> payload; a rejection writes nothing unless `recorded`."""
+    def call(label, *args, expect=0, issue=None, recorded=False, project=None):
+        project = project or root
+        before = tree(project)
+        result = invoke(["--project", str(project), "--json", *map(str, args)])
+        check(label, result.returncode == expect, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        check(label + ": JSON envelope", payload["ok"] == (expect == 0), result.stdout)
+        if issue:
+            check(f"{label}: issue {issue}", issue in [i["code"] for i in payload["issues"]], result.stdout)
+        if expect in (1, 2, 3) and not recorded:
+            check(label + ": rejection preserves bytes/modes", before == tree(project), result.stdout)
+        return payload
+    return call
+
+
+def session_importer(call, folder, prefix):
+    """record(label, stage, role, **scope) imports an agent session through the public CLI and returns its EVD ID."""
+    folder.mkdir(parents=True, exist_ok=True)
+    count = [0]
+
+    def record(label, stage, role, *, content=SESSION_TRANSCRIPT, host=None, expect=0, issue=None, **scope):
+        count[0] += 1
+        meta = {"model_schema": 2, "host": "claude-code", "host_session_id": host or f"{prefix}-{count[0]}",
+                "actor": "Fixture agent", "role": role, "model": "fixture-model", "started_at": "2026-01-31T09:00:00Z",
+                "ended_at": "2026-01-31T09:30:00Z", "stage": stage, **scope}
+        meta_file, transcript = folder / f"meta-{count[0]}.json", folder / f"session-{count[0]}.jsonl"
+        put_json(meta_file, meta)
+        transcript.write_bytes(content)
+        payload = call(label, "evidence", "record", "--kind", "agent-session", "--file", meta_file, "--transcript", transcript,
+                       expect=expect, issue=issue)
+        return payload["data"]["evidence"]["id"] if not expect else payload
+    return record
+
+
+def remaining_issues(call, label):
+    """`check` issues except the warnings these fixtures expect (flow view staleness, redaction without secrets)."""
+    return [i for i in call(label, "check")["issues"] if i["code"] not in SESSION_IGNORED]
+
+
+def session_lifecycle(workspace, invoke, check):
+    """FL seeded flow, unrelaxed: every AI stage requires sessions and each gate demands exactly its own.
+
+    A fresh project keeps the shipped flow (session_evidence required on every AI stage). Each gate is first
+    observed rejecting with SESSION_REQUIRED naming the stage, then passes once that session is imported. The
+    viewer component is user-facing: only its implement gate demands a design session. Stops at the final
+    release gate; the caller continues with the release record when it has a remote.
+    """
+    workspace = workspace / "fl-lifecycle"
+    workspace.mkdir(parents=True)
+    root, names = workspace / "consumer with spaces", ("engine", "viewer")
+    root.mkdir()
+    git(root, "init", "-qb", "main")
+    lines = ['schema = 3', 'name = "FL synthetic consumer"', 'trunk_ref = "refs/heads/main"']
+    for name in names:
+        inline = "{" + ", ".join(f"{k}={json.dumps(v)}" for k, v in {
+            "id": "unit", "argv": [sys.executable, "src/check.py"], "cwd": ".", "timeout_seconds": 5,
+            "acceptance_ids": ["AC-001"]}.items()) + "}"
+        lines.extend([f'[components.{name}]', 'repo = "."', f'user_facing = {str(name == "viewer").lower()}',
+                      'target_ref = "refs/remotes/fixture/main"', 'inputs = ["src/**"]', 'generated = ["build/**"]',
+                      'excluded = ["private.env", "docs/design.md"]', f'verification = [{inline}]'])
+    lines.extend(["[review]", "enabled = false"])
+    config = workspace / "profile.toml"
+    config.write_text("\n".join(lines) + "\n")
+    result = invoke(["--json", "init", str(root), "--profile", str(config)])
+    check("FL lifecycle project initializes", result.returncode == 0, result.stdout + result.stderr)
+    flow_text = (root / ".roclec/flow.toml").read_text(encoding="utf-8")
+    stage_lines = [line for line in flow_text.splitlines() if line.startswith("session_evidence")]
+    check("FL seeded flow requires sessions on every AI stage", stage_lines == ['session_evidence = "required"'] * 9,
+          str(stage_lines))
+    call = fl_caller(root, invoke, check)
+    record = session_importer(call, workspace / "inputs", "fl")
+    (root / "docs/reference.md").write_text("# Synthetic foundation\n\nFixture data.\n", encoding="utf-8")
+    (root / "docs/design.md").write_text("# Synthetic design\n\nFixture data.\n", encoding="utf-8")
+    (root / "src").mkdir()
+    (root / "src/check.py").write_text('from pathlib import Path\nassert Path("src/value.txt").read_text() == "saved\\n"\nprint("checked AC-001")\n')
+    (root / "src/value.txt").write_text("saved\n")
+    (root / ".gitignore").write_text(".roclec/runtime/\nbuild/\nprivate.env\n")
+
+    def demand(label, *args, stage, entity=None, **kwargs):
+        """The gate rejects with SESSION_REQUIRED naming `stage` (and the scope to import)."""
+        issue = call(label, *args, expect=1, issue="SESSION_REQUIRED", **kwargs)["issues"][0]
+        check(label + ": expected stage and scope", issue["expected"] == stage and (entity is None or issue["entity"] == entity)
+              and "evidence record --kind agent-session" in issue["remediation"], str(issue))
+        return issue
+
+    # Foundation: each reference needs a foundation session whose subject is that reference.
+    refs = ["architecture", "context", "engineering", "principles", "stack", "verification"]
+    for role in refs:
+        call(f"FL register {role}", "reference", "add", role, "--path", "docs/reference.md",
+             "--component", "engine", "--component", "viewer", "--role", role)
+    call("FL register design (user-facing components only)", "reference", "add", "design", "--path", "docs/design.md",
+         "--component", "viewer", "--role", "design")
+    call("FL register flow", "reference", "add", "flow", "--path", ".roclec/flow.toml", "--role", "process",
+         "--component", "engine", "--component", "viewer")
+    owner = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
+    order, sessions = ["flow", *refs, "design"], {}
+    for index, ref in enumerate(order):
+        agree = ("foundation", "agree", "--ref", ref, *owner, *criteria(root, "foundation"))
+        demand(f"FL agree {ref} needs a foundation session", *agree, stage="foundation", entity=ref)
+        if index:  # A session of an earlier reference does not satisfy this one, nor may the agreement cite it.
+            call(f"FL agree {ref} cannot cite another subject's session", *agree, "--session", sessions[order[index - 1]],
+                 expect=2, issue="INVALID_REFERENCE")
+        session = sessions[ref] = record(f"FL import the {ref} foundation session", "foundation", "coordinator", subject=ref)
+        decision = call(f"FL agree {ref} with its session", *agree, "--session", session)["data"]["decision"]
+        check(f"FL {ref} agreement records the session", decision["sessions"] == [session], str(decision))
+    base = commit(root)
+
+    # Define: the first bundle cites the define session recorded before the change was imported.
+    define = record("FL import the CHG-001 define session before the change exists", "define", "specifier", change_id="CHG-001")
+    source = workspace / "bundle"
+    change = bundle(source, components=names)
+    change["semantic"]["sessions"] = [define]
+    change["proposal_digest"] = digest({k: change[k] for k in ("id", "kind", "semantic")})
+    put_json(source / "change.json", change)
+    call("FL seal the first bundle citing its define session", "change", "seal", source)
+    call("FL import the first bundle", "change", "new", "--file", source / "change.json")
+    proposal = json.loads((source / "change.json").read_text())
+    check("FL imported bundle keeps its cited session", proposal["semantic"]["sessions"] == [define], str(proposal["semantic"]))
+    # A second change imported without its define session shows the approve gate demanding one.
+    other = workspace / "second-bundle"
+    bundle(other, change_id="CHG-002", components=("engine",), kind="refactor")
+    call("FL import a second change without sessions", "change", "new", "--file", other / "change.json")
+    demand("FL approve gate demands the define session", "check", "--change", "CHG-002", "--gate", "approve",
+           stage="define", entity="CHG-002")
+    other_define = record("FL import the CHG-002 define session", "define", "specifier", change_id="CHG-002")
+    call("FL approve gate passes with the define session", "check", "--change", "CHG-002", "--gate", "approve")
+    check("FL other change's session does not count", define != other_define, "")
+    approved = call("FL approve cites the define session", "change", "approve", "CHG-001", "--digest", proposal["proposal_digest"],
+                    *owner, *criteria(root, "approve"), "--session", define)["data"]["decision"]
+    check("FL approval records the session", approved["sessions"] == [define], str(approved))
+    for name in names:
+        call(f"FL plan {name} release", "release", "plan", name, "v1.0.0", "--change", "CHG-001")
+    commit(root)
+
+    # Plan and design: the implement gate demands plan for every component, design only for the user-facing one.
+    gate = ("check", "--change", "CHG-001")
+    demand("FL engine implement gate demands the plan session", *gate, "--component", "engine", "--gate", "implement",
+           stage="plan", entity="CHG-001/engine")
+    plan = record("FL import the plan session (no component)", "plan", "implementer", change_id="CHG-001")
+    call("FL engine implement gate passes without a design session", *gate, "--component", "engine", "--gate", "implement")
+    demand("FL viewer implement gate demands a design session", *gate, "--component", "viewer", "--gate", "implement",
+           stage="design", entity="CHG-001/viewer")
+    record("FL a design session of the other component does not count", "design", "coordinator", change_id="CHG-001",
+           component="engine")
+    demand("FL viewer still demands its own design session", *gate, "--component", "viewer", "--gate", "implement",
+           stage="design", entity="CHG-001/viewer")
+    record("FL import the viewer design session", "design", "coordinator", change_id="CHG-001", component="viewer")
+    call("FL viewer implement gate passes with its design session", *gate, "--component", "viewer", "--gate", "implement")
+    call("FL start the engine implementation citing the plan session", "change", "start", "CHG-001", "--component", "engine",
+         "--actor", "Synthetic maintainer", "--session", plan)
+
+    # Implement: the verify gate demands the implementation session; the final run cites it.
+    producer = ("--role", "implementer", "--context", "synthetic implementer session")
+    first = call("FL first run without a cited session", "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+                 *producer)["data"]["run"]
+    commit(root)
+    demand("FL verify gate demands the implement session", *gate, "--component", "engine", "--gate", "verify",
+           stage="implement", entity="CHG-001/engine")
+    implement = record("FL import the engine implement session", "implement", "implementer", change_id="CHG-001", component="engine")
+    run = call("FL run cites the implement session", "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+               *producer, "--session", implement)["data"]["run"]
+    check("FL run stores producer.sessions", run["producer"]["sessions"] == [implement] and run["id"] != first["id"], str(run["producer"]))
+    observation = workspace / "observation.json"
+    put_json(observation, {"model_schema": 2, "kind": "manual", "change_id": "CHG-001", "component": "engine", "run_id": run["id"],
+                           "candidate_digest": run["candidate"]["inputs_digest"], "actor": "Synthetic observer",
+                           "context": "Observation fixture", "outcome": "pass", "acceptance_ids": ["AC-001"],
+                           "checks": ["Observed test"], "limitations": [], "findings": [], "sessions": [implement]})
+    report = call("FL evidence cites the implement session", "evidence", "record", "--file", observation)["data"]["evidence"]
+    check("FL evidence stores its session", report["sessions"] == [implement], str(report))
+    commit(root)
+    call("FL verify gate passes", *gate, "--component", "engine", "--gate", "verify")
+
+    # Verify and integrate: the integrate gate demands the verify session; the release gate the integrate session.
+    demand("FL integrate gate demands the verify session", *gate, "--component", "engine", "--gate", "integrate",
+           stage="verify", entity="CHG-001/engine")
+    out = workspace / "integration.json"
+    demand("FL integrate prepare demands the verify session", "integrate", "prepare", "CHG-001", "--component", "engine",
+           "--run", run["id"], "--out", out, stage="verify")
+    check("FL rejected prepare exports no plan", not out.exists(), "")
+    record("FL import the engine verify session", "verify", "implementer", change_id="CHG-001", component="engine")
+    commit(root)
+    call("FL integrate gate passes", *gate, "--component", "engine", "--gate", "integrate")
+    call("FL integrate prepare", "integrate", "prepare", "CHG-001", "--component", "engine", "--run", run["id"], "--out", out)
+    call("FL integrate apply", "operation", "apply", out)
+    commit(root)
+    release = ("check", "--gate", "release", "--component", "engine", "--release", "v1.0.0")
+    demand("FL release gate demands the integrate session of each member", *release, stage="integrate", entity="CHG-001/engine")
+    record("FL import the engine integrate session", "integrate", "coordinator", change_id="CHG-001", component="engine")
+    final = call("FL final release run", "run", "verify", "--release", "v1.0.0", "--component", "engine", "--base", base,
+                 "--role", "coordinator", "--context", "Synthetic release run")["data"]["run"]
+    commit(root)
+    call("FL release gate passes with the sessions each gate demanded", *release)
+    check("FL lifecycle check is clean", remaining_issues(call, "FL lifecycle check") == [], "")
+    return {"root": root, "base": base, "call": call, "record": record, "run": final, "workspace": workspace}
+
+
+def session_citation_scenarios(workspace, invoke, check):
+    """FL `--session` is stored on rejections, checkpoints (prototype and hook), cancellations and FUT decisions."""
+    workspace = workspace / "fl-citations"
+    root, base = setup(workspace, invoke, names=("engine",))
+    call = fl_caller(root, invoke, check)
+    record = session_importer(call, workspace / "inputs", "cite")
+    owner = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
+    stored = lambda decision: json.loads((root / f".roclec/decisions/{decision['id']}.json").read_text())  # noqa: E731
+
+    def cited(label, decision, *sessions):
+        check(label + ": decision stores its sessions", decision["sessions"] == sorted(sessions)
+              and stored(decision)["sessions"] == sorted(sessions), str(decision))
+
+    first = record("FL define session of CHG-001", "define", "specifier", change_id="CHG-001")
+    corrections = workspace / "corrections.json"
+    put_json(corrections, [{"id": "R-1", "description": "Explain the empty state"}])
+    revise = ("--consequence", "revise", "--corrections", corrections)
+    for change_id in ("CHG-002", "CHG-003"):
+        folder = workspace / f"bundle-{change_id}"
+        bundle(folder, change_id=change_id, components=("engine",), kind="refactor")
+        call(f"FL import {change_id}", "change", "new", "--file", folder / "change.json")
+    second, third = (record(f"FL define session of {c}", "define", "specifier", change_id=c) for c in ("CHG-002", "CHG-003"))
+    digest_2 = json.loads((workspace / "bundle-CHG-002/change.json").read_text())["proposal_digest"]
+    call("FL a rejection cannot cite another change's session", "reject", "change", "CHG-002", "--digest", digest_2, *owner,
+         *revise, *criteria(root, "approve", "rejected"), "--session", first, expect=2, issue="INVALID_REFERENCE")
+    rejection = call("FL reject a change citing its session", "reject", "change", "CHG-002", "--digest", digest_2, *owner, *revise,
+                     *criteria(root, "approve", "rejected"), "--session", second)["data"]["decision"]
+    cited("FL change rejection", rejection, second)
+    canceled = call("FL cancel a change citing its session", "change", "cancel", "CHG-003", *owner, "--session", third)["data"]["decision"]
+    cited("FL change cancellation", canceled, third)
+
+    design = record("FL design session of the prototype", "design", "coordinator", change_id="CHG-001", component="engine")
+    prototype = root / "mockups/preview.html"
+    prototype.parent.mkdir()
+    prototype.write_bytes(b"<h1>Preview</h1>\n")
+    pin = file_hash(prototype.read_bytes())
+    approved = call("FL prototype checkpoint citing a session", "checkpoint", "mockups/preview.html", "--digest", pin, *owner,
+                    "--outcome", "approved", *criteria(root, "design"), "--session", design)["data"]["decision"]
+    cited("FL prototype checkpoint", approved, design)
+    refused = call("FL reject the prototype citing a session", "reject", "prototype", "mockups/preview.html", "--digest", pin,
+                   *owner, *revise, *criteria(root, "design", "rejected"), "--session", design)["data"]["decision"]
+    cited("FL prototype rejection", refused, design)
+
+    declare_hook(root, "pre-implement")
+    call("FL agree the flow with a declared hook", "foundation", "agree", "--ref", "flow", *owner, *criteria(root, "foundation"))
+    proposal = json.loads((root / ".roclec/changes/CHG-001/change.json").read_text())["proposal_digest"]
+    hook = call("FL hook checkpoint citing a session", "checkpoint", "CHG-001", "--hook", "pre-implement", "--component", "engine",
+                "--digest", proposal, *owner, "--outcome", "approved", "--session", first)["data"]["decision"]
+    cited("FL hook checkpoint", hook, first)
+
+    fut = workspace / "fut.json"
+    put_json(fut, {"model_schema": 2, "id": "FUT-001", "finding": "Review later", "impact": "Rework", "questions": [],
+                   "source": {"location": "request", "locator": "FL fixture"}})
+    call("FL capture a FUT", "fut", "capture", "--file", fut)
+    decided = call("FL decide a FUT citing a session", "fut", "decide", "FUT-001", "--outcome", "discarded", *owner,
+                   "--session", first)["data"]["decision"]
+    cited("FL FUT decision", decided, first)
+    check("FL citations leave a clean check", remaining_issues(call, "FL citations check") == [], "")
+
+
+def session_review_scenarios(workspace, invoke, check):
+    """FL a required review stage binds the review context to the reviewer's session and rejects self-review."""
+    workspace = workspace / "fl-review"
+    root, base = setup(workspace, invoke, names=("engine",), review={"enabled": True})
+    call = fl_caller(root, invoke, check)
+    record = session_importer(call, workspace / "inputs", "review")
+    flow = root / ".roclec/flow.toml"
+    text = flow.read_text(encoding="utf-8")
+    start = text.index("[stages.review]\n")
+    flow.write_text(text[:start] + text[start:].replace('session_evidence = "optional"', 'session_evidence = "required"', 1), encoding="utf-8")
+    call("FL agree the flow requiring review sessions", "foundation", "agree", "--ref", "flow", "--actor", "Fixture owner",
+         "--reason", "Review sessions are required", *criteria(root, "foundation"))
+    commit(root)
+    producer = record("FL implementer session on the shared host", "implement", "implementer", host="shared-host",
+                      change_id="CHG-001", component="engine")
+    run = call("FL run cites the implementer session", "run", "verify", "CHG-001", "--component", "engine", "--base", base,
+               *PRODUCER, "--session", producer, expect=1, issue="REVIEW_REQUIRED", recorded=True)["data"]["run"]
+    policy = call("FL review policy", "inspect", "--change", "CHG-001")["data"]["review_policy"]
+    reviews = workspace / "reviews"
+    reviews.mkdir()
+
+    def review(context):
+        path = reviews / f"review-{len(list(reviews.iterdir()))}.json"
+        put_json(path, {"model_schema": 2, "kind": "independent-review", "change_id": "CHG-001", "component": "engine",
+                        "run_id": run["id"], "candidate_digest": run["candidate"]["inputs_digest"], "actor": "Fixture reviewer",
+                        "role": "reviewer", "context": context, "policy_id": policy["id"], "outcome": "ready",
+                        "acceptance_ids": ["AC-001"], "checks": ["Reviewed"], "limitations": [], "findings": [], "resolutions": []})
+        return path
+
+    call("FL free-text review context is refused when sessions are required", "evidence", "record", "--file",
+         review("Synthetic reviewer session"), expect=2, issue="SESSION_REQUIRED")
+    shared = record("FL reviewer session on the producer's host", "review", "reviewer", host="shared-host",
+                    change_id="CHG-001", component="engine")
+    call("FL review sharing the producer's host session is self-review", "evidence", "record", "--file", review(shared),
+         expect=1, issue="SELF_REVIEW_DECLARED")
+    call("FL review citing the producer's own session is refused", "evidence", "record", "--file", review(producer),
+         expect=2, issue="INVALID_REFERENCE")
+    reviewer = record("FL independent reviewer session", "review", "reviewer", host="reviewer-host",
+                      change_id="CHG-001", component="engine")
+    stored = call("FL independent review cites its session", "evidence", "record", "--file", review(reviewer))["data"]["evidence"]
+    check("FL review context is the reviewer session", stored["context"] == reviewer, str(stored))
+    call("FL verify gate passes after the independent review", "check", "--change", "CHG-001", "--component", "engine",
+         "--gate", "verify")
+    check("FL review scenario check is clean", remaining_issues(call, "FL review check") == [], "")
+
+
+def session_storage_scenarios(workspace, invoke, check):
+    """FL storage policies: redacted versioned copies, local-only storage and the quota, through the public CLI."""
+    workspace = workspace / "fl-storage"
+    root, base = setup(workspace, invoke, names=("engine",))
+    call = fl_caller(root, invoke, check)
+    record = session_importer(call, workspace / "inputs", "storage")
+    profile = root / ".roclec/project.toml"
+    secret = "s3cret-session-value-91"
+    content = (f"user: deploy with {secret}\nassistant: token tok-4821 used; ok\ntool: echo {secret}\n").encode()
+    text = profile.read_text(encoding="utf-8")
+    profile.write_text(text.replace('trunk_ref = "refs/heads/main"\n',
+                                    'trunk_ref = "refs/heads/main"\nredact_patterns = ["tok-[0-9]+", "s3cret-[a-z0-9-]+"]\n', 1), encoding="utf-8")
+
+    def outside_runtime():
+        return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()
+                and ".git" not in p.relative_to(root).parts and not p.relative_to(root).as_posix().startswith(".roclec/runtime/")}
+
+    redacted = record("FL import a transcript under versioned-redacted", "implement", "implementer", content=content,
+                      change_id="CHG-001", component="engine")
+    stored = json.loads((root / f".roclec/evidence/{redacted}.json").read_text())
+    check("FL redaction counts every replacement", stored["transcript"]["storage"] == "versioned-redacted"
+          and stored["transcript"]["redactions"] == 3, str(stored["transcript"]))
+    copy = (root / f".roclec/evidence/{redacted}.session").read_bytes()
+    check("FL versioned copy replaces secrets", copy == content.replace(secret.encode(), b"[REDACTED]").replace(b"tok-4821", b"[REDACTED]"),
+          copy.decode())
+    check("FL no versioned file shows a secret", all(secret.encode() not in data and b"tok-4821" not in data
+                                                     for data in outside_runtime().values()), "")
+    original = root / f".roclec/runtime/sessions/{redacted}/session-1.jsonl"
+    check("FL the untracked original stays byte for byte", original.read_bytes() == content, str(original))
+    check("FL redacted storage keeps check clean", remaining_issues(call, "FL redacted check") == [], "")
+
+    profile.write_text(profile.read_text(encoding="utf-8").rstrip("\n") + '\n[sessions]\nstorage = "local"\nquota_bytes = 16\n', encoding="utf-8")
+    before = outside_runtime()
+    sessions_before = sorted(p.name for p in (root / ".roclec/runtime/sessions").iterdir())
+    call("FL a transcript over the quota is rejected", "evidence", "record", "--kind", "agent-session", "--file",
+         workspace / "inputs/meta-1.json", "--transcript", workspace / "inputs/session-1.jsonl", expect=2, issue="SESSION_QUOTA_EXCEEDED")
+    check("FL the rejected import wrote nothing", outside_runtime() == before and sorted(
+        p.name for p in (root / ".roclec/runtime/sessions").iterdir()) == sessions_before, "")
+    local = record("FL a transcript at the quota under local storage", "implement", "implementer", content=b"x" * 16,
+                   change_id="CHG-001", component="engine")
+    stored = json.loads((root / f".roclec/evidence/{local}.json").read_text())
+    check("FL local storage versions no copy", stored["transcript"]["storage"] == "local"
+          and stored["transcript"]["versioned_sha256"] is None and not (root / f".roclec/evidence/{local}.session").exists(), str(stored))
+    check("FL local storage keeps the original untracked", (root / f".roclec/runtime/sessions/{local}/session-2.jsonl").read_bytes() == b"x" * 16, "")
+    check("FL local storage keeps check clean", remaining_issues(call, "FL local check") == [], "")
+
+
+def flow_learning_scenarios(workspace, invoke, check):
+    """FL process FUT -> agreed flow revision -> promotion -> deterministic flow view and preserved retrospective."""
+    workspace = workspace / "fl-learning"
+    root, base = setup(workspace, invoke)
+    call = fl_caller(root, invoke, check)
+    owner = ("--actor", "Fixture owner", "--reason", "Approve later in the flow")
+    fut = workspace / "fut.json"
+    put_json(fut, {"model_schema": 2, "id": "FUT-001", "source": {"location": "retro", "locator": "FL fixture"},
+                   "finding": "The approve gate blocks too early", "impact": "Rework", "questions": [], "scope": "process"})
+    call("FL capture a process FUT", "fut", "capture", "--file", fut)
+    flow = root / ".roclec/flow.toml"
+    flow.write_text(flow.read_text(encoding="utf-8") + "\n# Adjusted after FUT-001.\n", encoding="utf-8")
+    agreement = call("FL agree the adjusted flow citing the FUT", "foundation", "agree", "--ref", "flow", *owner,
+                     *criteria(root, "foundation"), "--fut", "FUT-001")["data"]["decision"]
+    check("FL agreement records the process FUT", agreement["futs"] == ["FUT-001"], str(agreement))
+    call("FL promote the FUT to the agreement that addresses it", "fut", "decide", "FUT-001", "--outcome", "promoted",
+         *owner, "--target", agreement["id"])
+    inspected = call("FL inspect the FUT", "inspect", "--fut", "FUT-001")["data"]
+    check("FL the FUT is addressed by the flow agreement", inspected["scope"] == "process" and inspected["status"] == "promoted"
+          and inspected["addressed_by"] == [{"decision": agreement["id"], "flow": agreement["sources"]["flow"],
+                                             "reason": "Approve later in the flow", "actor": "Fixture owner"}], str(inspected))
+    stale = [i["code"] for i in call("FL the view is stale after new records", "check")["issues"]]
+    check("FL records make the flow view stale", "FLOW_VIEW_STALE" in stale, str(stale))
+    call("FL views without --write refuse a stale view", "views", expect=1, issue="VIEW_STALE")
+    view = root / "docs/flow.md"
+    call("FL views --write regenerates the flow view", "views", "--write")
+    first = view.read_bytes()
+    row = next((line for line in first.decode().splitlines() if line.startswith(f"| `{agreement['id']}`")), "")
+    check("FL view shows the revision with its FUT and reason", "Approve later in the flow" in row
+          and "FUT-001 (process): The approve gate blocks too early" in row and agreement["sources"]["flow"] in row, row)
+    written = call("FL second views --write", "views", "--write")["data"]["written"]
+    check("FL two consecutive views --write are byte-identical", view.read_bytes() == first and written == [], str(written))
+    check("FL the regenerated view is current", [i for i in call("FL check after views", "check")["issues"]
+                                                if i["code"] == "FLOW_VIEW_STALE"] == [], "")
+
+    retro = root / "docs/flow-retro.md"
+    check("FL init seeded the flow retrospective", retro.is_file() and retro.read_bytes().startswith(b"# Flow retrospective"), "")
+    retro.write_text("# Our retro\n\nThe approve gate was too early.\n", encoding="utf-8")
+    edited = retro.read_bytes()
+    call("FL skills refresh", "skills")
+    check("FL a refresh preserves the edited retrospective", retro.read_bytes() == edited, "")
+    manifest = json.loads((root / ".roclec/installation.json").read_text())
+    check("FL the retrospective is not a managed file", "docs/flow-retro.md" not in manifest["managed"], str(manifest["managed"])[:200])
+
+
+def session_scenarios(workspace, invoke, check):
+    """Every FL consumer scenario that needs no remote; the release record is covered in C3."""
+    session_lifecycle(workspace, invoke, check)
+    session_citation_scenarios(workspace, invoke, check)
+    session_review_scenarios(workspace, invoke, check)
+    session_storage_scenarios(workspace, invoke, check)
+    flow_learning_scenarios(workspace, invoke, check)

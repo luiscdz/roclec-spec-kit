@@ -23,6 +23,7 @@ A coordinator brief with: the intent, the change ID when revising, the current c
 - ADR drafts, written from the ADR template in the staging folder, when a decision meets the criterion in `roclec-specify`. The coordinator places and registers them as proposed and asks the user to accept them; seal the citing bundle only after they are registered, or return it unsealed with the citation pending.
 - A revised bundle linked to each rejection it addresses, with every correction resolved or disputed with a reason. Return disputed corrections for the user to decide.
 - Open questions that need the user, each with its impact on the bundle.
+- Your host and host session id, so the coordinator can record the session.
 - What was not verified.
 
 ## Prohibited

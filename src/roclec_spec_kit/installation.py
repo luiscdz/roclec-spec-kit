@@ -9,9 +9,11 @@ from pathlib import Path
 import shlex
 import shutil
 import tempfile
+import tomllib
 
 from . import __version__
 from .agents import bindings, is_binding_path
+from .flow import DEFAULT_VIEW, RETRO_PATH
 from .model import ModelError, digest, encoded, need, read_json, sha
 from .store import Store
 
@@ -73,6 +75,18 @@ def _generation(store, token):
     receipts = store.path(".roclec/receipts")
     names = sorted(p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []
     return digest({"inputs": token, "receipts": names})
+
+
+def _flow_view_path(store, writes):
+    """The view path the flow declares, read without validation (an invalid flow is reported elsewhere)."""
+    raw = writes.get(".roclec/flow.toml")
+    if raw is None:
+        raw = _current(store, ".roclec/flow.toml") or b""
+    try:
+        view = tomllib.loads(raw.decode("utf-8")).get("view", DEFAULT_VIEW)
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return DEFAULT_VIEW
+    return view
 
 
 def _current(store, relative):
@@ -162,6 +176,10 @@ def install(kernel, *, into=None, restore=False, adapter=False):
         # Consumer-owned like templates: seeded once, never managed, compared or pruned.
         if not store.path(".roclec/flow.toml").exists():
             writes[".roclec/flow.toml"] = assets.joinpath("project/flow.toml").read_bytes()
+        # The flow retrospective is project-owned too; skipped if the flow's view occupies its path.
+        if not store.path(RETRO_PATH).exists() and _flow_view_path(store, writes) != RETRO_PATH:
+            writes[RETRO_PATH] = assets.joinpath("project/flow-retro.md").read_bytes()
+            observed[RETRO_PATH] = None  # Outside the store token: recheck it is still absent under the lock.
         if not store.path(".roclec/constitution.md").exists() and not store.path(".specify/memory/constitution.md").exists():
             writes[".roclec/constitution.md"] = assets.joinpath("templates/constitution-template.md").read_bytes()
     for notice in assets.joinpath("notices").iterdir():

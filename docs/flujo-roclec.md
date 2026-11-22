@@ -53,6 +53,8 @@ flowchart LR
 
 Las diez etapas son fijas y van en este orden; el proyecto las parametriza, pero no agrega etapas, no las reordena ni quita sus puntos de control obligatorios (fundación, aprobación y diseño). Los puntos de control opcionales de implementar, integrar y release (`pre-implement`, `pre-integrate`, `handoff`) se activan declarándolos en esas etapas. Un gancho nuevo requeriría su propio hallazgo. El detalle del archivo, los acuerdos y los comandos está en [El flujo declarado](c1.md#el-flujo-declarado).
 
+Cada etapa también declara `session_evidence`. El flujo sembrado la exige (`required`) en todas las etapas con IA: el gate que cierra la etapa pide al menos una sesión de agente importada que cite el cambio y la etapa, y falla con `SESSION_REQUIRED` si falta. La etapa de aprobación, al ser `ai = false`, no puede exigirla. El proyecto puede relajarla a `optional` y volver a acordar el flujo. Qué se guarda y cómo se versiona está en [Sesiones de agente](c2.md#sesiones-de-agente-como-evidencia).
+
 La etapa de aprobación es siempre de una persona (`ai = false`). Para una etapa sin IA, Roclec registra el actor declarado y no puede probar quién la ejecutó.
 
 ## Iniciar un cambio
@@ -88,6 +90,12 @@ El coordinador es tu propia sesión. Cuando el host admite subagentes, delega et
 - **Independencia declarada.** El gate rechaza una revisión que declara el mismo contexto que el run revisado. Roclec comprueba lo declarado, no la independencia real.
 
 [Roles, archivos y modelo por rol](c3.md#roles-de-agente)
+
+## Sesiones y aprendizaje del flujo
+
+Al cerrar una etapa con `session_evidence = "required"`, el coordinador registra la sesión de cada rol que intervino con `roclec evidence record --kind agent-session`, o te pide la exportación si el agente no puede obtenerla; nunca inventa un transcript. Roclec guarda el archivo sin interpretarlo, con su huella SHA-256. Los registros que esa sesión produjo la citan con `--session`, y la revisión independiente cita en `context` la sesión del revisor. La política `[sessions] storage` decide qué queda en Git (`local`, `versioned-redacted` por defecto o `versioned-raw`). Los transcripts contienen código, rutas, nombres y posibles datos personales: revisa la política antes de versionarlos, porque la redacción solo cubre lo que el perfil declara. [Almacenamiento, privacidad y gates](c2.md#sesiones-de-agente-como-evidencia)
+
+Cuando una etapa te estorba, el coordinador lo captura como FUT de proceso (`scope` `process`) y, al acordar la nueva revisión del flujo, la decisión cita los FUT que atiende y el motivo. `roclec views --write` agrega a la vista del flujo la sección «Flow learning» con lo que muestran los registros, sin juicios: revisiones del flujo, rechazos por etapa, hallazgos, etapas sin IA y sesiones por rol y etapa. `docs/flow-retro.md`, que Roclec siembra una vez y no sobrescribe, es tu espacio para la reflexión que los datos no derivan. [Aprendizaje del flujo](c2.md#aprendizaje-del-flujo)
 
 ## Hallazgos de revisión
 

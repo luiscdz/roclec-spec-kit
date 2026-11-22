@@ -19,6 +19,7 @@ A coordinator brief with: change ID, component, approved `proposal_digest`, appl
 ## Outputs
 
 - A candidate and a `run verify` record for the component and digest in the brief.
+- Your host and host session id, so the coordinator can record the session.
 - A summary of the diff and of what remains unverified, including ACs without meaningful checks and the finding keys addressed.
 
 ## Prohibited
