@@ -15,4 +15,4 @@ Import only through the native launcher:
 ./.roclec/run --json check --change CHG-ID --gate approve
 ```
 
-The structural gate does not approve intent. Run `change approve` only when an actual actor has authorized the exact current digest. Remove staging files only after confirming the native import, and never use a rename whose destination is inside its source.
+The structural gate does not approve intent. Run `change approve` only when an actual actor has authorized the exact current digest. Use `change approve CHG-ID --digest DIGEST --actor ACTOR --reason TEXT --criteria FILE`, where FILE is that actor's evaluation of the approve criteria of `.roclec/flow.toml`. Remove staging files only after confirming the native import, and never use a rename whose destination is inside its source.

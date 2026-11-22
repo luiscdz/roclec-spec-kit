@@ -16,3 +16,5 @@ Inspect the change and applicable source decisions. Turn every `coverage` gap in
 When an answer meets the ADR criterion of `roclec-specify`, record it as a proposed ADR and update `architecture_decisions` instead of burying it in the proposal. Editing an accepted ADR makes it stale and blocks implementation until the user agrees it again; to change an accepted decision, prefer a new ADR registered with `--supersedes` the old one.
 
 Inspect rejection history and incorporate every requested correction in the revision. Link the rejection and each correction through `semantic.addresses`; mark a correction disputed only with a reason and return it to the coordinator for the user's decision.
+
+A user's answer to a question is not the approve decision: present the revised digest to the coordinator, which asks the approve criteria (`--criteria FILE`) of the declared flow. Deliver the stage's `deliverables` from `.roclec/flow.toml` when declared.

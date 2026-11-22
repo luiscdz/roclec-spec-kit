@@ -13,3 +13,5 @@ Review the authoritative requirement/AC snapshots and proposal, plan when releva
 Use the consumer-owned checklist template/format and preserve existing IDs and reviewed evidence. Each item reviews the requirements themselves; a list of user clicks is not a requirements-quality check. Record an item as checked only after actually reviewing it. Keep unresolved material decisions visible with their impact and consult the user only when existing decisions do not settle them.
 
 Run `check` and, for a change definition, `check --change CHG-ID --gate approve` to report deterministic results separately from semantic findings. Neither those checks nor a completed checklist approve intent, execute product tests, integrate a component or publish a release. Status is derived from native records; do not write a done field or edit generated views. Complete the authorized review and report findings, evidence, limitations and one useful next action.
+
+Deliver the declared `deliverables` of the stage in `.roclec/flow.toml` when present. A checklist result is not a person's criteria evaluation; approvals use `--criteria FILE` through the coordinator.
