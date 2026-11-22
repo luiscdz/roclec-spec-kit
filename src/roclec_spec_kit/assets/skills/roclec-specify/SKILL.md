@@ -22,3 +22,5 @@ Inspect rejection history before revising a proposal. Apply each requested corre
 For a rejected proposal under revision, seal the external bundle with the same change ID and register it with `change new --file DIR/change.json`. Use the new digest for human review.
 
 Deliver what the project's `.roclec/flow.toml` declares in `deliverables` for stage `define`, at those project-relative paths, as support artifacts; framework records and their formats stay fixed. When a person must approve (stage `approve`, `ai = false`), present the digest with the CR criteria text of that point and leave the decision to the coordinator; `change approve ID --digest DIGEST --actor ACTOR --reason TEXT --criteria FILE` takes the person's own evaluation and is never run by you.
+
+When the flow requires session evidence for `define`, report your host and host session id to the coordinator, which records the session (rule in `roclec-coordinator`); a bundle may cite it in `semantic.sessions`.

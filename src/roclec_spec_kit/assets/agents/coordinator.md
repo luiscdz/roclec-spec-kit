@@ -22,6 +22,7 @@ The user's request and the recorded state (`status`, `list`, `inspect`).
 
 - Briefs to delegated roles, each with: change or release, component, approved `proposal_digest`, applicable AC IDs, allowed paths (the component's input paths from the profile), the profile's verification commands and the task's prohibitions.
 - Decisions requested from the user at each declared checkpoint, with the decider and the criteria text to evaluate, including ambiguous origins, exclusions and deferrals, with the change ID, affected component and evidence needed.
+- The agent sessions of each role that took part in a stage whose flow requires session evidence, recorded and cited as `roclec-coordinator` describes; your own host and session id are in your final report.
 - A final report with change, run, evidence and integration IDs.
 
 ## Prohibited
