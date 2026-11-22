@@ -15,6 +15,9 @@ LINK_PATH = Path(".roclec/link.toml")
 DEFAULT_LOG_QUOTA = 16 * 1024 * 1024
 DEFAULT_MAX_LOG_BYTES = 0
 FINDING_SEVERITIES = ("info", "minor", "major", "blocker")
+# Agent-session transcripts (M-34): where the imported copy lives and the per-session size limit.
+SESSION_STORAGES = ("versioned-redacted", "local", "versioned-raw")
+SESSION_DEFAULTS = {"storage": "versioned-redacted", "quota_bytes": 16 * 1024 * 1024}
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -145,6 +148,11 @@ class Profile:
         return (self.root / self.components[component]["repo"]).resolve()
 
     @property
+    def sessions(self) -> dict:
+        """Agent-session storage policy and per-session quota, with defaults."""
+        return {**SESSION_DEFAULTS, **self.data.get("sessions", {})}
+
+    @property
     def adr(self) -> dict:
         """ADR location and structure, with the shipped template's defaults (D13)."""
         return {**ADR_DEFAULTS, **self.data.get("adr", {})}
@@ -217,7 +225,7 @@ def validate_profile(root: Path, data: dict) -> Profile:
          exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
          remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
     fields(data, ("schema", "name", "components", "trunk_ref"),
-           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr", "review"))
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr", "review", "sessions"))
     validate_ref(data["trunk_ref"], "refs/heads/")
     if "agents" in data:
         validate_agents(data["agents"])
@@ -229,6 +237,16 @@ def validate_profile(root: Path, data: dict) -> Profile:
     need(review.get("material_severity", "major") in FINDING_SEVERITIES,
          "INVALID_INPUT", "Unknown review.material_severity", exit_code=2,
          expected=list(FINDING_SEVERITIES), actual=review.get("material_severity"))
+    sessions = data.get("sessions", {})
+    need(isinstance(sessions, dict), "INVALID_INPUT", "sessions must be a table", exit_code=2,
+         remediation="Write [sessions] with storage or quota_bytes, or remove it to use the defaults.")
+    fields(sessions, (), tuple(SESSION_DEFAULTS))
+    need(sessions.get("storage", SESSION_DEFAULTS["storage"]) in SESSION_STORAGES, "INVALID_INPUT",
+         "Unknown sessions.storage", exit_code=2, expected=list(SESSION_STORAGES), actual=sessions.get("storage"),
+         remediation="Use one of: " + ", ".join(SESSION_STORAGES) + ".")
+    session_quota = sessions.get("quota_bytes", SESSION_DEFAULTS["quota_bytes"])
+    need(type(session_quota) is int and session_quota > 0, "INVALID_INPUT", "sessions.quota_bytes must be a positive integer",
+         exit_code=2, actual=session_quota, remediation="Set quota_bytes to a positive number of bytes, or remove it.")
     quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
     excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),

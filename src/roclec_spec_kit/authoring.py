@@ -59,7 +59,8 @@ def seal(kernel, folder, *, check=False):
          "ID_COLLISION", "Change ID already exists", entity=change_id)
     semantic = record["semantic"]
     fields(semantic, ("intention", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-           ("files", "baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes"))
+           ("files", "baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes",
+            "sessions"))
     if "architecture_decisions" in semantic and "adrs" in declaration(semantic["architecture_decisions"], sealed=False):
         pin_adrs(kernel, semantic["architecture_decisions"])
     need(isinstance(semantic.get("prototypes", []), list), "INVALID_INPUT", "prototypes must be a list", exit_code=2)
@@ -72,6 +73,14 @@ def seal(kernel, folder, *, check=False):
             entry["sha256"] = sha(source.read_bytes())
     if "prototypes" in semantic:
         semantic["prototypes"] = sorted(semantic["prototypes"], key=lambda entry: entry["path"])
+    if "sessions" in semantic:
+        # Sessions that drafted this bundle: existing agent sessions of this change, sorted; omitted when empty.
+        from .sessions import cite
+        cited = cite(kernel, semantic["sessions"], change_id=change_id)
+        if cited:
+            semantic["sessions"] = cited
+        else:
+            del semantic["sessions"]
     manifest = semantic.get("files", {})
     need(isinstance(manifest, dict), "INVALID_INPUT", "files must be an object", exit_code=2)
     captures = captured_paths(semantic["origins"], entity=change_id) if "origins" in semantic else ()

@@ -92,7 +92,7 @@ class FlowConformanceTest(unittest.TestCase):
         self.assertEqual(approve["checkpoint"], {"decider": "owner", "criteria": ["CR-002", "CR-003"],
                                                  "on_reject": "revise", "hook": None})
         self.assertEqual(approve["change"], {
-            "status": "pending", "record": None, "actor": None, "criteria": [],
+            "status": "pending", "record": None, "actor": None, "criteria": [], "sessions": [],
             "pending": {"decider": "owner", "criteria": [
                 {"id": "CR-002", "text": "Every origin criterion is covered, excluded or deferred."},
                 {"id": "CR-003", "text": "The proposal states the intended behavior."}]}})
@@ -108,7 +108,7 @@ class FlowConformanceTest(unittest.TestCase):
         self.assertTrue(any("design" in issue["message"] for issue in viewer["issues"]))
         self.assertEqual(stages["design"]["components"]["engine"]["status"], "n/a")
         self.assertEqual(stages["design"]["components"]["viewer"], {"status": "n/a", "record": None, "actor": None,
-                                                                    "criteria": [], "prototypes": []})
+                                                                    "criteria": [], "prototypes": [], "sessions": []})
         for name in ("plan", "implement", "verify", "integrate", "release"):
             self.assertEqual(stages[name]["components"]["engine"]["status"], "pending", name)
             self.assertNotIn("hook", stages[name]["components"]["engine"], "undeclared hooks are not listed")

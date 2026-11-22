@@ -12,6 +12,7 @@ import re
 import subprocess
 
 from . import flow as project_flow
+from . import sessions as agent_sessions
 from .adr import Adrs, adr_ids, declaration, in_folder, is_adr, supersession
 from .config import Profile, load_profile, validate_profile
 from .model import (ModelError, checked_files, digest, encoded, fields, fingerprint, identifier,
@@ -27,6 +28,12 @@ REFERENCE_ID = r"[a-z][a-z0-9-]*"
 HUMAN_STAGE_LIMITATION = ("Roclec records the actor declared in this stage's decisions; "
                           "it cannot prove who performed a stage with ai = false.")
 STAGE_HOOKS = {stage: hook for hook, stage in project_flow.HOOKS.items()}
+# TL.4: stages whose required agent session each change gate demands (cumulative through Kernel.gate).
+# define and foundation are demanded at approve/agree and re-checked at implement, where the flow is the agreed one.
+GATE_SESSIONS = {"implement": ("define", "design", "plan"), "verify": ("implement",), "integrate": ("implement", "verify", "review")}
+# Decisions that may cite the agent sessions that produced them (TL.3).
+SESSION_DECISIONS = {"change-approve", "change-cancel", "change-start", "foundation", "rejection", "checkpoint", "fut-decide"}
+FUT_SCOPES = ("product", "process")
 
 
 class Kernel:
@@ -77,15 +84,23 @@ class Kernel:
         # Never overwrite an existing view at init; `views --write` owns regeneration.
         view = store.path(flow["view"])
         if not view.exists():
+            # A new project has no records: its learning section is the empty projection.
             writes[flow["view"]] = project_flow.render(flow, profile.data)
             payload["flow_view"] = flow["view"]
+        # The retrospective is consumer-owned like the flow: seeded when absent, never overwritten.
+        retro = store.path(project_flow.RETRO_PATH)
+        if flow["view"] != project_flow.RETRO_PATH and not retro.exists():
+            writes[project_flow.RETRO_PATH] = package_files("roclec_spec_kit").joinpath("assets/project/flow-retro.md").read_bytes()
         ignore = store.path(".gitignore")
         ignored = ignore.read_bytes() if ignore.exists() else b""
         if b".roclec/runtime/" not in ignored.splitlines():
             writes[".gitignore"] = ignored + (b"\n" if ignored and not ignored.endswith(b"\n") else b"") + b".roclec/runtime/\n"
-        receipt = store.apply("init", payload, writes, token,
-                              validate=lambda: need(view.exists() == ("flow_view" not in payload), "BASE_CONFLICT",
-                                                    "Project inputs changed during validation", exit_code=3, path=flow["view"]))
+        def unchanged():
+            need(view.exists() == ("flow_view" not in payload), "BASE_CONFLICT",
+                 "Project inputs changed during validation", exit_code=3, path=flow["view"])
+            need(project_flow.RETRO_PATH not in writes or not retro.exists(), "BASE_CONFLICT",
+                 "Project inputs changed during validation", exit_code=3, path=project_flow.RETRO_PATH)
+        receipt = store.apply("init", payload, writes, token, validate=unchanged)
         return {"profile_schema": 3, "components": sorted(profile.components), "receipt": receipt, "increment": "C3"}
 
     def current(self):
@@ -191,6 +206,65 @@ class Kernel:
         rows = project_flow.evaluate(parsed, point, [] if criteria is None else criteria, outcome=outcome)
         return rows, sha(raw)
 
+    def _cited(self, sessions, **scope):
+        """The `sessions` key of a new decision: validated citations, omitted when none (TL.3)."""
+        cited = agent_sessions.cite(self, list(sessions or ()), **scope)
+        return {"sessions": cited} if cited else {}
+
+    def require_session(self, stage, parsed, *, change_id=None, component=None, subject=None, release=None,
+                        any_component=False, sessions=None):
+        """SESSION_REQUIRED unless `stage` is optional in `parsed` or a session cites its scope (TL.4).
+
+        Any session of that stage and scope counts; it is not bound to digests or candidates.
+        Returns the matching session IDs, or None when the stage does not require one.
+        """
+        row = next(r for r in parsed["stages"] if r["name"] == stage)
+        if row["session_evidence"] != "required":
+            return None
+        if sessions is None:
+            from .verification import Verification
+            sessions = Verification(self).sessions(change_id)
+        found = [s["id"] for s in sessions if agent_sessions.matches(s, stage, change_id=change_id, component=component,
+                                                                     subject=subject, release=release,
+                                                                     any_component=any_component)]
+        if found:
+            return found
+        entity = (subject if stage == "foundation" else f"{release['component']}/{release['version']}" if stage == "release"
+                  else "/".join(filter(None, (change_id, component))))
+        raise ModelError("SESSION_REQUIRED", f"The {stage} stage requires an agent session", entity=entity, expected=stage,
+                         path=project_flow.FLOW_PATH,
+                         remediation=agent_sessions.required_hint(stage, change_id=change_id, component=component,
+                                                                  subject=subject, release=release)
+                         + f' Or set session_evidence = "optional" on [stages.{stage}] and agree the flow again.')
+
+    def require_gate_sessions(self, change_id, component, gate, parsed=None, *, subjects=()):
+        """Sessions a change gate demands for one component (GATE_SESSIONS); a disabled review needs none.
+
+        `subjects` are the foundation references the component depends on: with a required foundation
+        stage, each needs its session (re-checked at implement, where the flow bytes are agreed).
+        """
+        if parsed is None:
+            parsed = self._flow()[0]
+        required = {row["name"] for row in parsed["stages"] if row["session_evidence"] == "required"}
+        stages = [stage for stage in GATE_SESSIONS[gate] if stage in required]
+        subjects = sorted(subjects) if "foundation" in required else []
+        if not stages and not subjects:
+            return  # Nothing demanded: session records are not even read.
+        from .verification import Verification
+        verifier = Verification(self)
+        if subjects:
+            every = verifier.sessions()
+            for subject in subjects:
+                self.require_session("foundation", parsed, subject=subject, sessions=every)
+        sessions = verifier.sessions(change_id)
+        for stage in stages:
+            if stage == "design" and not self.profile.components[component]["user_facing"]:
+                continue
+            if stage == "review" and not verifier.policy(change_id)["enabled"]:
+                continue
+            self.require_session(stage, parsed, change_id=change_id, component=component,
+                                 any_component=stage in {"define", "plan"}, sessions=sessions)
+
     def write_reference(self, action, ref_id, path, components, role, supersedes=()):
         refs = self.references()
         if action == "update" and ref_id in refs:
@@ -220,7 +294,7 @@ class Kernel:
         return {"reference": ref, "receipt": receipt}
 
     def reject(self, subject_type, entity, subject_digest, actor, reason, *, consequence=None, corrections=(), fut=None,
-               criteria=None, addresses=None):
+               criteria=None, addresses=None, sessions=()):
         need(subject_type in project_flow.SUBJECT_POINTS, "INVALID_INPUT", "Unknown rejection subject", exit_code=2)
         service = Rejections(self)
         if subject_type == "change":
@@ -253,6 +327,11 @@ class Kernel:
         if addresses is not None:
             service.require_addresses(subject_type, entity, pin, addresses)
             extra["addresses"] = addresses
+        # A change rejection cites that change's sessions, an ADR or reference rejection its foundation
+        # sessions; a prototype rejection any recorded session.
+        scope = ({"change_id": entity} if subject_type == "change" else
+                 {"subject": entity} if subject_type in {"adr", "reference"} else {})
+        extra.update(self._cited(sessions, **scope))
         decision, path = self._decision("rejection", entity, actor, reason, **extra)
         writes = {path: encoded(decision)}
         for relative, data in files.items():
@@ -282,7 +361,7 @@ class Kernel:
         result["receipt"] = self.store.apply("reject", {"id": entity, "subject": subject, "source_guards": source_guards}, writes, self.token)
         return result
 
-    def checkpoint(self, entity, subject_digest, actor, reason, *, outcome, addresses=None, criteria=None):
+    def checkpoint(self, entity, subject_digest, actor, reason, *, outcome, addresses=None, criteria=None, sessions=()):
         need(outcome == "approved", "INVALID_INPUT", "Use reject prototype with corrections for a rejected checkpoint", exit_code=2)
         service = Rejections(self)
         pin, _ = service.subject("prototype", entity)
@@ -290,6 +369,7 @@ class Kernel:
         service.require_addresses("prototype", entity, pin, addresses)
         evaluated, flow_pin = self._evaluate("design", criteria, outcome)
         extra = {"addresses": addresses} if addresses is not None else {}
+        extra.update(self._cited(sessions))
         decision, path = self._decision("checkpoint", entity, actor, reason,
                                         subject={"type": "prototype", "entity": entity, "digest": pin}, outcome=outcome,
                                         criteria=evaluated, flow=flow_pin, **extra)
@@ -302,7 +382,7 @@ class Kernel:
                 and d["hook"] == hook and d["component"] == component]
 
     def stage_checkpoint(self, change_id, hook, component, subject_digest, actor, reason, *, outcome, criteria=None,
-                         run=None, consequence=None, corrections=(), fut=None, addresses=None):
+                         run=None, consequence=None, corrections=(), fut=None, addresses=None, sessions=()):
         """Human decision at a flow hook on one change component (section 7.3).
 
         Subjects are immutable records: the proposal (pre-implement), a passed run candidate
@@ -377,6 +457,7 @@ class Kernel:
             extra["addresses"] = addresses
         if run is not None:
             extra["run"] = run
+        extra.update(self._cited(sessions, change_id=change_id))
         evaluated, flow_pin = self._evaluate(hook, criteria, outcome, flow)
         subject = {"type": "stage", "entity": change_id, "digest": pin}
         decision, path = self._decision("checkpoint", change_id, actor, reason, subject=subject, hook=hook,
@@ -498,7 +579,7 @@ class Kernel:
             need(view["state"] == "approved" and view["sha256"] == entry["sha256"], "PROTOTYPE_NOT_APPROVED",
                  "Cited prototype needs approval on its current pinned bytes", path=entry["path"], actual=view["state"])
 
-    def agree_foundation(self, ref_id, actor, reason, *, addresses=None, criteria=None):
+    def agree_foundation(self, ref_id, actor, reason, *, addresses=None, criteria=None, sessions=(), futs=()):
         need(text(actor) and text(reason), "INVALID_INPUT", "Actor and reason are required", exit_code=2)
         refs = self.references()
         need(ref_id in refs, "INVALID_REFERENCE", "Unknown foundation reference", entity=ref_id)
@@ -511,10 +592,16 @@ class Kernel:
             # Agreement freezes exactly these bytes, so they must be a valid flow.
             project_flow.parse(content, self.profile.root)
         Rejections(self).require_addresses("adr" if ref["role"] == "decision" else "reference", ref_id, sha(content), addresses)
-        evaluated, flow_pin = self._evaluate("foundation", criteria, "approved")
+        flow = self._flow()
+        evaluated, flow_pin = self._evaluate("foundation", criteria, "approved", flow)
         extra = {"supersedes": list(ref["supersedes"])} if ref["role"] == "decision" else {}
         if addresses is not None:
             extra["addresses"] = addresses
+        cited = self._process_futs(ref, futs)
+        if cited:
+            extra["futs"] = cited
+        extra.update(self._cited(sessions, subject=ref_id))
+        self.require_session("foundation", flow[0], subject=ref_id)
         decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)},
                                         criteria=evaluated, flow=flow_pin, **extra)
         decision_id = decision["id"]
@@ -523,6 +610,27 @@ class Kernel:
                   path: encoded(decision)}
         receipt = self.store.apply("foundation-agree", {"id": ref_id}, writes, self.token)
         return {"reference": ref, "decision": decision, "receipt": receipt}
+
+    def _process_futs(self, ref, futs):
+        """FUTs a process agreement addresses (TL.5): captured or evaluating process FUTs, sorted and unique."""
+        if not futs:
+            return []
+        need(ref["role"] == "process", "INVALID_INPUT", "Only an agreement of the process reference cites FUTs", exit_code=2,
+             entity=ref["id"], actual=ref["role"],
+             remediation="Remove --fut, or cite the process FUTs when agreeing the flow reference.")
+        result = sorted(set(futs))
+        for fut_id in result:
+            identifier(fut_id, "FUT")
+            need(self.store.path(f".roclec/futs/{fut_id}.json").is_file(), "INVALID_REFERENCE", "Unknown FUT", exit_code=2,
+                 entity=fut_id, remediation="Capture the friction first with fut capture --file FILE (scope process).")
+            view = self.inspect_fut(fut_id)
+            need(view["scope"] == "process", "INVALID_REFERENCE", "A flow agreement cites only process FUTs", exit_code=2,
+                 entity=fut_id, actual=view["scope"],
+                 remediation="Cite FUTs captured with scope process; a product FUT is promoted to a change.")
+            need(view["status"] in {"captured", "evaluating"}, "INVALID_REFERENCE", "The cited FUT is already resolved",
+                 exit_code=2, entity=fut_id, actual=view["status"],
+                 remediation="Reopen it with fut decide --outcome evaluating, or cite an open process FUT.")
+        return result
 
     def foundation(self, component, change=None):
         self.profile.repo(component)
@@ -541,7 +649,7 @@ class Kernel:
                 need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE", "Reference has no agreement", entity=ref["id"])
                 decision = self.read(f".roclec/decisions/{ref['decision_id']}.json")
                 fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"),
-                       ("addresses", "criteria", "flow"))
+                       ("addresses", "criteria", "flow", "sessions", "futs"))
                 need(decision["id"] == ref["decision_id"] and decision["kind"] == "foundation"
                      and decision["status"] == "agreed" and text(decision["actor"]) and text(decision["reason"]),
                      "FOUNDATION_INCOMPLETE", "Reference decision is not agreed", entity=ref["id"])
@@ -601,9 +709,13 @@ class Kernel:
              "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2)
         semantic = record["semantic"]
         fields(semantic, ("intention", "files", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-               ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes"))
+               ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes",
+                "sessions"))
         if "addresses" in semantic:
             addresses(semantic["addresses"])
+        if "sessions" in semantic:
+            # Shape only on read; existence and scope are checked when the bundle is sealed or imported.
+            agent_sessions.ids(semantic["sessions"])
         self._prototypes(semantic.get("prototypes", []))
         scope = strings(semantic["components"], nonempty=True)
         if "architecture_decisions" in semantic:
@@ -817,6 +929,7 @@ class Kernel:
         existing = self.store.path(destination).exists()
         need(not existing or Rejections(self).revising(change_id), "ID_COLLISION", "Change ID already exists", entity=change_id)
         record, files, new_ids = self.change(change_id, source=source_file.parent, check_base=True)
+        agent_sessions.cite(self, record["semantic"].get("sessions"), change_id=change_id)
         if existing:
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
             self.preserve_integrated(record)
@@ -850,7 +963,7 @@ class Kernel:
             record = self.read(path.relative_to(self.profile.root).as_posix())
             fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
                    ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes", "subject", "consequence", "corrections", "criteria", "fut", "files", "addresses", "rejection", "flow",
-                    "hook", "run"))
+                    "hook", "run", "sessions", "futs"))
             fingerprint(record["id"])
             need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
             seen.add(record["id"])
@@ -910,6 +1023,15 @@ class Kernel:
                  "INVALID_INPUT", "Only an ADR agreement records supersedes", exit_code=2, path=path.name)
             if "addresses" in record:
                 addresses(record["addresses"])
+            if "sessions" in record:
+                need(record["kind"] in SESSION_DECISIONS, "INVALID_INPUT", "This decision cannot cite agent sessions",
+                     exit_code=2, path=path.name)
+                agent_sessions.ids(record["sessions"])
+            if "futs" in record:
+                need(record["kind"] == "foundation" and not is_adr(record["entity"]), "INVALID_INPUT",
+                     "Only a process agreement cites FUTs", exit_code=2, path=path.name)
+                for fut_id in strings(record["futs"], nonempty=True):
+                    identifier(fut_id, "FUT")
             chain = self._decision_chain(record)
             previous = record["previous"]
             existing = chains[chain].get(previous)
@@ -977,7 +1099,7 @@ class Kernel:
             need(pointer == record["id"], "INVALID_ORIGIN", "FUT origin resolves to another target", entity=origin["id"],
                  expected=record["id"], actual=pointer, remediation="Use a FUT promoted or duplicate toward this change")
 
-    def approve(self, change_id, proposal_digest, actor, reason, *, criteria=None):
+    def approve(self, change_id, proposal_digest, actor, reason, *, criteria=None, sessions=()):
         record, files, new_ids = self.change(change_id, check_base=True)
         self.preserve_integrated(record)
         need(not any(d["kind"] == "change-cancel" for d in self.decisions(change_id)),
@@ -988,8 +1110,11 @@ class Kernel:
         Adrs(self).approvable(record)
         # The approval records the flow it was given under and the evaluation of its criteria;
         # agreement of that flow is enforced at implement.
-        evaluated, flow_pin = self._evaluate("approve", criteria, "approved")
+        flow = self._flow()
+        evaluated, flow_pin = self._evaluate("approve", criteria, "approved", flow)
+        self.require_session("define", flow[0], change_id=change_id)
         extra = {"addresses": record["semantic"]["addresses"]} if "addresses" in record["semantic"] else {}
+        extra.update(self._cited(sessions, change_id=change_id))
         decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest,
                                         criteria=evaluated, flow=flow_pin, **extra)
         writes = {path: encoded(decision)}
@@ -1036,7 +1161,7 @@ class Kernel:
             self._origin_approval(record)
             Adrs(self).approvable(record)
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
-            self._flow()
+            self.require_session("define", self._flow()[0], change_id=change_id)
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
         self._approved(record)
@@ -1052,6 +1177,8 @@ class Kernel:
             Adrs(self).gate(record)
             self._prototype_gate(record)
             self.require_checkpoint(change_id, component, "pre-implement", record["proposal_digest"])
+            self.require_gate_sessions(change_id, component, "implement",
+                                       subjects=[ref["id"] for ref in foundation["references"]])
         assignments = [(r, entry) for r in self.releases() if r["record"]["component"] == component
                        for entry in r["record"]["changes"] if entry["change_id"] == change_id
                        and entry["intent_revision"] == record["proposal_digest"]]
@@ -1065,17 +1192,20 @@ class Kernel:
         if stage in {"verify", "integrate"}:
             from .verification import Verification
             verified = Verification(self).verify(change_id, component, final=stage == "integrate")
+            if not integrated:
+                self.require_gate_sessions(change_id, component, stage)
             if stage == "integrate" and not integrated:
                 self.require_checkpoint(change_id, component, "pre-integrate", verified["candidate"]["inputs_digest"],
                                         run=verified["run_id"])
             return {**verified, "gate": stage}
         return {"change": change_id, "component": component, "gate": stage, "release": assignments[0][0]["record"]["version"]}
 
-    def start(self, change_id, component, actor):
+    def start(self, change_id, component, actor, *, sessions=()):
         result = self.gate(change_id, component, "implement")
         record, _, _ = self.change(change_id)
         decision, path = self._decision("change-start", change_id, actor, "Implementation prerequisites satisfied",
-                                        proposal_digest=record["proposal_digest"], component=component)
+                                        proposal_digest=record["proposal_digest"], component=component,
+                                        **self._cited(sessions, change_id=change_id))
         receipt = self.store.apply("change-start", {"id": change_id, "component": component,
                                    "proposal_digest": record["proposal_digest"]}, {path: encoded(decision)}, self.token)
         return {**result, "status": "in-progress", "receipt": receipt}
@@ -1091,11 +1221,12 @@ class Kernel:
                  "INVALID_REFERENCE", "An integrated revision requires a new reversal change")
         return pending
 
-    def cancel(self, change_id, actor, reason):
+    def cancel(self, change_id, actor, reason, *, sessions=()):
         record, _, _ = self.change(change_id)
         pending = self._cancelable_components(record)
         decision, path = self._decision("change-cancel", change_id, actor, reason,
-                                        proposal_digest=record["proposal_digest"], components=pending)
+                                        proposal_digest=record["proposal_digest"], components=pending,
+                                        **self._cited(sessions, change_id=change_id))
         receipt = self.store.apply("change-cancel", {"id": change_id, "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "status": "canceled" if len(pending) == len(record["semantic"]["components"]) else "partially-integrated", "receipt": receipt}
 
@@ -1236,13 +1367,41 @@ class Kernel:
                 integrations[component] = self.integration(change_id, component)
             except ModelError:
                 integrations[component] = None  # Reported by the integrate stage.
+        # TL.3: the agent sessions behind each stage. Unreadable session records are reported once.
+        session_issues = []
+        try:
+            sessions = verifier.sessions()
+        except ModelError as exc:
+            sessions, session_issues = [], [exc.issue]
+        try:
+            references = self.references()
+        except ModelError:
+            references = {}  # Reported by the foundation stage.
 
-        def guarded(build, component):
+        def stage_sessions(name, component=None):
+            if name == "foundation":
+                subjects = {ref_id for ref_id, ref in references.items() if component in ref["components"]}
+                return [s["id"] for s in sessions if s["stage"] == name and s.get("subject") in subjects]
+            if name == "release":
+                versions = {(r["record"]["component"], r["record"]["version"]) for r in self.releases()
+                            if r["record"]["component"] == component
+                            and any(m["change_id"] == change_id for m in r["record"]["changes"])}
+                return [s["id"] for s in sessions if s["stage"] == name
+                        and (s["release"]["component"], s["release"]["version"]) in versions]
+            return [s["id"] for s in sessions if s["stage"] == name and s.get("change_id") == change_id
+                    and (component is None or s.get("component") in (None, component))]
+
+        def guarded(build, component, name):
             try:
                 entry = build(component)
             except ModelError as exc:
-                return self._entry("blocked", issue=exc.issue)
-            return withdrawn(entry, component)
+                entry = self._entry("blocked", issue=exc.issue)
+            else:
+                entry = withdrawn(entry, component)
+            try:
+                return {**entry, "sessions": stage_sessions(name, component)}
+            except ModelError:
+                return {**entry, "sessions": []}  # An unreadable release is already reported by its stage.
 
         def withdrawn(entry, component):
             # A canceled component never proceeds: what it still awaited is blocked, not pending.
@@ -1408,6 +1567,7 @@ class Kernel:
             stage["checkpoint"] = {**checkpoint, "hook": STAGE_HOOKS.get(name)} if checkpoint else None
             if name == "define":
                 stage["change"] = self._entry("done", pin, sealed=True)
+                stage["change"]["sessions"] = stage_sessions(name)
             elif name == "approve":
                 if approval_current:
                     stage["change"] = self._decided("done", approval, flow=approval.get("flow"))
@@ -1419,11 +1579,15 @@ class Kernel:
                         stage["change"] = self._entry("blocked", canceled=canceled[components[0]])
                     else:
                         stage["change"] = self._entry("pending", pending=self._point(checkpoint, texts))
+                stage["change"]["sessions"] = stage_sessions(name)
             else:
-                stage["components"] = {c: guarded(builders[name], c) for c in components}
+                stage["components"] = {c: guarded(builders[name], c, name) for c in components}
             stages.append(stage)
-        return {"sha256": sha(raw), "agreed": not agreement, "agreement_issues": agreement,
-                "approved_under": approval.get("flow") if current_approval else None, "stages": stages}
+        result = {"sha256": sha(raw), "agreed": not agreement, "agreement_issues": agreement,
+                  "approved_under": approval.get("flow") if current_approval else None, "stages": stages}
+        if session_issues:
+            result["session_issues"] = session_issues
+        return result
 
     def list_records(self, category, *, origin=None, open_only=False):
         need(origin is None or (category == "changes" and text(origin)), "INVALID_INPUT",
@@ -1443,8 +1607,8 @@ class Kernel:
         if category == "adrs":
             return Adrs(self).list()
         if category == "futs":
-            return [{"id": path.stem, "status": self.inspect_fut(path.stem)["status"]}
-                    for path in sorted(self.store.path(".roclec/futs").glob("*.json"))]
+            views = (self.inspect_fut(path.stem) for path in sorted(self.store.path(".roclec/futs").glob("*.json")))
+            return [{"id": view["fut"]["id"], "scope": view["scope"], "status": view["status"]} for view in views]
         from .verification import Verification
         verifier = Verification(self)
         result = []
@@ -1481,9 +1645,13 @@ class Kernel:
         return {"project": self.profile.data["name"], "components": components}
 
     def _fut_record(self, record):
-        fields(record, ("model_schema", "id", "source", "finding", "impact", "questions"))
+        fields(record, ("model_schema", "id", "source", "finding", "impact", "questions"), ("scope",))
         schema(record)
         identifier(record["id"], "FUT")
+        # TL.5: a FUT without scope is a product FUT; old records are never rewritten.
+        need(record.get("scope", "product") in FUT_SCOPES, "INVALID_INPUT", "Unknown FUT scope", exit_code=2,
+             expected=list(FUT_SCOPES), actual=record.get("scope"),
+             remediation="Use scope product (behavior to build) or process (friction in the project flow), or omit it.")
         fields(record["source"], ("location", "locator"))
         need(all(text(record[k]) for k in ("finding", "impact")) and all(text(v) for v in record["source"].values())
              and isinstance(record["questions"], list) and all(text(v) for v in record["questions"]),
@@ -1502,10 +1670,16 @@ class Kernel:
         identifier(fut_id, "FUT")
         record = self._fut_record(self.read(f".roclec/futs/{fut_id}.json"))
         need(record.get("id") == fut_id, "INVALID_REFERENCE", "FUT identity mismatch")
-        decisions = [d for d in self.decisions(fut_id) if d["kind"] == "fut-decide"]
-        return {"fut": record, "status": decisions[-1]["outcome"] if decisions else "captured", "decisions": decisions}
+        every = self.decisions()
+        decisions = [d for d in every if d["entity"] == fut_id and d["kind"] == "fut-decide"]
+        # Friction -> flow adjustment -> reason: the process agreements that cite this FUT.
+        addressed = [{"decision": d["id"], "flow": d["sources"][d["entity"]], "reason": d["reason"], "actor": d["actor"]}
+                     for d in every if d["kind"] == "foundation" and fut_id in d.get("futs", [])]
+        return {"fut": record, "scope": record.get("scope", "product"),
+                "status": decisions[-1]["outcome"] if decisions else "captured", "decisions": decisions,
+                "addressed_by": addressed}
 
-    def decide_fut(self, fut_id, outcome, actor, reason, target=None):
+    def decide_fut(self, fut_id, outcome, actor, reason, target=None, *, sessions=()):
         current = self.inspect_fut(fut_id)
         need(outcome in {"evaluating", "promoted", "discarded", "duplicate"}, "INVALID_INPUT", "Unknown FUT outcome", exit_code=2)
         need((outcome in {"promoted", "duplicate"}) == (target is not None), "INVALID_REFERENCE",
@@ -1533,9 +1707,22 @@ class Kernel:
                 need(re.fullmatch(r"[a-zA-Z0-9-]+", target) is not None, "INVALID_INPUT", "Invalid target", exit_code=2)
                 decision = self.read(f".roclec/decisions/{target}.json")
                 need(decision.get("kind") == "foundation", "INVALID_REFERENCE", "Target must be a foundation decision")
+                ref = self.references().get(decision.get("entity"))
+                process = "futs" in decision or (ref is not None and ref["role"] == "process")
+                if current["scope"] == "process":
+                    need(fut_id in decision.get("futs", []), "INVALID_REFERENCE",
+                         "A process FUT is promoted only to the flow agreement that cites it", exit_code=2, entity=target,
+                         remediation=f"Agree the flow citing it (foundation agree --ref REF --fut {fut_id} ...) and "
+                                     "promote the FUT to that decision.")
+                else:
+                    need(not process, "INVALID_REFERENCE", "A product FUT cannot be promoted to a process agreement",
+                         exit_code=2, entity=target,
+                         remediation="Promote a product FUT to a change, capability or requirement, or capture the "
+                                     "friction as a process FUT.")
         need(current["status"] in {"captured", "evaluating"} or outcome == "evaluating", "INVALID_REFERENCE",
              "Reopen a resolved FUT with an explicit evaluating decision")
-        decision, path = self._decision("fut-decide", fut_id, actor, reason, outcome=outcome, target=target)
+        decision, path = self._decision("fut-decide", fut_id, actor, reason, outcome=outcome, target=target,
+                                        **self._cited(sessions))
         receipt = self.store.apply("fut-decide", {"id": fut_id, "outcome": outcome, "target": target,
                                    "actor": actor, "reason": reason}, {path: encoded(decision)}, self.token)
         return {"decision": decision, "status": outcome, "receipt": receipt}
@@ -1787,9 +1974,17 @@ class Kernel:
                     issue = ModelError("CHECK_ARGV_CHANGED", "Configured check commands changed since this run",
                                        entity=head["id"]).issue
                     warnings.append({**issue, "severity": "warning"})
+        session_records = []
         for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
             report = verifier.read_evidence(path, runs)
+            if report["kind"] == "agent-session":
+                session_records.append(report)
+                warnings.extend(verifier.session_issues(report))
+                continue
             reports[scope(report)].append(report)
+        from .sessions import policy_warnings, stray_warnings
+        warnings.extend(stray_warnings(self.store, session_records))
+        warnings.extend(policy_warnings(self.profile, session_records))
         from .findings import project as project_findings
         for records in reports.values():
             scoped_heads(records, verifier.report_scopes)
@@ -1879,8 +2074,13 @@ class Kernel:
                  projection(record, self.store.path(f".roclec/changes/{record['id']}")),
                  "INVALID_REFERENCE", "An integrated obligation needs a new change; rebase only pending participants", entity=component)
 
-    def _flow_view(self):
-        """Return (flow, view path, existing bytes, status), or None when the flow file is missing."""
+    def _flow_view(self, *, learning=False):
+        """Return (flow, view path, existing bytes, status, learning), or None when the flow file is missing.
+
+        Status and learning are computed only with `learning`: the status compares the full view,
+        whose learning section is projected from records (TL.6). Without it both are None (a caller
+        that needs only the view path reads no records).
+        """
         try:
             flow, _ = self._flow()
         except ModelError as exc:
@@ -1890,21 +2090,78 @@ class Kernel:
         relative = flow["view"]
         path = self.store.path(relative)
         existing = path.read_bytes() if path.is_file() else None
+        if not learning:
+            return flow, relative, existing, None, None
+        data = self._flow_learning()
         status = "edited" if path.exists() and existing is None else \
-            project_flow.view_status(flow, self.profile.data, existing)
-        return flow, relative, existing, status
+            project_flow.view_status(flow, self.profile.data, existing, data)
+        return flow, relative, existing, status, data
+
+    def _flow_learning(self):
+        """Records projected for the flow view's learning section (TL.6): counts and lists, no judgments.
+
+        Read-only. Every record is read through its usual validation, so unreadable records fail with
+        their usual errors. FUTs cited by an agreement but absent stay listed without their finding.
+        """
+        from .findings import project as project_findings
+        from .verification import Verification
+        decisions = self.decisions()
+        futs = {}
+        for path in sorted(self.store.path(".roclec/futs").glob("*.json")):
+            identifier(path.stem, "FUT")
+            record = self._fut_record(self.read(path.relative_to(self.profile.root).as_posix()))
+            need(record["id"] == path.stem, "INVALID_REFERENCE", "FUT identity mismatch", entity=path.stem)
+            outcomes = [d["outcome"] for d in decisions if d["entity"] == path.stem and d["kind"] == "fut-decide"]
+            futs[path.stem] = {"scope": record.get("scope", "product"), "finding": record["finding"],
+                               "status": outcomes[-1] if outcomes else "captured"}
+        process = [ref["id"] for ref in self.references().values() if ref["role"] == "process"]
+        revisions, cited = [], set()
+        for decision in decisions:
+            if decision["kind"] != "foundation" or decision["entity"] not in process:
+                continue
+            cited.update(decision.get("futs", []))
+            revisions.append({"decision": decision["id"], "flow": decision["sources"][decision["entity"]],
+                              "actor": decision["actor"], "reason": decision["reason"],
+                              "futs": [{"id": fut_id, "scope": futs.get(fut_id, {}).get("scope"),
+                                        "finding": futs.get(fut_id, {}).get("finding")}
+                                       for fut_id in decision.get("futs", [])]})
+        open_futs = [{"id": fut_id, "status": row["status"], "finding": row["finding"]} for fut_id, row in sorted(futs.items())
+                     if row["scope"] == "process" and row["status"] in {"captured", "evaluating"} and fut_id not in cited]
+        rejections = []
+        for row in self._list_rejections():
+            kind = row["subject"]["type"]
+            stage = project_flow.SUBJECT_POINTS.get(kind) or project_flow.HOOKS[row["hook"]]
+            subject, entity = (kind, row["entity"]) if kind != "stage" else \
+                (f"stage {row['hook']}", f"{row['entity']}/{row['component']}")
+            rejections.append({"stage": stage, "subject": subject, "entity": entity, "consequence": row["consequence"],
+                               "open": row["open"], "decision": row["id"]})
+        verifier = Verification(self)
+        runs = {p.parent.name: verifier.read_run(p.parent.name) for p in self.store.path(".roclec/runs").glob("RUN-*/manifest.json")}
+        groups, sessions, findings = defaultdict(list), defaultdict(int), defaultdict(int)
+        for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
+            record = verifier.read_evidence(path, runs)
+            if record["kind"] == agent_sessions.KIND:
+                sessions[(record["role"], record["stage"])] += 1
+                continue
+            groups[(record["change_id"], record["component"], (record.get("release") or {}).get("version"))].append(record)
+        for key in sorted(groups, key=lambda k: tuple("" if v is None else v for v in k)):
+            for row in project_findings(groups[key]):
+                findings[(row["severity"], row["status"])] += 1
+        return {"revisions": revisions, "open_futs": open_futs, "rejections": rejections,
+                "findings": [{"severity": s, "status": t, "count": n} for (s, t), n in sorted(findings.items())],
+                "sessions": [{"role": r, "stage": t, "count": n} for (r, t), n in sorted(sessions.items())]}
 
     def _flow_warnings(self):
         def warning(code, message, remediation, **context):
             return {**ModelError(code, message, remediation=remediation, **context).issue, "severity": "warning"}
-        view = self._flow_view()
+        view = self._flow_view(learning=True)
         if view is None:
             components = " ".join(f"--component {c}" for c in sorted(self.profile.components))
             return [warning("FLOW_MISSING", f"{project_flow.FLOW_PATH} does not exist",
                             f"Run `roclec skills` to seed the default flow, then `roclec reference add flow --path "
                             f"{project_flow.FLOW_PATH} --role process {components}` and `roclec foundation agree --ref flow`.",
                             path=project_flow.FLOW_PATH, entity="flow")]
-        flow, relative, _, status = view
+        flow, relative, _, status, _ = view
         result = list(flow["warnings"])
         if status in {"stale", "missing"}:
             result.append(warning("FLOW_VIEW_STALE", f"Generated flow view is {status}", "Run `roclec views --write`.",
@@ -1943,14 +2200,14 @@ class Kernel:
             stale.append(relative)
             writes[relative] = rendered
         payload, observed = {"sources": current}, {}
-        flow_view = self._flow_view()  # Skipped when the flow file is missing; `check` warns.
+        flow_view = self._flow_view(learning=True)  # Skipped when the flow file is missing; `check` warns.
         if flow_view is not None:
-            flow, relative, existing, status = flow_view
+            flow, relative, existing, status, learning = flow_view
             need(status != "edited", "UNMANAGED_FILE", "Flow view is unmanaged or has local edits; resolve them before regenerating",
                  path=relative, remediation=f"Move the edits into {project_flow.FLOW_PATH}, delete {relative} and retry.")
             if status != "current":
                 stale.append(relative)
-                writes[relative] = project_flow.render(flow, self.profile.data)
+                writes[relative] = project_flow.render(flow, self.profile.data, learning)
                 payload["flow_view"] = relative
                 # Restoring a deleted or edited view repeats earlier bytes; without a fresh
                 # generation the store would refuse to replay the diverged earlier receipt.

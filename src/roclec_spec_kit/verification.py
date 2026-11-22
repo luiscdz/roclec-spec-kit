@@ -13,7 +13,9 @@ import subprocess
 
 from .causality import one_head, record_id, scoped_heads
 from .config import DEFAULT_LOG_QUOTA
+from .flow import RETRO_PATH
 from .findings import OPEN, SEVERITIES, finding_key, project as project_findings, validate_findings, validate_resolutions
+from . import sessions as agent_sessions
 from .run_logs import execute as execute_check
 from .model import (ModelError, digest, encoded, fields, fingerprint, identifier,
                     local_path, need, read_json, schema, sha, strings, text, version_key)
@@ -60,8 +62,16 @@ def same_context(first, second):
 
 def read_producer(record):
     if "producer" in record:
-        fields(record["producer"], ("role", "context"))
+        fields(record["producer"], ("role", "context"), ("sessions",))
         declared(record["producer"]["role"], record["producer"]["context"], RUN_ROLES, "run")
+        if "sessions" in record["producer"]:
+            agent_sessions.ids(record["producer"]["sessions"])
+
+
+def producer_session_ids(producer):
+    """Agent sessions a run cites as its producer: an EVD-shaped context and producer.sessions."""
+    context = producer["context"].strip()
+    return sorted({*([context] if agent_sessions.looks_like_id(context) else []), *producer.get("sessions", [])})
 
 
 class Verification:
@@ -146,8 +156,10 @@ class Verification:
         reference_paths |= {(self.k.profile.root / r["path"]).resolve() for r in self.k.references().values()
                             if r["role"] == "decision" and component in r["components"]}
         # The generated flow view is operational like capability views; foundation already required a valid flow.
+        # So is the seeded flow retrospective: project process notes, never a code input (TL.6).
         flow_view = self.k._flow_view()
         flow_view = (self.k.profile.root / flow_view[1]).resolve() if flow_view else None
+        retro = (self.k.profile.root / RETRO_PATH).resolve()
         files, categories, unknown = {}, {}, []
         for relative in sorted(paths):
             # Operational records do not attest code or invalidate themselves.
@@ -155,7 +167,7 @@ class Verification:
             if absolute.is_relative_to(self.k.profile.root / ".roclec/runtime"):
                 continue
             metadata = (absolute.is_relative_to(self.k.profile.root / ".roclec") or absolute.is_relative_to(self.k.profile.root / "specs/capabilities")
-                        or absolute.resolve() == flow_view)
+                        or absolute.resolve() in (flow_view, retro))
             if metadata:
                 categories[relative] = "operational"
                 continue
@@ -203,9 +215,14 @@ class Verification:
     def run_heads(attempts):
         return scoped_heads(attempts, lambda _: ["run"])
 
-    def run(self, change_id, component, base, role, context):
+    def run(self, change_id, component, base, role, context, sessions=()):
         declared(role, context, RUN_ROLES, "run")
         producer = {"role": role, "context": context}
+        # The sessions that produced the run: of its change, or of its release (TL.3).
+        cited = agent_sessions.cite(self.k, list(sessions), **({"release": self.release} if self.release
+                                                               else {"change_id": change_id}))
+        if cited:
+            producer["sessions"] = cited
         if self.release:
             from .releases import Releases
             Releases(self.k).context(**self.release, unpublished=True)
@@ -357,12 +374,21 @@ class Verification:
                   if self.same_scope(started, change_id, component)]
         return sorted(result, key=lambda r: r["id"])
 
-    def record_evidence(self, file):
+    def record_evidence(self, file, *, kind=None, transcript=None):
+        if kind == agent_sessions.KIND:
+            need(transcript is not None, "INVALID_INPUT", "An agent session needs its transcript", exit_code=2,
+                 remediation=agent_sessions.RECORD_HINT)
+            return agent_sessions.record(self.k, file, transcript)
+        need(kind is None and transcript is None, "INVALID_INPUT", "--transcript applies only to --kind agent-session",
+             exit_code=2, remediation=agent_sessions.RECORD_HINT)
         record = read_json(file)
         if isinstance(record, dict) and record.get("kind") == "finding-decision":
             return self.record_finding_decision(record)
+        need(not isinstance(record, dict) or record.get("kind") != agent_sessions.KIND, "INVALID_INPUT",
+             "Agent sessions are imported with their transcript", exit_code=2, remediation=agent_sessions.RECORD_HINT)
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
-                        "outcome", "acceptance_ids", "checks", "limitations", "findings"), ("policy_id", "release", "role", "resolutions"))
+                        "outcome", "acceptance_ids", "checks", "limitations", "findings"),
+               ("policy_id", "release", "role", "resolutions", "sessions"))
         schema(record)
         need(record["kind"] in {"manual", "automated-import", "independent-review"}, "INVALID_INPUT", "Unknown evidence kind", exit_code=2)
         need(text(record["actor"]) and text(record["context"]), "INVALID_INPUT", "Declare observer and context", exit_code=2)
@@ -382,6 +408,13 @@ class Verification:
         run = self.read_run(record["run_id"])
         context = Verification(self.k, release=run.get("release"))
         need(context.same_scope(record, run["change_id"], run["component"]), "INVALID_REFERENCE", "Evidence scope differs from run")
+        if "sessions" in record:
+            cited = agent_sessions.cite(self.k, record["sessions"], **({"release": context.release} if context.release
+                                                                       else {"change_id": record["change_id"]}))
+            if cited:
+                record["sessions"] = cited
+            else:
+                del record["sessions"]  # Omitted when empty.
         if context.release and (record["findings"] or record.get("resolutions")):
             need(self.k.release(**context.release)["publication"] is None,
                  "VERSION_INVALID", "Published release findings are immutable")
@@ -391,6 +424,7 @@ class Verification:
             need(not same_context(record["context"], run["producer"]["context"]), "SELF_REVIEW_DECLARED",
                  "Review context equals the context that produced its run", entity=run["id"],
                  actual=record["context"], remediation=SEPARATE_CONTEXT)
+            context.review_session(record, run)
         fingerprint(record["candidate_digest"])
         candidate = context.candidate(record["change_id"], record["component"], run["candidate"]["base"])
         need(record["candidate_digest"] == candidate["inputs_digest"] == run["candidate"]["inputs_digest"],
@@ -435,16 +469,25 @@ class Verification:
                                    {f".roclec/evidence/{record['id']}.json": encoded(record)}, self.k.token)
         return {"evidence": record, "receipt": receipt}
 
-    def read_evidence(self, path, runs=None):
+    def read_evidence(self, path, runs=None, *, sessions=True):
+        """Validated EVD record; agent sessions are validated too, or skipped (None) when `sessions` is false."""
         record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
+        if record.get("kind") == agent_sessions.KIND:
+            if not sessions:
+                agent_sessions.integrity(path, record, self.k.profile.components)  # reports skip sessions, but never a tampered record
+                return None
+            return agent_sessions.read(self.k, path, record)
         if record.get("kind") == "finding-decision":
             self.validate_finding_decision(record, stored=True)
             need(record["id"] == path.stem, "INVALID_REFERENCE", "Evidence identity differs from its path")
             return record
         fields(record, ("model_schema", "kind", "change_id", "component", "run_id", "candidate_digest", "actor", "context",
                         "outcome", "acceptance_ids", "checks", "limitations", "findings", "id", "digest", "executed_by_roclec",
-                        "supersedes"), ("policy_id", "release", "role", "resolutions", "finding_parents", "recurrence_witnesses"))
+                        "supersedes"), ("policy_id", "release", "role", "resolutions", "finding_parents", "recurrence_witnesses",
+                                        "sessions"))
         identifier(record["id"], "EVD")
+        if "sessions" in record:
+            agent_sessions.ids(record["sessions"])
         if "release" not in record:
             identifier(record["change_id"], "CHG")
         identifier(record["run_id"], "RUN")
@@ -537,9 +580,79 @@ class Verification:
         return project_findings(self.evidence(change_id, component))
 
     def evidence(self, change_id, component):
-        records = [record for record in (self.read_evidence(p) for p in self.store.path(".roclec/evidence").glob("EVD-*.json"))
-                   if self.same_scope(record, change_id, component)]
+        """Reports and finding decisions of one scope; agent sessions are not reports (see sessions())."""
+        records = [record for record in (self.read_evidence(p, sessions=False) for p in self.store.path(".roclec/evidence").glob("EVD-*.json"))
+                   if record is not None and self.same_scope(record, change_id, component)]
         return sorted(records, key=lambda r: r["id"])
+
+    def sessions(self, change_id=None, component=None):
+        """Validated agent-session records, optionally of one change and/or component, sorted by ID."""
+        records = []
+        for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
+            record = self.k.read(path.relative_to(self.k.profile.root).as_posix())
+            if record.get("kind") == agent_sessions.KIND and change_id in (None, record.get("change_id")) \
+                    and component in (None, record.get("component")):
+                records.append(agent_sessions.read(self.k, path, record))
+        return records
+
+    def session_issues(self, record):
+        return agent_sessions.issues(self.store, record)
+
+    def review_policy_requires_session(self):
+        """Whether the current flow's review stage declares session_evidence = "required" (no flow: optional)."""
+        try:
+            parsed, _ = self.k._flow()
+        except ModelError as exc:
+            if exc.issue["code"] != "FLOW_MISSING":
+                raise
+            return False
+        return next(r for r in parsed["stages"] if r["name"] == "review")["session_evidence"] == "required"
+
+    def review_session(self, record, run):
+        """The reviewer's agent session cited by an independent review's `context` (TL.3), or None.
+
+        A required review stage demands it for change reviews; otherwise free text stays allowed, but an
+        EVD-shaped context must resolve to the reviewer's session of this scope. The session must not be
+        one the run cites, nor share a host session with one (SELF_REVIEW_DECLARED).
+        """
+        value = record["context"].strip()
+        release = self.release
+        hint = (agent_sessions.required_hint("review", change_id=record["change_id"], component=record["component"])
+                if release is None else agent_sessions.required_hint("release", release=release))
+        hint += (" Declare role reviewer and set the review context to the session's EVD ID."
+                 ' A human review needs session_evidence = "optional" on [stages.review], agreed with the user.')
+        if not agent_sessions.looks_like_id(value):
+            need(release is not None or not self.review_policy_requires_session(), "SESSION_REQUIRED",
+                 "The flow requires the review context to cite the reviewer's agent session", exit_code=2,
+                 entity=run["id"], expected="review", actual=record["context"], remediation=hint)
+            return None
+        session = agent_sessions.find(self.k, value)
+        in_scope = session is not None and session["role"] == "reviewer" and (
+            agent_sessions.same_release(session.get("release"), release) if release is not None else
+            (session["stage"], session.get("change_id"), session.get("component"))
+            == ("review", record["change_id"], record["component"]))
+        need(in_scope, "INVALID_REFERENCE", "Review context must cite the reviewer's agent session of this scope",
+             exit_code=2, entity=value, remediation=hint)
+        own = producer_session_ids(run["producer"])
+        need(value not in own, "SELF_REVIEW_DECLARED", "The review cites a session that produced its run",
+             entity=run["id"], actual=value, remediation=SEPARATE_CONTEXT)
+        hosts = {s["host_session_id"] for s in (agent_sessions.find(self.k, i) for i in own) if s}
+        need(session["host_session_id"] not in hosts, "SELF_REVIEW_DECLARED",
+             "The review session shares its host session with a session that produced its run", entity=run["id"],
+             actual=session["host_session_id"], remediation=SEPARATE_CONTEXT)
+        return session
+
+    def shares_producer_session(self, report, producers):
+        """Whether a stored review's session is, or shares a host session with, one its producers cite."""
+        value = report["context"].strip()
+        if not agent_sessions.looks_like_id(value):
+            return False
+        own = {i for producer in producers if producer for i in producer_session_ids(producer)}
+        if value in own:
+            return True
+        session = agent_sessions.find(self.k, value)
+        hosts = {s["host_session_id"] for s in (agent_sessions.find(self.k, i) for i in own) if s}
+        return session is not None and session["host_session_id"] in hosts
 
     def verify(self, change_id, component, *, run_id=None, final=False):
         attempts = self.attempts(change_id, component)
@@ -593,7 +706,8 @@ class Verification:
                 return [sources[report["run_id"]].get("producer"), run.get("producer")]
             unattributed = [r for r in current if "role" not in r or None in producers(r)]
             accepted = [r for r in current if r not in unattributed]
-            own = [r["id"] for r in accepted if any(same_context(r["context"], p["context"]) for p in producers(r))]
+            own = [r["id"] for r in accepted if any(same_context(r["context"], p["context"]) for p in producers(r))
+                   or self.shares_producer_session(r, producers(r))]
             need(not own, "SELF_REVIEW_DECLARED", "Review context equals the context that produced the reviewed run",
                  actual=own, remediation=SEPARATE_CONTEXT)
             need(any(r["outcome"] == "ready" and bool(r["checks"]) for r in accepted)

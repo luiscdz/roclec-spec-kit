@@ -12,7 +12,7 @@ from .model import digest, fields, fingerprint, identifier, need, read_json, sha
 
 STAGE_FIELDS = ("model_schema", "id", "kind", "entity", "previous", "actor", "reason", "subject", "hook", "component",
                 "outcome", "criteria", "flow")
-STAGE_OPTIONAL = ("run", "consequence", "corrections", "fut", "addresses")
+STAGE_OPTIONAL = ("run", "consequence", "corrections", "fut", "addresses", "sessions")
 
 
 def corrections(value, consequence):

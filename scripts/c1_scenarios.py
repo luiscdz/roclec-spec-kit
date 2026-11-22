@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 import subprocess
 import tomllib
@@ -121,6 +122,7 @@ def seed_foundation(root, relative, names, roles):
         refs.append({"id": role, "path": relative, "components": sorted(names), "role": role, "decision_id": decision["id"]})
     flow = root / FLOW
     if flow.is_file():
+        optional_sessions(root)
         # `init` seeds the project flow; agree it as the single process reference.
         decision = {"model_schema": 2, "entity": "flow", "previous": None, "kind": "foundation",
                     "status": "agreed", "actor": "synthetic fixture", "reason": "Synthetic test setup",
@@ -132,6 +134,24 @@ def seed_foundation(root, relative, names, roles):
 
 
 FLOW = ".roclec/flow.toml"
+REQUIRED_SESSIONS = b'session_evidence = "required"'
+
+
+def optional_sessions(root):
+    """Declare every stage's session_evidence optional in the consumer flow (the seeded flow requires them).
+
+    Synthetic lifecycle fixtures isolate the gates they exercise; session demands are covered by
+    their own scenarios. The rendered view does not show session_evidence, so it stays current.
+    """
+    path = Path(root) / FLOW
+    if path.is_file():
+        relaxed = path.read_bytes().replace(REQUIRED_SESSIONS, b'session_evidence = "optional"')
+        # Fail loudly if the seeded flow's formatting changes and the relaxation silently stops applying.
+        assert re.search(rb'session_evidence\s*=\s*"required"', relaxed) is None, f"required sessions remain in {path}"
+        path.write_bytes(relaxed)
+    return path
+
+
 HOOK_STAGES = {"pre-implement": "implement", "pre-integrate": "integrate", "handoff": "release"}
 
 
@@ -178,6 +198,7 @@ def declare_hook(root, hook, *, declared=None, on_reject="revise", decider="owne
 def agree_flow(call, label, root, names=("engine", "viewer"), **kwargs):
     """Register and agree the seeded project flow through the public CLI."""
     components = [arg for name in sorted(names) for arg in ("--component", name)]
+    optional_sessions(root)
     call(f"{label} register flow", "reference", "add", "flow", "--path", FLOW, "--role", "process", *components, **kwargs)
     call(f"{label} agree flow", "foundation", "agree", "--ref", "flow", "--actor", "Fixture maintainer",
          "--reason", "Reviewed project flow", *criteria(root, "foundation"), **kwargs)
@@ -259,6 +280,7 @@ def scenarios(workspace, invoke, check):
         return data
 
     call("I-001 initialize native profile", "init", str(root), "--profile", str(config), initial=True)
+    optional_sessions(root)
     check("consumer files preserved", (root / "AGENTS.md").read_text() == "# Existing consumer rules\n"
           and (root / ".roclec/templates/custom.md").read_text() == "Project-owned template\n", "")
     check("no phantom contracts or old skills", not (root / ".roclec/contracts").exists() and not (root / ".agents").exists(), "")
@@ -321,6 +343,8 @@ def scenarios(workspace, invoke, check):
          expect=1, issue="FOUNDATION_INCOMPLETE")
     agree_flow(call, "FF", root)
     seeded_flow = (root / FLOW).read_bytes()
+    # TL.6: the agreement is a flow revision in the view's learning section; regenerate it.
+    call("FF flow agreement refreshes the learning section", "views", "--write")
     clean = call("FF seeded flow and view need no attention", "check")
     check("FF check has no flow warnings", not [i for i in clean["issues"] if i["code"].startswith("FLOW_")], str(clean["issues"]))
     (root / FLOW).write_bytes(seeded_flow.replace(b"Approve the exact intent", b"Approve the complete intent"))
@@ -658,6 +682,7 @@ def adr_scenarios(workspace, invoke, check):
     profile(config, names=("engine",))
     result = invoke(["--json", "init", str(root), "--profile", str(config)])
     check("ADR consumer initializes", result.returncode == 0, result.stdout + result.stderr)
+    optional_sessions(root)
     call = adr_caller(root, invoke, check)
     call("ADR skills install seeds the ADR template", "skills")
     template = root / ".roclec/templates/adr-template.md"

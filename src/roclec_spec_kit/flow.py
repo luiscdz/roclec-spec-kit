@@ -11,8 +11,13 @@ Pure module: no writes, no kernel state. Public API (stable):
 * ``evaluate(flow, name, evaluations, *, outcome) -> list``: check criteria evaluations of a decision.
   A rejection cites at least one ``not-met`` criterion only when the point declares criteria.
 * ``SUBJECT_POINTS``: decision point of each rejectable subject type.
-* ``render(flow, profile_data) -> bytes``: generated Markdown view with a managed-view header.
-* ``view_status(flow, profile_data, existing) -> "current"|"stale"|"missing"|"edited"``.
+* ``render(flow, profile_data, learning=None) -> bytes``: generated Markdown view with a managed-view
+  header. The stage table, criteria and diagram come from the flow alone; a "Flow learning" section
+  follows, projected by the kernel from records (``learning``, see ``LEARNING_KEYS``; ``None`` is a
+  project without records). Rendering sorts every list it receives except flow revisions, which keep
+  the decision order the caller gives.
+* ``view_status(flow, profile_data, existing, learning=None) -> "current"|"stale"|"missing"|"edited"``.
+* ``RETRO_PATH``: project-owned retrospective the view links to (seeded, never generated).
 
 Every failure is a ``model.ModelError`` with exit code 2 unless noted.
 """
@@ -22,10 +27,12 @@ import re
 import tomllib
 from pathlib import Path
 
+from .config import FINDING_SEVERITIES
 from .model import ModelError, need, sha, text
 
 FLOW_PATH = ".roclec/flow.toml"
 DEFAULT_VIEW = "docs/flow.md"
+RETRO_PATH = "docs/flow-retro.md"
 STAGES = ("foundation", "define", "approve", "design", "plan", "implement", "verify", "review",
           "integrate", "release")
 HOOKS = {"pre-implement": "implement", "pre-integrate": "integrate", "handoff": "release"}
@@ -37,6 +44,12 @@ EVIDENCE = ("required", "optional")
 STATUSES = ("met", "not-met", "n/a")
 # change approve/reject change -> approve; foundation agree/reject adr|reference -> foundation; prototypes -> design.
 SUBJECT_POINTS = {"change": "approve", "adr": "foundation", "reference": "foundation", "prototype": "design"}
+# Learning data the kernel projects for the view (TL.6):
+# revisions [{decision, flow, actor, reason, futs: [{id, scope, finding}]}] in decision order;
+# open_futs [{id, status, finding}]; rejections [{stage, subject, entity, consequence, open, decision}];
+# findings [{severity, status, count}]; sessions [{role, stage, count}].
+LEARNING_KEYS = ("revisions", "open_futs", "rejections", "findings", "sessions")
+FINDING_STATUSES = ("open", "still-open", "fixed", "accepted", "deferred", "invalid")
 
 ROLE_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 RESERVED_RE = re.compile(r"roclec-[a-z]+\Z")
@@ -182,6 +195,10 @@ def validate(data, root: Path | None = None):
         evidence = row.get("session_evidence", "optional")
         _need(evidence in EVIDENCE, "session_evidence must be required or optional", f"{entity}.session_evidence",
               'Use "required" or "optional".', actual=evidence)
+        # Only an AI stage produces an agent session; a person's stage is attributed by its decisions.
+        _need(row["ai"] or evidence != "required", "session_evidence = \"required\" needs ai = true",
+              f"{entity}.session_evidence", 'Remove session_evidence or set it to "optional"; '
+              "a stage with ai = false produces no agent session.", actual=evidence)
         skills = _unique_list(row.get("skills", []), f"{entity}.skills", SKILL_RE, "skill name")
         result = dict(name=name, description=row["description"], ai=row["ai"], role=role,
                       deliverables=deliverables, session_evidence=evidence, skills=skills)
@@ -301,7 +318,7 @@ def _model(row, flow, profile_data):
     return ", ".join(pairs) if pairs else "session model"
 
 
-def _body(flow, profile_data):
+def _body(flow, profile_data, learning=None):
     lines = ["# Project flow", "",
              f"Generated from `{FLOW_PATH}` by `roclec views --write`. Do not edit by hand.", "",
              "| Step | Stage | Description | AI | Role | Skills and model | Deliverables | Human checkpoint | Criteria | On reject |",
@@ -335,19 +352,100 @@ def _body(flow, profile_data):
     if checks:
         lines.append(f"  class {','.join(checks)} checkpoint;")
     lines += ["```", ""]
+    lines += _learning(flow, learning or {}) + [""]
     return "\n".join(lines).encode("utf-8")
 
 
-def render(flow, profile_data) -> bytes:
-    body = _body(flow, profile_data)
+def _link(target, view):
+    """Relative Markdown link from the view's folder to a project-relative target."""
+    base, parts = view.split("/")[:-1], target.split("/")
+    common = 0
+    while common < len(base) and common < len(parts) - 1 and base[common] == parts[common]:
+        common += 1
+    return "/".join([".."] * (len(base) - common) + parts[common:])
+
+
+def _rows(headings, rows):
+    lines = ["| " + " | ".join(headings) + " |", "| " + " | ".join("---" for _ in headings) + " |"]
+    return lines + ["| " + " | ".join(row) + " |" for row in rows]
+
+
+def _learning(flow, data):
+    """Counts and lists derived from records; no scores or judgments, no generation timestamps."""
+    none = "None recorded."
+    order = {name: index for index, name in enumerate(STAGES)}
+    lines = ["## Flow learning", "",
+             "Derived from the project records by `roclec views --write`. Counts and lists only.", ""]
+
+    lines += ["### Flow revisions", "",
+              "Agreements of the process reference in decision order, with the process FUTs each one addresses.", ""]
+    revisions = [[f"`{r['decision']}`", f"`{r['flow']}`", _cell(r["actor"]), _cell(r["reason"]),
+                  "<br>".join(_cell(f"{f['id']} ({f.get('scope') or '—'}): {f.get('finding') or '—'}")
+                              for f in sorted(r["futs"], key=lambda f: f["id"])) or "—"]
+                 for r in data.get("revisions", [])]
+    lines += _rows(("Decision", "Flow sha256", "Actor", "Reason", "Process FUTs addressed"), revisions) if revisions else [none]
+
+    lines += ["", "### Open process FUTs", "", "Process FUTs captured or under evaluation that no flow agreement cites.", ""]
+    futs = [[f["id"], f["status"], _cell(f["finding"])] for f in sorted(data.get("open_futs", []), key=lambda f: f["id"])]
+    lines += _rows(("FUT", "Status", "Finding"), futs) if futs else [none]
+
+    lines += ["", "### Rejections by stage", ""]
+    rejections = sorted(data.get("rejections", []),
+                        key=lambda r: (order.get(r["stage"], len(order)), r["stage"], r["entity"], r["subject"], r["decision"]))
+    if rejections:
+        stages = sorted({r["stage"] for r in rejections}, key=lambda s: (order.get(s, len(order)), s))
+        lines += _rows(("Stage", "Rejections", "Open"),
+                       [[s, str(sum(r["stage"] == s for r in rejections)),
+                         str(sum(r["stage"] == s and r["open"] for r in rejections))] for s in stages])
+        lines += [""] + _rows(("Stage", "Subject", "Entity", "Consequence", "State", "Decision"),
+                              [[r["stage"], _cell(r["subject"]), _cell(r["entity"]), r["consequence"],
+                                "open" if r["open"] else "closed", f"`{r['decision']}`"] for r in rejections])
+    else:
+        lines.append(none)
+
+    lines += ["", "### Findings by severity and status", ""]
+    counts = {(f["severity"], f["status"]): f["count"] for f in data.get("findings", []) if f["count"]}
+    if counts:
+        severities = list(FINDING_SEVERITIES) + sorted({s for s, _ in counts} - set(FINDING_SEVERITIES))
+        statuses = list(FINDING_STATUSES) + sorted({s for _, s in counts} - set(FINDING_STATUSES))
+        lines += _rows(("Severity", *statuses),
+                       [[severity, *(str(counts.get((severity, status), 0)) for status in statuses)]
+                        for severity in severities])
+    else:
+        lines.append(none)
+
+    lines += ["", "### Stages with ai = false", ""]
+    people = [[row["name"], row["role"], _cell(row["reason"])] for row in flow["stages"] if not row["ai"]]
+    lines += _rows(("Stage", "Role", "Reason"), people) if people else [none]
+
+    lines += ["", "### Agent sessions by role and stage", ""]
+    sessions = {}
+    for row in data.get("sessions", []):
+        key = (row["role"], row["stage"])
+        sessions[key] = sessions.get(key, 0) + row["count"]
+    if sessions:
+        columns = sorted({stage for _, stage in sessions}, key=lambda s: (order.get(s, len(order)), s))
+        lines += _rows(("Role", *columns), [[role, *(str(sessions.get((role, stage), 0)) for stage in columns)]
+                                            for role in sorted({role for role, _ in sessions})])
+    else:
+        lines.append(none)
+
+    lines += ["", "### Retrospective", "",
+              "What the records cannot show (what did not work as expected, what would change with a larger team, "
+              f"which AI-use decisions to revisit) belongs in the project-owned [{RETRO_PATH}]({_link(RETRO_PATH, flow['view'])})."]
+    return lines
+
+
+def render(flow, profile_data, learning=None) -> bytes:
+    body = _body(flow, profile_data, learning)
     return f"<!-- roclec-managed-view sha256={sha(body)} -->\n".encode() + body
 
 
-def view_status(flow, profile_data, existing):
+def view_status(flow, profile_data, existing, learning=None):
     if existing is None:
         return "missing"
     header, _, body = existing.partition(b"\n")
     match = HEADER_RE.match(header)
     if not match or match.group(1).decode() != sha(body):
         return "edited"
-    return "current" if existing == render(flow, profile_data) else "stale"
+    return "current" if existing == render(flow, profile_data, learning) else "stale"

@@ -33,6 +33,11 @@ def json_file(path, default=None):
     return read_json(path.resolve()) if path else default
 
 
+def session_argument(parser):
+    parser.add_argument("--session", action="append", default=[], metavar="EVD-ID",
+                        help="Agent session that produced this record (repeatable)")
+
+
 def rejection_arguments(parser):
     parser.add_argument("--consequence", choices=("revise", "cancel", "defer"),
                         help="Default: on_reject of the decision point in the project flow")
@@ -46,7 +51,8 @@ def record_rejection(kernel, args, subject_type):
     return kernel.reject(subject_type, args.entity, args.digest, args.actor, args.reason,
                          consequence=args.consequence, fut=args.fut,
                          corrections=json_file(args.corrections, []),
-                         criteria=json_file(args.criteria), addresses=json_file(args.addresses))
+                         criteria=json_file(args.criteria), addresses=json_file(args.addresses),
+                         sessions=args.session)
 
 
 def build_parser():
@@ -85,11 +91,15 @@ def build_parser():
         agree.add_argument(f"--{name}", required=True)
     agree.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
     agree.add_argument("--criteria", type=Path, help="JSON list evaluating the foundation criteria of the flow")
+    agree.add_argument("--fut", action="append", default=[], metavar="FUT-ID",
+                       help="Process FUT this flow agreement addresses (repeatable; process reference only)")
+    session_argument(agree)
     rejection = sub.add_parser("reject", help="Record a human rejection of an exact revision")
     rejection.add_argument("subject_type", choices=("change", "adr", "reference", "prototype"))
     rejection.add_argument("entity", help="Change or reference ID, or project-relative prototype path")
     subject_decision_arguments(rejection)
     rejection_arguments(rejection)
+    session_argument(rejection)
     checkpoint = sub.add_parser("checkpoint", help="Record a human decision on a prototype revision or a flow hook")
     checkpoint.add_argument("entity", metavar="PATH|CHG-NNN", help="Prototype path, or the change of a --hook checkpoint")
     checkpoint.add_argument("--outcome", choices=("approved", "rejected"), required=True)
@@ -98,6 +108,7 @@ def build_parser():
     checkpoint.add_argument("--run", help="Passed run whose candidate a pre-integrate checkpoint decides")
     subject_decision_arguments(checkpoint)
     rejection_arguments(checkpoint)
+    session_argument(checkpoint)
     reference = sub.add_parser("reference")
     rsub = reference.add_subparsers(dest="action", required=True)
     for name in ("add", "update"):
@@ -124,10 +135,12 @@ def build_parser():
             command.add_argument("id")
         command.add_argument("--actor", required=True)
         command.add_argument("--reason", required=True)
+        session_argument(command)
     start = csub.add_parser("start")
     start.add_argument("id")
     start.add_argument("--component", required=True)
     start.add_argument("--actor", required=True)
+    session_argument(start)
     fut = sub.add_parser("fut")
     fsub = fut.add_subparsers(dest="action", required=True)
     capture = fsub.add_parser("capture")
@@ -138,6 +151,7 @@ def build_parser():
     decide.add_argument("--actor", required=True)
     decide.add_argument("--reason", required=True)
     decide.add_argument("--target")
+    session_argument(decide)
     release = sub.add_parser("release")
     rsub = release.add_subparsers(dest="action", required=True)
     plan = rsub.add_parser("plan")
@@ -183,9 +197,12 @@ def build_parser():
     verify.add_argument("--base", required=True)
     verify.add_argument("--role", required=True, help="Declared producer role: implementer, coordinator or human")
     verify.add_argument("--context", required=True, help="Actual session or tool identity that produced the run")
+    session_argument(verify)
     evidence = sub.add_parser("evidence")
     record = evidence.add_subparsers(dest="action", required=True).add_parser("record")
     record.add_argument("--file", required=True, type=Path)
+    record.add_argument("--kind", choices=("agent-session",), help="Import an agent session: --file holds its metadata")
+    record.add_argument("--transcript", type=Path, help="Host-exported session transcript, kept without interpretation")
     review = sub.add_parser("review")
     policy = review.add_subparsers(dest="action", required=True).add_parser("policy")
     policy.add_argument("--change", required=True)
@@ -258,7 +275,7 @@ def execute(args):
             return kernel.stage_checkpoint(args.entity, args.hook, args.component, args.digest, args.actor, args.reason,
                                            outcome=args.outcome, criteria=json_file(args.criteria), run=args.run,
                                            consequence=args.consequence, corrections=json_file(args.corrections, []),
-                                           fut=args.fut, addresses=json_file(args.addresses))
+                                           fut=args.fut, addresses=json_file(args.addresses), sessions=args.session)
         need(args.component is None and args.run is None, "INVALID_INPUT",
              "--component and --run apply only to a --hook checkpoint", exit_code=2)
         if args.outcome == "rejected":
@@ -266,7 +283,8 @@ def execute(args):
         need(all(value is None for value in (args.consequence, args.corrections, args.fut)),
              "INVALID_INPUT", "Rejection details apply only to a rejected checkpoint", exit_code=2)
         return kernel.checkpoint(args.entity, args.digest, args.actor, args.reason, outcome=args.outcome,
-                                 addresses=json_file(args.addresses), criteria=json_file(args.criteria))
+                                 addresses=json_file(args.addresses), criteria=json_file(args.criteria),
+                                 sessions=args.session)
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:
@@ -282,9 +300,10 @@ def execute(args):
         verification = Verification(kernel, release={"component": args.component, "version": args.release} if command == "run" and args.release else None)
         if command == "run":
             need((args.id is None) != (args.release is None), "INVALID_INPUT", "Select a change or --release, exclusively", exit_code=2)
-            return verification.run(args.id, args.component, args.base, args.role, args.context)
+            return verification.run(args.id, args.component, args.base, args.role, args.context, args.session)
         if command == "evidence":
-            return verification.record_evidence(args.file.resolve())
+            return verification.record_evidence(args.file.resolve(), kind=args.kind,
+                                                transcript=args.transcript.resolve() if args.transcript else None)
         return verification.set_policy(args.change, args.enabled == "true", args.actor, args.reason)
     if command == "integrate" or (command == "operation" and action == "apply"):
         from .integration import Integration
@@ -320,7 +339,7 @@ def execute(args):
     if command == "foundation":
         if action == "agree":
             return kernel.agree_foundation(args.ref, args.actor, args.reason, addresses=json_file(args.addresses),
-                                           criteria=json_file(args.criteria))
+                                           criteria=json_file(args.criteria), sessions=args.session, futs=args.fut)
         return kernel.foundation(args.component, args.change)
     if command == "reference":
         return kernel.write_reference(action, args.id, args.path, args.component, args.role, args.supersedes)
@@ -331,14 +350,15 @@ def execute(args):
         if action == "new":
             return kernel.new_change(args.file.resolve())
         if action == "approve":
-            return kernel.approve(args.id, args.digest, args.actor, args.reason, criteria=json_file(args.criteria))
+            return kernel.approve(args.id, args.digest, args.actor, args.reason, criteria=json_file(args.criteria),
+                                  sessions=args.session)
         if action == "start":
-            return kernel.start(args.id, args.component, args.actor)
-        return kernel.cancel(args.id, args.actor, args.reason)
+            return kernel.start(args.id, args.component, args.actor, sessions=args.session)
+        return kernel.cancel(args.id, args.actor, args.reason, sessions=args.session)
     if command == "fut":
         if action == "capture":
             return kernel.capture(args.file.resolve())
-        return kernel.decide_fut(args.id, args.outcome, args.actor, args.reason, args.target)
+        return kernel.decide_fut(args.id, args.outcome, args.actor, args.reason, args.target, sessions=args.session)
     if command == "release":
         return kernel.release_plan(args.component, args.version, args.kind, args.change, args.base_tag)
     if command == "views":
@@ -478,6 +498,8 @@ def main(argv=None):
             if args.command == "run":
                 issues = result.pop("issues")
                 exit_code = result.pop("exit_code")
+            if args.command == "evidence" and "warnings" in result:
+                issues = result.pop("warnings")  # e.g. a versioned-redacted copy that redacted nothing
             if args.command == "check" and "warnings" in result:
                 issues = result.pop("warnings")
             if args.command == "foundation" and args.action == "check" and result["issues"]:

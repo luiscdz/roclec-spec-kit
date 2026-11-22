@@ -139,7 +139,7 @@ class Releases:
         ref = self.k.profile.components[component]["target_ref"]
         tip = target_tip(repo, ref)
         # Hooks are read from the agreed flow: an unagreed edit can neither add nor drop a handoff.
-        self.k.agreed_flow(component)
+        parsed = self.k.agreed_flow(component)
         for member in record["changes"]:
             integration = self.k.integration(member["change_id"], component, member["intent_revision"])
             need(tip and git(repo, "merge-base", "--is-ancestor", integration["candidate"]["head"], tip, check=False).returncode == 0,
@@ -147,6 +147,8 @@ class Releases:
                  entity=member["change_id"], actual=ref)
             # A declared handoff hook needs a human approval of each member's integration record.
             self.k.require_checkpoint(member["change_id"], component, "handoff", integration["digest"])
+            # A required integrate stage needs the session that integrated each member here (TL.4).
+            self.k.require_session("integrate", parsed, change_id=member["change_id"], component=component)
         self.version(record)
         verified = Verification(self.k, release={"component": component, "version": version}).verify(None, component, run_id=run_id, final=True)
         findings = self.findings(component, version)
@@ -216,6 +218,8 @@ class Releases:
         need(text(actor) and text(reason), "INVALID_INPUT", "Publication record needs declared actor and reason", exit_code=2)
         prepared = self.preparation(component, version, preparation)
         gate = self.gate(component, version, prepared["run_id"])
+        # A required release stage needs a session of this release before its publication is recorded (TL.4).
+        self.k.require_session("release", self.k.agreed_flow(component), release={"component": component, "version": version})
         candidate = gate["candidate"]
         need(prepared["release_digest"] == gate["context"]["release_digest"] and prepared["contracts"] == gate["context"]["contracts"]
              and candidate["inputs_digest"] == prepared["candidate"]["inputs_digest"]
