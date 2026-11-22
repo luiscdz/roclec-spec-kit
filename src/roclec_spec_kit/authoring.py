@@ -2,6 +2,7 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from .adr import declaration
 from .model import canonical, digest, encoded, fields, fingerprint, identifier, local_path, need, read_json, sha, text
 from .origins import captured_paths
 from .store import Store
@@ -28,6 +29,21 @@ def contents(root, paths):
     return result
 
 
+def pin_adrs(kernel, value):
+    """Pin each cited ADR without a sha256 to its current file bytes; given pins are kept."""
+    refs = kernel.references()
+    for entry in value["adrs"]:
+        if "sha256" in entry:
+            continue
+        ref = refs.get(entry["id"])
+        need(ref is not None and ref["role"] == "decision", "INVALID_REFERENCE", "Change cites an unregistered ADR",
+             entity=entry["id"], remediation="Register the ADR with reference add ADR-NNN --role decision first.")
+        path = kernel.store.path(ref["path"])
+        need(path.is_file(), "INVALID_REFERENCE", "Cited ADR file is missing", entity=entry["id"], path=ref["path"])
+        entry["sha256"] = sha(path.read_bytes())
+    value["adrs"] = sorted(value["adrs"], key=lambda entry: entry["id"])
+
+
 def seal(kernel, folder, *, check=False):
     managed = kernel.store.path(".roclec")
     need(folder.is_dir() and managed not in (folder, *folder.parents), "INVALID_PATH",
@@ -41,7 +57,9 @@ def seal(kernel, folder, *, check=False):
          "ID_COLLISION", "Change ID already exists", entity=change_id)
     semantic = record["semantic"]
     fields(semantic, ("intention", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-           ("files", "baseline_release", "fixes", "origins", "coverage"))
+           ("files", "baseline_release", "fixes", "origins", "coverage", "architecture_decisions"))
+    if "architecture_decisions" in semantic and "adrs" in declaration(semantic["architecture_decisions"], sealed=False):
+        pin_adrs(kernel, semantic["architecture_decisions"])
     manifest = semantic.get("files", {})
     need(isinstance(manifest, dict), "INVALID_INPUT", "files must be an object", exit_code=2)
     captures = captured_paths(semantic["origins"], entity=change_id) if "origins" in semantic else ()

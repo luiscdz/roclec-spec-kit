@@ -140,6 +140,9 @@ class Verification:
         refs = self.k.foundation(component, change_id)
         need(not refs["issues"], "FOUNDATION_INCOMPLETE", "Candidate needs agreed references", actual=refs["issues"])
         reference_paths = {(self.k.profile.root / r["path"]).resolve() for r in refs["references"]}
+        # ADRs of this component are classified like its references; their state is the ADR gate's concern.
+        reference_paths |= {(self.k.profile.root / r["path"]).resolve() for r in self.k.references().values()
+                            if r["role"] == "decision" and component in r["components"]}
         files, categories, unknown = {}, {}, []
         for relative in sorted(paths):
             # Operational records do not attest code or invalidate themselves.

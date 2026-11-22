@@ -63,7 +63,8 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
     semantic = {"intention": "proposal.md", "files": {"proposal.md": file_hash(body.encode())},
                 "components": scopes, "bases": [{"capability_id": "CAP-001", "component": c,
                                                   "revision": base["revision"] if base else None} for c in scopes],
-                "deltas": [], "proposed": [], "dependencies": [], "references": []}
+                "deltas": [], "proposed": [], "dependencies": [], "references": [],
+                "architecture_decisions": {"none": "Synthetic fixture applies no architecture decision record."}}
     if kind == "evolution":
         target = target or snapshot(scopes)
         semantic["proposed"] = [{"capability_id": "CAP-001", "components": scopes, "revision": target["revision"]}]
@@ -522,4 +523,150 @@ def scenarios(workspace, invoke, check):
          "--role", "implementer", "--context", "synthetic implementer session", expect=2, issue="INVALID_INPUT")
     call("C3 preparation requires explicit release run and output", "release", "prepare", "engine", "v0.3.0", expect=2, issue="INVALID_INPUT")
     call("JSON usage error has no success envelope", "inspect", "--nonsense", expect=2, issue="INVALID_INPUT")
+    return root
+
+
+# ---- ADR scenarios (consumer architecture decision records), public CLI only ----
+
+ADR_SECTIONS = ("Context and problem", "Decision drivers", "Considered options", "Decision",
+                "Consequences", "Compliance verification", "Relations")
+
+
+def adr_markdown(title, *, options=2, sections=ADR_SECTIONS, extra=""):
+    """Minimal ADR with the default template sections; the c1 scenario proves parity with the shipped template."""
+    lines = [f"# {title}", ""]
+    for section in sections:
+        lines += [f"## {section}", "", f"{section} text.", ""]
+        if section == "Considered options":
+            for number in range(1, options + 1):
+                lines += [f"### Option {number}: Choice {number}", "", "- Advantages: some.", ""]
+    return "\n".join(lines) + extra
+
+
+def adr_bundle(folder, change_id, declaration, *, base=None, components=("engine",)):
+    """Unsealed refactor bundle; a None declaration omits architecture_decisions entirely."""
+    record = bundle(folder, change_id=change_id, kind="refactor", components=components, base=base)
+    if declaration is None:
+        record["semantic"].pop("architecture_decisions")
+    else:
+        record["semantic"]["architecture_decisions"] = declaration
+    record.pop("proposal_digest")
+    put_json(folder / "change.json", record)
+    return folder
+
+
+def adr_caller(root, invoke, check):
+    """call(label, *args, expect, issue, project) -> payload; rejections must leave the project tree unchanged."""
+    def call(label, *args, expect=0, issue=None, project=None):
+        project = project or root
+        before = tree(project)
+        result = invoke(["--project", str(project), "--json", *map(str, args)])
+        check(label, result.returncode == expect, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        check(label + ": JSON envelope", payload["ok"] == (expect == 0), result.stdout)
+        if issue:
+            check(label + ": issue " + issue, issue in [i["code"] for i in payload["issues"]], result.stdout)
+        if expect in (1, 2, 3):
+            check(label + ": rejection preserves bytes/modes", before == tree(project), result.stdout)
+        return payload
+    return call
+
+
+def adr_scenarios(workspace, invoke, check):
+    """ADR lifecycle on a native consumer: states, supersession, rejections, declarations and structure warnings."""
+    root = workspace / "adr consumer"
+    root.mkdir()
+    init_trunk(root)
+    config = workspace / "adr-profile.toml"
+    profile(config, names=("engine",))
+    result = invoke(["--json", "init", str(root), "--profile", str(config)])
+    check("ADR consumer initializes", result.returncode == 0, result.stdout + result.stderr)
+    call = adr_caller(root, invoke, check)
+    call("ADR skills install seeds the ADR template", "skills")
+    template = root / ".roclec/templates/adr-template.md"
+    check("ADR template is project-owned and seeded", template.is_file() and "## Considered options" in template.read_text(encoding="utf-8"), "")
+    adrs = root / "docs/adr"
+    adrs.mkdir(parents=True)
+
+    def write(adr_id, body=None, folder=adrs):
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{adr_id}.md"
+        path.write_text(body if body is not None else adr_markdown(f"{adr_id}: Decision"), encoding="utf-8")
+        return path
+
+    def register(label, adr_id, *supersedes, action="add", expect=0, issue=None):
+        args = ["reference", action, adr_id, "--path", f"docs/adr/{adr_id}.md", "--component", "engine", "--role", "decision"]
+        for older in supersedes:
+            args += ["--supersedes", older]
+        return call(label, *args, expect=expect, issue=issue)
+
+    def agree(label, adr_id):
+        return call(label, "foundation", "agree", "--ref", adr_id, "--actor", "Fixture maintainer", "--reason", "Accepted ADR")
+
+    def view(adr_id):
+        return call(f"inspect {adr_id}", "inspect", "--adr", adr_id)["data"]
+
+    def state(adr_id):
+        return view(adr_id)["state"]
+
+    # Lifecycle: proposed -> accepted -> stale -> accepted.
+    first = write("ADR-001", template.read_text(encoding="utf-8").replace("# ADR-NNN: Title", "# ADR-001: Storage"))
+    register("ADR-001 registers", "ADR-001")
+    check("ADR-001 starts proposed with the file hash", view("ADR-001")["state"] == "proposed"
+          and view("ADR-001")["sha256"] == file_hash(first.read_bytes()), "")
+    agree("ADR-001 agreement", "ADR-001")
+    check("ADR-001 accepted", state("ADR-001") == "accepted", "")
+    first.write_text(first.read_text(encoding="utf-8") + "\nRevised after acceptance.\n", encoding="utf-8")
+    check("ADR-001 edit makes the agreement stale", state("ADR-001") == "stale", "")
+    agree("ADR-001 re-agreement", "ADR-001")
+    check("ADR-001 accepted again", state("ADR-001") == "accepted", "")
+    check("template-derived ADR needs no structure warning", not [i for i in call("check after template ADR", "check")["issues"] if i["code"] == "ADR_STRUCTURE"], "")
+
+    # Supersession takes effect only when the replacing ADR is agreed.
+    write("ADR-002")
+    register("ADR-002 supersedes ADR-001", "ADR-002", "ADR-001")
+    check("ADR-001 stays accepted while ADR-002 is proposed", (state("ADR-001"), state("ADR-002")) == ("accepted", "proposed"), "")
+    agree("ADR-002 agreement", "ADR-002")
+    older, newer = view("ADR-001"), view("ADR-002")
+    check("agreeing ADR-002 supersedes ADR-001", (older["state"], newer["state"]) == ("superseded", "accepted"), "")
+    check("supersession chain is reported both ways", older["superseded_by"] == ["ADR-002"] and older["chain"]["replaced_by"] == ["ADR-002"]
+          and newer["chain"]["replaces"] == ["ADR-001"], "")
+    listing = call("list adrs", "list", "adrs")["data"]["adrs"]
+    check("list adrs reports states", [(a["id"], a["state"]) for a in listing] == [("ADR-001", "superseded"), ("ADR-002", "accepted")], "")
+
+    # Rejections never mutate the consumer.
+    register("ADR supersession cycle is rejected", "ADR-001", "ADR-002", action="update", expect=1, issue="ADR_SUPERSESSION_INVALID")
+    register("ADR supersession of a missing ADR is rejected", "ADR-001", "ADR-009", action="update", expect=1, issue="ADR_SUPERSESSION_INVALID")
+    (root / "docs/notes.md").write_text("# Notes\n")
+    call("--supersedes on a non-decision role is rejected", "reference", "add", "notes", "--path", "docs/notes.md", "--component", "engine",
+         "--role", "context", "--supersedes", "ADR-001", expect=2, issue="INVALID_INPUT")
+    write("ADR-004", folder=root / "docs")
+    call("ADR outside the ADR folder is rejected", "reference", "add", "ADR-004", "--path", "docs/ADR-004.md", "--component", "engine",
+         "--role", "decision", expect=2, issue="INVALID_PATH")
+
+    # Declarations: approval needs one; seal fills the pin; a proposed ADR may be cited.
+    folder = adr_bundle(workspace / "adr-undeclared", "CHG-001", None)
+    call("seal undeclared bundle", "change", "seal", folder)
+    call("new undeclared change", "change", "new", "--file", folder / "change.json")
+    record = json.loads((folder / "change.json").read_text())
+    call("approve without ADR declaration is rejected", "change", "approve", "CHG-001", "--digest", record["proposal_digest"],
+         "--actor", "Fixture maintainer", "--reason", "Approved scope", expect=1, issue="ADR_UNDECLARED")
+    write("ADR-003")
+    register("ADR-003 registers", "ADR-003")
+    folder = adr_bundle(workspace / "adr-cited", "CHG-002", {"adrs": [{"id": "ADR-003"}]})
+    call("seal pins the cited ADR", "change", "seal", folder)
+    record = json.loads((folder / "change.json").read_text())
+    pin = record["semantic"]["architecture_decisions"]["adrs"][0]
+    check("seal fills the ADR sha256", pin == {"id": "ADR-003", "sha256": file_hash((adrs / "ADR-003.md").read_bytes())}, str(pin))
+    call("new change citing a proposed ADR", "change", "new", "--file", folder / "change.json")
+    call("approve citing a proposed ADR succeeds", "change", "approve", "CHG-002", "--digest", record["proposal_digest"],
+         "--actor", "Fixture maintainer", "--reason", "Approved scope")
+    check("inspect --adr lists the citing change", [c["id"] for c in view("ADR-003")["changes"]] == ["CHG-002"], "")
+
+    # Structural deficiencies warn without failing.
+    write("ADR-005", adr_markdown("ADR-005: Deficient", sections=[s for s in ADR_SECTIONS if s != "Consequences"]))
+    register("ADR-005 registers", "ADR-005")
+    warned = call("check warns about a deficient ADR without failing", "check")["issues"]
+    check("deficient ADR reports ADR_STRUCTURE as a warning", any(i["code"] == "ADR_STRUCTURE" and i["severity"] == "warning"
+                                                                and i["entity"] == "ADR-005" for i in warned), str(warned))
     return root

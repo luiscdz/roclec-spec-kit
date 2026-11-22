@@ -135,6 +135,11 @@ class Profile:
         need(component in self.components, "INVALID_REFERENCE", "Unknown component", entity=component)
         return (self.root / self.components[component]["repo"]).resolve()
 
+    @property
+    def adr(self) -> dict:
+        """ADR location and structure, with the shipped template's defaults (D13)."""
+        return {**ADR_DEFAULTS, **self.data.get("adr", {})}
+
     def agent_model(self, role: str, host: str) -> str | None:
         """Model pinned for a role's host binding, or None to inherit the host session's model."""
         return self.data.get("agents", {}).get(role, {}).get(host)
@@ -161,6 +166,33 @@ def validate_agents(agents):
                  remediation="Write the host's model name, or remove the entry to inherit the session's model.")
 
 
+ADR_DEFAULTS = {
+    "path": "docs/adr",
+    "required_sections": ["Context and problem", "Decision drivers", "Considered options", "Decision",
+                          "Consequences", "Compliance verification", "Relations"],
+    "options_section": "Considered options",
+}
+
+
+def validate_adr(adr):
+    """Optional ``[adr]`` table: ADR folder, required ``##`` sections and the section holding ``###`` options."""
+    from .model import fields, need, text
+    need(isinstance(adr, dict), "INVALID_INPUT", "adr must be a table", exit_code=2,
+         remediation="Write [adr] with path, required_sections or options_section, or remove it to use the defaults.")
+    fields(adr, (), tuple(ADR_DEFAULTS))
+    merged = {**ADR_DEFAULTS, **adr}
+    path = merged["path"]
+    need(text(path) and not Path(path).is_absolute() and ".." not in Path(path).parts and "\\" not in path,
+         "INVALID_PATH", "adr.path must be a relative folder inside the project", exit_code=2, actual=path)
+    sections = merged["required_sections"]
+    need(isinstance(sections, list) and bool(sections) and all(text(s) and s == s.strip() and "\n" not in s for s in sections)
+         and len({s.casefold() for s in sections}) == len(sections),
+         "INVALID_INPUT", "adr.required_sections must list distinct single-line section titles", exit_code=2)
+    need(text(merged["options_section"]) and merged["options_section"].casefold() in {s.casefold() for s in sections},
+         "INVALID_INPUT", "adr.options_section must be one of adr.required_sections", exit_code=2,
+         remediation="Name the required section whose ### subsections are the considered options.")
+
+
 def validate_ref(ref, prefix):
     from .model import need, text
     need(text(ref) and ref.startswith(prefix) and "\x00" not in ref,
@@ -176,10 +208,12 @@ def validate_profile(root: Path, data: dict) -> Profile:
          exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
          remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
     fields(data, ("schema", "name", "components", "trunk_ref"),
-           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents"))
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr"))
     validate_ref(data["trunk_ref"], "refs/heads/")
     if "agents" in data:
         validate_agents(data["agents"])
+    if "adr" in data:
+        validate_adr(data["adr"])
     quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
     excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),

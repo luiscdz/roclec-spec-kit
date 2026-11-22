@@ -8,9 +8,11 @@ import sys
 import shutil
 
 try:
-    from .c1_scenarios import bundle, foundation, put_json, tree, snapshot, digest, seed_publication, seed_current
+    from .c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, foundation, put_json, tree, snapshot, digest,
+                               seed_publication, seed_current, file_hash)
 except ImportError:
-    from c1_scenarios import bundle, foundation, put_json, tree, snapshot, digest, seed_publication, seed_current
+    from c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, foundation, put_json, tree, snapshot, digest,
+                              seed_publication, seed_current, file_hash)
 
 
 # Declared producer of every scripted run; reviews declare another context.
@@ -498,3 +500,91 @@ def edge_scenarios(workspace, invoke, check):
     integration = json.loads(next((root / ".roclec/integrations/CHG-002/engine").glob("*.json")).read_text())
     check("C2 historical fix preserves newer current pointer", current["components"]["engine"]["CAP-001"] == newer["revision"])
     check("C2 historical fix records the historical contract it actually verifies", integration["contracts"]["CAP-001"] == old["revision"])
+
+
+def adr_scenarios(workspace, invoke, check):
+    """ADR gates, pins and candidate classification with real runs and Git integration."""
+    root, base = setup(workspace / "c2-adr", invoke, names=("engine",))
+    call = adr_caller(root, invoke, check)
+    adr_path = root / "docs/adr/ADR-001.md"
+    adr_path.parent.mkdir(parents=True)
+    adr_path.write_text(adr_markdown("ADR-001: Decision"), encoding="utf-8")
+    call("C2 ADR registers", "reference", "add", "ADR-001", "--path", "docs/adr/ADR-001.md", "--component", "engine", "--role", "decision")
+    members = ["CHG-001"]
+
+    def ready(change_id, declaration, *, base_snapshot=None):
+        folder = adr_bundle(workspace / "adr-bundles" / change_id, change_id, declaration, base=base_snapshot)
+        call(f"C2 ADR seal {change_id}", "change", "seal", folder)
+        call(f"C2 ADR new {change_id}", "change", "new", "--file", folder / "change.json")
+        record = json.loads((folder / "change.json").read_text())
+        call(f"C2 ADR approve {change_id}", "change", "approve", change_id, "--digest", record["proposal_digest"],
+             "--actor", "fixture", "--reason", "Approved scope")
+        members.append(change_id)
+        call(f"C2 ADR assign {change_id}", "release", "plan", "engine", "v1.0.0", *[a for m in members for a in ("--change", m)])
+        return record
+
+    def gate(label, change_id="CHG-002", **kwargs):
+        return call(label, "check", "--change", change_id, "--component", "engine", "--gate", "implement", **kwargs)
+
+    def agree(label):
+        call(label, "foundation", "agree", "--ref", "ADR-001", "--actor", "Maintainer", "--reason", "Accepted ADR")
+
+    def integrate(change_id, run=None):
+        run = run or call(f"C2 ADR verify {change_id}", "run", "verify", change_id, "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
+        commit(root)
+        plan = workspace / f"adr-{change_id}-plan.json"
+        call(f"C2 ADR prepare {change_id}", "integrate", "prepare", change_id, "--component", "engine", "--run", run["id"], "--out", plan)
+        call(f"C2 ADR apply {change_id}", "operation", "apply", plan)
+
+    # A registered ADR is a candidate input without profile classification.
+    original = adr_path.read_bytes()
+    notes = root / "docs/adr/notes.md"
+    notes.write_text("# Unregistered notes\n")
+    incomplete = call("C2 ADR folder files still need registration or classification", "run", "verify", "CHG-001", "--component", "engine",
+                      "--base", base, *PRODUCER, expect=1, issue="CANDIDATE_INCOMPLETE")
+    check("C2 ADR only the unregistered file is unclassified", incomplete["issues"][0]["actual"] == ["docs/adr/notes.md"], str(incomplete))
+    notes.unlink()
+    run = call("C2 ADR registered file is classified as an input", "run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
+    candidate = run["candidate"]
+    check("C2 ADR candidate input", run["status"] == "pass" and candidate["categories"]["docs/adr/ADR-001.md"] == "input"
+          and candidate["inputs"]["files"]["docs/adr/ADR-001.md"]["sha256"] == file_hash(original), str(candidate["categories"]))
+    check("C2 ADR is a file input, not a foundation reference", "ADR-001" not in [r["id"] for r in candidate["inputs"]["references"]], "")
+    adr_path.write_text(adr_markdown("ADR-001: Edited after the run"), encoding="utf-8")
+    call("C2 ADR edit invalidates earlier evidence", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify",
+         expect=1, issue="EVIDENCE_STALE")
+    adr_path.write_bytes(original)
+    integrate("CHG-001", run)
+
+    # A cited ADR must be accepted with the pinned bytes before work starts.
+    ready("CHG-002", {"adrs": [{"id": "ADR-001"}]}, base_snapshot=snapshot(("engine",)))
+    blocked = gate("C2 ADR proposed blocks the implement gate", expect=1, issue="ADR_NOT_ACCEPTED")
+    check("C2 ADR gate names the proposed ADR", [(f["id"], f["state"]) for f in blocked["issues"][0]["actual"]] == [("ADR-001", "proposed")], str(blocked))
+    call("C2 ADR proposed blocks change start", "change", "start", "CHG-002", "--component", "engine", "--actor", "Maintainer",
+         expect=1, issue="ADR_NOT_ACCEPTED")
+    agree("C2 ADR agreement")
+    gate("C2 ADR accepted passes the implement gate")
+    call("C2 ADR accepted permits change start", "change", "start", "CHG-002", "--component", "engine", "--actor", "Maintainer")
+    adr_path.write_text(adr_markdown("ADR-001: Revised decision"), encoding="utf-8")
+    agree("C2 ADR re-agreement of different content")
+    stale = gate("C2 ADR pin goes stale after re-agreeing different content", expect=1, issue="ADR_PIN_STALE")
+    check("C2 ADR stale pin differs from the agreed bytes", stale["issues"][0]["actual"][0]["agreed"] == file_hash(adr_path.read_bytes())
+          and stale["issues"][0]["actual"][0]["pinned"] != stale["issues"][0]["actual"][0]["agreed"], str(stale))
+
+    # Integrated changes keep their pin after a later supersession.
+    cited = ready("CHG-003", {"adrs": [{"id": "ADR-001"}]}, base_snapshot=snapshot(("engine",)))
+    commit(root)
+    gate("C2 ADR accepted ADR with a current pin passes", "CHG-003")
+    integrate("CHG-003")
+    check("C2 ADR citing change integrated", call("C2 ADR inspect integrated change", "inspect", "--change", "CHG-003")["data"]["status"] == "integrated", "")
+    (root / "docs/adr/ADR-002.md").write_text(adr_markdown("ADR-002: Replacement"), encoding="utf-8")
+    call("C2 ADR registers the replacement", "reference", "add", "ADR-002", "--path", "docs/adr/ADR-002.md", "--component", "engine",
+         "--role", "decision", "--supersedes", "ADR-001")
+    call("C2 ADR agrees the replacement", "foundation", "agree", "--ref", "ADR-002", "--actor", "Maintainer", "--reason", "Accepted ADR")
+    adr_path.write_text(adr_markdown("ADR-001: Edited after integration"), encoding="utf-8")
+    check("C2 ADR is superseded", call("C2 ADR inspect superseded", "inspect", "--adr", "ADR-001")["data"]["state"] == "superseded", "")
+    call("C2 ADR check stays green after supersession and edit", "check")
+    gate("C2 ADR integrated change keeps passing its gate", "CHG-003")
+    changes = call("C2 ADR changes citing ADR-001", "inspect", "--adr", "ADR-001")["data"]["changes"]
+    pinned = cited["semantic"]["architecture_decisions"]["adrs"][0]["sha256"]
+    check("C2 ADR integrated change keeps its pin", [(c["id"], c["status"], c["pin_current"], c["sha256"]) for c in changes
+                                                      if c["id"] == "CHG-003"] == [("CHG-003", "integrated", False, pinned)], str(changes))

@@ -20,12 +20,13 @@ A coordinator brief with: the intent, the change ID when revising, the current c
 
 - A sealed bundle (`change seal`) imported or revised through native operations, with the result of `check --change ID --gate approve`.
 - Source captures and criterion coverage, including derived ACs, exclusions and deferrals for the user to decide.
+- ADR drafts, written from the ADR template in the staging folder, when a decision meets the criterion in `roclec-specify`. The coordinator places and registers them as proposed and asks the user to accept them; seal the citing bundle only after they are registered, or return it unsealed with the citation pending.
 - Open questions that need the user, each with its impact on the bundle.
 - What was not verified.
 
 ## Prohibited
 
-- Approving or agreeing anything, or recording a decision for the user.
+- Approving or agreeing anything, including accepting an ADR, or recording a decision for the user.
 - Editing approved or integrated snapshots, records or generated views.
 - Touching product code or files outside the staging folder named in the brief.
 
