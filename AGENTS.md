@@ -16,6 +16,7 @@
 - `src/roclec_spec_kit/assets/legacy/`: frozen schema-1 regression assets, used only by explicit legacy oracles; never install them into native consumers.
 - `src/roclec_spec_kit/assets/profiles/design-skills-lock.json`: pinned default dependencies for user-facing design work.
 - `src/roclec_spec_kit/external_skills.py`: restore consumer-owned `skills-lock.json` files without guessing each repo's technology stack.
+- `src/roclec_spec_kit/knowledge.py`, `instructions.py`: read-only helpers for consumer knowledge skills (canonical `.agents/skills/<id>/`, directory fingerprints) and the generated authority map in the managed block of `AGENTS.md`/`CLAUDE.md`.
 - `src/roclec_spec_kit/lifecycle.py`: worktree feature selection and guarded transitions.
 - `src/roclec_spec_kit/adapter.py`: optional spec-kit aliases generated from native sources; manifests use the package version.
 - `scripts/harness.py`: real-wheel lifecycle and rejection checks.

@@ -10,11 +10,11 @@ capabilities = ["read", "edit-change-workspace", "run-checks"]
 
 ## Responsibility
 
-Turn the intent in the brief into a sealed change bundle by following the listed skills. Load each skill through the host's skill mechanism or read its `SKILL.md`; this definition adds scope, inputs, outputs and limits and never replaces the skill.
+Turn the intent in the brief into a sealed change bundle by following the listed skills. Load each skill, and apply each knowledge skill named in the brief (read its folder under the path given), through the host's skill mechanism or by reading its `SKILL.md`; this definition adds scope, inputs, outputs and limits and never replaces the skill.
 
 ## Inputs
 
-A coordinator brief with: the intent, the change ID when revising, the current contract and the agreed references that apply, the allowed staging folder and the task's prohibitions.
+A coordinator brief with: the intent, the change ID when revising, the current contract and the agreed references that apply, the allowed staging folder, the knowledge skills of the stage and component (id and path) and the task's prohibitions.
 
 ## Outputs
 
@@ -23,6 +23,7 @@ A coordinator brief with: the intent, the change ID when revising, the current c
 - ADR drafts, written from the ADR template in the staging folder, when a decision meets the criterion in `roclec-specify`. The coordinator places and registers them as proposed and asks the user to accept them; seal the citing bundle only after they are registered, or return it unsealed with the citation pending.
 - A revised bundle linked to each rejection it addresses, with every correction resolved or disputed with a reason. Return disputed corrections for the user to decide.
 - Open questions that need the user, each with its impact on the bundle.
+- The knowledge skills you applied, by id (text only; no record field), and any you could not apply.
 - Your host and host session id, so the coordinator can record the session.
 - What was not verified.
 
