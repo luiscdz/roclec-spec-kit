@@ -8,8 +8,9 @@ Pure module: no writes, no kernel state. Public API (stable):
   (issue dicts, code ``FLOW_CRITERION_UNUSED``). ``root`` enables the agent-binding file check.
 * ``load(root: Path) -> dict``: read ``root/FLOW_PATH`` (``FLOW_MISSING`` when absent).
 * ``point(flow, name) -> dict | None``: checkpoint of a stage or hook name (``None`` if undeclared).
-* ``evaluate(flow, name, evaluations, *, outcome) -> list``: check criteria evaluations of a decision.
-  A rejection cites at least one ``not-met`` criterion only when the point declares criteria.
+* ``evaluate(flow, name, evaluations, *, outcome, kind=None) -> list``: check criteria evaluations of a
+  decision. With ``kind``, the approve point evaluates ``approve_criteria(flow, kind)``. A rejection cites at
+  least one ``not-met`` criterion only when the point declares criteria.
 * ``SUBJECT_POINTS``: decision point of each rejectable subject type.
 * ``render(flow, profile_data, learning=None, skills=None) -> bytes``: generated Markdown view with a
   managed-view header. The stage table, criteria and diagram come from the flow alone; a "Knowledge
@@ -21,6 +22,10 @@ Pure module: no writes, no kernel state. Public API (stable):
   except flow revisions, which keep the decision order the caller gives.
 * ``view_status(flow, profile_data, existing, learning=None, skills=None) -> "current"|"stale"|"missing"|"edited"``.
 * ``RETRO_PATH``: project-owned retrospective the view links to (seeded, never generated).
+* ``CHANGE_KINDS``, ``CHORE``: change kinds; ``kind_stages(flow, kind)`` lists the stages a kind passes
+  through (``None`` when the flow does not enable it) and ``approve_criteria(flow, kind)`` the criteria
+  its approval evaluates. Only ``[kinds.chore]`` is declarable: its stages must contain
+  ``CHORE_REQUIRED``, may add ``CHORE_OPTIONAL`` and its ``criteria`` replace the approve checkpoint's.
 
 Every failure is a ``model.ModelError`` with exit code 2 unless noted.
 """
@@ -53,6 +58,12 @@ SUBJECT_POINTS = {"change": "approve", "adr": "foundation", "reference": "founda
 # findings [{severity, status, count}]; sessions [{role, stage, count}].
 LEARNING_KEYS = ("revisions", "open_futs", "rejections", "findings", "sessions")
 FINDING_STATUSES = ("open", "still-open", "fixed", "accepted", "deferred", "invalid")
+# Change kinds. Evolution, fix and refactor pass every stage; a chore (no observable behavior) only those
+# its project agreed under [kinds.chore]: never define, design or release, review only when listed.
+CHORE = "chore"
+CHANGE_KINDS = ("evolution", "fix", "refactor", CHORE)
+CHORE_REQUIRED = ("approve", "plan", "implement", "verify", "integrate")
+CHORE_OPTIONAL = ("review",)
 
 ROLE_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 RESERVED_RE = re.compile(r"roclec-[a-z]+\Z")
@@ -116,7 +127,7 @@ def validate(data, root: Path | None = None):
     """Validate decoded TOML; return ``(normalized, warnings)``."""
     from .agents import contracts
     builtin = tuple(contracts())
-    _table(data, "flow", ("schema", "view", "roles", "criteria", "stages"), ("schema", "stages"))
+    _table(data, "flow", ("schema", "view", "roles", "criteria", "stages", "kinds"), ("schema", "stages"))
     _need(type(data["schema"]) is int and data["schema"] == 1, "Unsupported flow schema", "schema",
           "Set schema = 1.", expected=1, actual=data["schema"])
     view = _relative_path(data.get("view", DEFAULT_VIEW), "view", ".md")
@@ -234,11 +245,72 @@ def validate(data, root: Path | None = None):
                                         on_reject=checkpoint["on_reject"])
         stages.append(result)
 
+    kinds = {}
+    for name, row in _items(data.get("kinds", {}), "kinds"):
+        entity = f"kinds.{name}"
+        _need(name == CHORE, f"Kind {name} cannot be declared", entity,
+              f"Only [kinds.{CHORE}] is declarable; {', '.join(k for k in CHANGE_KINDS if k != CHORE)} pass every stage.",
+              expected=[CHORE], actual=name)
+        row = _table(row, entity, ("stages", "criteria"), ("stages",))
+        listed = _unique_list(row["stages"], f"{entity}.stages", item="stage name")
+        allowed = CHORE_REQUIRED + CHORE_OPTIONAL
+        extra = [s for s in listed if s not in allowed]
+        _need(not extra, f"A chore cannot pass through: {', '.join(extra)}", f"{entity}.stages",
+              f"A chore has no observable behavior: use {', '.join(CHORE_REQUIRED)} and optionally "
+              f"{', '.join(CHORE_OPTIONAL)}; work that needs define, design or release is an evolution.",
+              expected=list(allowed), actual=listed)
+        absent = [s for s in CHORE_REQUIRED if s not in listed]
+        _need(not absent, f"A chore must pass through: {', '.join(absent)}", f"{entity}.stages",
+              f"List {', '.join(CHORE_REQUIRED)}.", expected=list(CHORE_REQUIRED), actual=listed)
+        result = dict(stages=[s for s in STAGES if s in listed])
+        if "criteria" in row:
+            cited = _unique_list(row["criteria"], f"{entity}.criteria", CRITERION_RE, "criterion id")
+            undefined = [c for c in cited if c not in criteria]
+            _need(not undefined, f"Undefined criterion: {', '.join(undefined)}", f"{entity}.criteria",
+                  "Define it under [criteria.<ID>] or remove it.", actual=undefined)
+            used.update(cited)
+            result["criteria"] = cited
+        kinds[name] = result
+
     warnings = [ModelError("FLOW_CRITERION_UNUSED", f"Criterion {cid} is not cited by any checkpoint",
                            entity=f"criteria.{cid}", path=FLOW_PATH,
                            remediation="Cite it in a checkpoint or remove it.").issue | {"severity": "warning"}
                 for cid in sorted(criteria) if cid not in used]
-    return dict(schema=1, view=view, roles=roles, criteria=criteria, stages=stages), warnings
+    flow = dict(schema=1, view=view, roles=roles, criteria=criteria, stages=stages)
+    if kinds:
+        flow["kinds"] = kinds  # Omitted when none: earlier flows keep their normalized shape.
+    return flow, warnings
+
+
+def kind_stages(flow, kind):
+    """Stages a change of `kind` passes through, in canonical order; None when the flow does not enable it."""
+    need(kind in CHANGE_KINDS, "INVALID_INPUT", "Unknown change kind", exit_code=2,
+         expected=list(CHANGE_KINDS), actual=kind)
+    if kind != CHORE:
+        return list(STAGES)
+    declared = flow.get("kinds", {}).get(CHORE)
+    return list(declared["stages"]) if declared else None
+
+
+def approve_criteria(flow, kind):
+    """Criteria an approval (or rejection) of a change of `kind` evaluates; a chore's may replace approve's."""
+    declared = flow.get("kinds", {}).get(kind) if kind == CHORE else None
+    if declared and "criteria" in declared:
+        return list(declared["criteria"])
+    checkpoint = point(flow, "approve")
+    return list(checkpoint["criteria"]) if checkpoint else []
+
+
+def require_kind(flow, kind, entity=None):
+    """CHANGE_KIND_DISABLED unless the flow lets changes of `kind` through; returns its stages."""
+    stages = kind_stages(flow, kind)
+    if stages is None:
+        raise ModelError("CHANGE_KIND_DISABLED", f"The project flow does not enable {kind} changes", exit_code=2,
+                         entity=entity, path=FLOW_PATH, expected=f"[kinds.{kind}]",
+                         remediation=f"Add [kinds.{kind}] with stages = {list(CHORE_REQUIRED)} to {FLOW_PATH}, "
+                                     "agree the flow again (`roclec foundation agree --ref flow`), or classify "
+                                     "the work as an evolution, fix or refactor.")
+    return stages
 
 
 def _items(value, entity):
@@ -276,9 +348,11 @@ def point(flow, name):
     return None
 
 
-def evaluate(flow, name, evaluations, *, outcome):
+def evaluate(flow, name, evaluations, *, outcome, kind=None):
     checkpoint = point(flow, name)
     expected = sorted(checkpoint["criteria"]) if checkpoint else []
+    if name == "approve" and kind is not None:
+        expected = sorted(approve_criteria(flow, kind))
     need(isinstance(evaluations, list) and all(isinstance(r, dict) for r in evaluations), "INVALID_INPUT",
          "evaluations must be a list of objects", exit_code=2)
     rows = []
@@ -355,10 +429,28 @@ def _body(flow, profile_data, learning=None, knowledge=None):
     if checks:
         lines.append(f"  class {','.join(checks)} checkpoint;")
     lines += ["```", ""]
+    if flow.get("kinds"):
+        lines += _kinds(flow) + [""]
     if knowledge:
         lines += _skills(flow, knowledge) + [""]
     lines += _learning(flow, learning or {}) + [""]
     return "\n".join(lines).encode("utf-8")
+
+
+def _kinds(flow):
+    """Change kinds with a reduced lane (only a chore today), shown only when the flow declares one."""
+    every = ", ".join(STAGES)
+    lines = ["## Change kinds", "",
+             f"Evolution, fix and refactor pass every stage ({every}). A chore has no observable behavior "
+             "(scaffolding, tooling, configuration, dependency bumps): it cannot cite, add, change or retire "
+             "capabilities, requirements or acceptance criteria and never joins a release. Anything a user or "
+             "client could observe is an evolution. Foundation stays a prerequisite of every component.", ""]
+    rows = []
+    for name, row in sorted(flow["kinds"].items()):
+        criteria = row.get("criteria", (point(flow, "approve") or {}).get("criteria", []))
+        rows.append([name, ", ".join(row["stages"]), ", ".join(s for s in STAGES if s not in row["stages"] and s != "foundation"),
+                     ", ".join(criteria) or "—"])
+    return lines + _rows(("Kind", "Stages", "Skipped", "Approve criteria"), rows)
 
 
 def _link(target, view):

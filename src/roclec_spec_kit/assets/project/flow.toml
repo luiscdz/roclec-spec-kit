@@ -14,6 +14,12 @@
 # session_evidence = "required" (allowed only with ai = true) makes the gate that closes the stage demand
 # at least one imported agent session citing it: `roclec evidence record --kind agent-session --file
 # META.json --transcript EXPORT`. Set it to "optional" (the default) to stop demanding sessions there.
+#
+# [kinds.chore] enables chores: work with no observable behavior (scaffolding, tooling, configuration,
+# dependency bumps) that cites no capability, REQ or AC. A chore passes only the listed stages: approve,
+# plan, implement, verify and integrate are required, review is optional, and define, design and release
+# are never part of it (a chore joins no release). Its `criteria` replace the approve criteria for chores.
+# Remove the table to refuse chores; anything observable is an evolution.
 schema = 1
 view = "docs/flow.md"
 
@@ -32,6 +38,13 @@ text = "The proposal states the intended behavior."
 
 [criteria.CR-004]
 text = "The prototype matches the approved intention."
+
+[criteria.CR-005]
+text = "The plan changes no observable behavior and cites no capability, requirement or acceptance criterion."
+
+[kinds.chore]
+stages = ["approve", "plan", "implement", "verify", "integrate"]
+criteria = ["CR-005"]
 
 [stages.foundation]
 description = "Agree the project references (constitution, ADRs, process) before changes depend on them."

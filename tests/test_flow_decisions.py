@@ -189,14 +189,14 @@ class FlowDecisionsTest(unittest.TestCase):
     def test_pre_implement_revise_cycle_and_independent_chains(self):
         self.approve()
         self.plan()
-        declare_hook(self.root, "pre-implement", declared={"CR-005": "The plan is ready to implement."})
+        declare_hook(self.root, "pre-implement", declared={"CR-007": "The plan is ready to implement."})
         self.agree_flow()
         first = self.record["proposal_digest"]
         blocked = self.gate(expect=1, issue="CHECKPOINT_REQUIRED")["issues"][0]
         self.assertEqual((blocked["entity"], blocked["expected"], blocked["actual"]), ("CHG-001/engine/pre-implement", first, None))
         self.assertIn(f"roclec checkpoint CHG-001 --hook pre-implement --component engine --digest {first} --outcome approved",
                       blocked["remediation"])
-        self.assertIn("CR-005", blocked["remediation"])
+        self.assertIn("CR-007", blocked["remediation"])
         self.call("change", "start", "CHG-001", "--component", "engine", "--actor", "Owner", expect=1, issue="CHECKPOINT_REQUIRED")
         self.hook("--outcome", "approved", *criteria(self.root, "pre-implement"), digest_="0" * 64, expect=1, issue="APPROVAL_STALE")
         self.hook("--outcome", "approved", expect=2, issue="CRITERIA_MISMATCH")

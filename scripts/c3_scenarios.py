@@ -359,8 +359,8 @@ def hook_scenarios(workspace, invoke, check):
     call = adr_caller(root, invoke, check)
     actor = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
     declare_hook(root, "pre-implement")
-    declare_hook(root, "pre-integrate", declared={"CR-005": "The tested candidate is the one to integrate."})
-    declare_hook(root, "handoff", declared={"CR-006": "QA can take the integrated change."}, on_reject="defer")
+    declare_hook(root, "pre-integrate", declared={"CR-007": "The tested candidate is the one to integrate."})
+    declare_hook(root, "handoff", declared={"CR-008": "QA can take the integrated change."}, on_reject="defer")
     call("FF hooks agree the edited flow", "foundation", "agree", "--ref", "flow", *actor, *criteria(root, "foundation"))
     call("FF hooks regenerate the flow view", "views", "--write")
     commit(root)
@@ -412,14 +412,14 @@ def hook_scenarios(workspace, invoke, check):
     blocked = call("FF pre-integrate blocks integration", "integrate", "prepare", "CHG-001", "--component", "engine",
                    "--run", first["id"], "--out", plan, expect=1, issue="CHECKPOINT_REQUIRED")["issues"][0]
     check("FF pre-integrate names the run candidate", blocked["expected"] == first["candidate"]["inputs_digest"]
-          and f"--run {first['id']}" in blocked["remediation"] and "CR-005" in blocked["remediation"], str(blocked))
+          and f"--run {first['id']}" in blocked["remediation"] and "CR-007" in blocked["remediation"], str(blocked))
     stages = conformance(call("FF conformance with a pending pre-integrate decision", "inspect", "--change", "CHG-001")["data"])
     pending = stages["integrate"]["components"]["engine"]
     check("FF conformance presents the pending pre-integrate criteria with their text",
           pending["status"] == "pending" and pending["hook"]["status"] == "pending"
           and pending["hook"]["subject"] == first["candidate"]["inputs_digest"]
           and pending["hook"]["pending"] == {"decider": "owner", "criteria": [
-              {"id": "CR-005", "text": "The tested candidate is the one to integrate."}]}, str(pending))
+              {"id": "CR-007", "text": "The tested candidate is the one to integrate."}]}, str(pending))
     implemented = stages["implement"]["components"]["engine"]
     check("FF conformance records the pre-implement decision and the run",
           implemented["hook"]["status"] == "done" and implemented["hook"]["record"] == approved["decision"]["id"]
@@ -609,7 +609,7 @@ def hook_scenarios(workspace, invoke, check):
           and engine["foundation"]["record"] is not None, json.dumps(engine, sort_keys=True))
     check("FF integrated change shows each decided hook",
           [engine[name]["hook"]["status"] for name in ("implement", "integrate", "release")] == ["done"] * 3
-          and engine["release"]["hook"]["criteria"] == [{"id": "CR-006", "status": "met"}]
+          and engine["release"]["hook"]["criteria"] == [{"id": "CR-008", "status": "met"}]
           and engine["release"]["releases"] == [{"version": "v1.0.0", "status": "planning", "publication": None}],
           json.dumps(engine, sort_keys=True))
     second_stages = conformance(call("FF conformance of the deferred member", "inspect", "--change", "CHG-002")["data"])

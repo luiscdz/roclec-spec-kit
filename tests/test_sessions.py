@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from scripts.c1_scenarios import bundle, put_json
+from scripts.c1_scenarios import bundle, chore_bundle, put_json
 from scripts.c2_scenarios import PRODUCER, commit, git, setup
 from test_kernel import invoke
 from roclec_spec_kit.config import load_profile
@@ -246,6 +246,18 @@ class SessionEvidenceTest(unittest.TestCase):
                               release={"component": "engine", "version": "v9.0.0"}), expect=2, issue="INVALID_REFERENCE")
         self.record(self.meta(stage="foundation", change_id=None, component=None, subject="missing-reference"),
                     expect=2, issue="INVALID_REFERENCE")
+
+    def test_plan_session_may_precede_the_chore_it_drafts(self):
+        # A chore's plan is its bundle: its plan session, like a define session, precedes the import.
+        plan = self.record(self.meta(stage="plan", role="implementer", change_id="CHG-101", component=None))["data"]["evidence"]
+        self.record(self.meta(stage="plan", change_id="CHG-102", component="engine"), expect=2, issue="INVALID_INPUT")
+        self.record(self.meta(stage="implement", change_id="CHG-103"), expect=2, issue="INVALID_REFERENCE")
+        source = self.workspace / "chore"
+        record = chore_bundle(source, change_id="CHG-101", mutate=lambda s: s.update(sessions=[plan["id"]]))
+        self.call("change", "new", "--file", source / "change.json")
+        self.assertEqual(json.loads((self.root / ".roclec/changes/CHG-101/change.json").read_text())["semantic"]["sessions"],
+                         [plan["id"]])
+        self.assertEqual(record["kind"], "chore")
 
     def test_declared_agent_roles_from_the_flow(self):
         flow = self.root / ".roclec/flow.toml"

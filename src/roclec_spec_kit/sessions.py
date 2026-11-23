@@ -27,6 +27,7 @@ META_OPTIONAL = ("change_id", "component", "subject", "release")
 STORED = ("kind", "id", "executed_by_roclec", "transcript", "digest")
 # Stages whose session belongs to one component of a change; the other change stages may name one.
 COMPONENT_STAGES = ("design", "implement", "verify", "review", "integrate")
+DRAFTING_STAGES = ("define", "plan")  # May precede the import of the change they draft.
 TIMESTAMP = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 ROLE = re.compile(r"[a-z][a-z0-9-]*")
 REDACTED = "[REDACTED]"
@@ -138,10 +139,12 @@ def validate_meta(kernel, meta):
              entity=meta["subject"], remediation="Name a registered reference or ADR (see references.json).")
     if "change_id" in meta:
         imported = kernel.store.path(f".roclec/changes/{meta['change_id']}/change.json").is_file()
-        # The session that drafts a change precedes its import, so the first bundle can cite it.
-        need(imported or meta["stage"] == "define", "INVALID_REFERENCE", "Unknown change", exit_code=2,
-             entity=meta["change_id"], remediation="Cite an imported change ID (only define sessions may precede it).")
-        need(imported or "component" not in meta, "INVALID_INPUT", "A define session before its change is imported names no component",
+        # The session that drafts a change precedes its import, so the first bundle can cite it: define, or
+        # plan, which is a chore's bundle and may start before any import. The kind is unknown until the
+        # import, so a plan session of any kind may come first; the gates still demand each stage's session.
+        need(imported or meta["stage"] in DRAFTING_STAGES, "INVALID_REFERENCE", "Unknown change", exit_code=2,
+             entity=meta["change_id"], remediation="Cite an imported change ID (only define or plan sessions may precede it).")
+        need(imported or "component" not in meta, "INVALID_INPUT", f"A {meta['stage']} session before its change is imported names no component",
              exit_code=2, entity=meta["change_id"], remediation="Remove component; the session then counts for every component.")
         if imported and "component" in meta:
             scope = kernel.change(meta["change_id"])[0]["semantic"]["components"]

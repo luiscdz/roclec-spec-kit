@@ -7,7 +7,7 @@ import sys
 import tempfile
 import unittest
 
-from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios, findings_scenarios, flow_scenarios
+from scripts.c2_scenarios import PRODUCER, scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, setup, commit, branch_scenarios, findings_scenarios, flow_scenarios, chore_scenarios
 from test_kernel import invoke
 from scripts.c2_faults import capture_scenarios, scenarios as fault_scenarios
 from scripts.c1_scenarios import bundle, criteria, digest, put_json, snapshot, tree
@@ -29,6 +29,10 @@ class VerificationTest(unittest.TestCase):
     def test_flow_hooks_and_edits_across_branches_and_merges(self):
         with tempfile.TemporaryDirectory() as directory:
             flow_scenarios(Path(directory), invoke, lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
+
+    def test_chore_lane_skips_spec_release_and_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            chore_scenarios(Path(directory), invoke, lambda name, condition, detail="": self.assertTrue(condition, f"{name}: {detail}"))
 
     def test_public_c2_scenarios(self):
         with tempfile.TemporaryDirectory() as directory:

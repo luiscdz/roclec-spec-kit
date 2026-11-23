@@ -101,6 +101,36 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
     return record
 
 
+def chore_bundle(folder, *, change_id="CHG-101", components=("engine",), origin_kind="request", origin_id=None, mutate=None):
+    """A chore bundle: a plan with no contract, obligation or AC; `mutate(semantic)` injects abuse cases."""
+    folder.mkdir(parents=True, exist_ok=True)
+    body = "Synthetic chore plan: scaffold the workspace tooling; no observable behavior changes.\n"
+    source_text = "Synthetic request: set up the workspace before the first story.\n"
+    source_path = "origins/request.md"
+    origin_id = origin_id or f"request-{change_id}"
+    origin = {"kind": origin_kind, "id": origin_id, "locator": "synthetic fixture", "captured": source_path,
+              "criteria": ["criterion-1"]}
+    if origin_kind == "request":
+        origin["actor"] = "fixture user"
+    semantic = {"intention": "plan.md", "files": {"plan.md": file_hash(body.encode()),
+                                                  source_path: file_hash(source_text.encode())},
+                "components": sorted(components), "bases": [], "deltas": [], "proposed": [], "dependencies": [],
+                "references": [], "origins": [origin],
+                "coverage": {"criteria": [{"origin": origin_id, "criterion": "criterion-1",
+                                           "status": "excluded", "reason": "Tooling only; no user-visible criterion"}],
+                             "derived": []},
+                "architecture_decisions": {"none": "Synthetic chore applies no architecture decision record."}}
+    if mutate:
+        mutate(semantic)
+    (folder / "origins").mkdir(exist_ok=True)
+    (folder / source_path).write_text(source_text, encoding="utf-8")
+    (folder / "plan.md").write_text(body, encoding="utf-8")
+    record = {"model_schema": 2, "id": change_id, "kind": "chore", "semantic": semantic}
+    record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
+    put_json(folder / "change.json", record)
+    return record
+
+
 def foundation(root, names=("engine", "viewer")):
     relative = "docs/reference.md"
     path = root / relative

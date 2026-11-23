@@ -218,6 +218,8 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     c2_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c2_scenarios import skill_scenarios as c2_skill_scenarios
     c2_skill_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    from c2_scenarios import chore_scenarios
+    chore_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c3_scenarios import combined_and_fix_scenarios as c3_scenarios
     def c3_check(name, condition, evidence=''):
         cases.append({'scope': 'C3-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})

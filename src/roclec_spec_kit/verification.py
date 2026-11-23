@@ -13,7 +13,7 @@ import subprocess
 
 from .causality import one_head, record_id, scoped_heads
 from .config import DEFAULT_LOG_QUOTA
-from .flow import RETRO_PATH
+from .flow import CHORE, CHORE_REQUIRED, RETRO_PATH, kind_stages
 from .knowledge import SKILL_ROLE
 from .findings import OPEN, SEVERITIES, finding_key, project as project_findings, validate_findings, validate_resolutions
 from . import sessions as agent_sessions
@@ -102,8 +102,27 @@ class Verification:
             adopted = {c: p["id"] for c, p in policies.items() if p and p["enabled"]}
             return {"id": digest(adopted), "enabled": bool(adopted), "members": adopted}
         records = [d for d in self.k.decisions(change_id) if d["kind"] == "review-policy"]
-        return records[-1] if records else {"id": digest({"change_id": change_id, "enabled": self.k.profile.review_enabled, "source": "profile"}),
-                                                  "enabled": self.k.profile.review_enabled, "source": "profile"}
+        if records:
+            return records[-1]
+        if self.kind(change_id) == CHORE and "review" not in self.chore_lane():
+            # A chore's lane without review: no independent review unless a review-policy decision enables it.
+            return {"id": digest({"change_id": change_id, "enabled": False, "source": "kind"}), "enabled": False, "source": "kind"}
+        return {"id": digest({"change_id": change_id, "enabled": self.k.profile.review_enabled, "source": "profile"}),
+                "enabled": self.k.profile.review_enabled, "source": "profile"}
+
+    def kind(self, change_id):
+        """Declared kind of an imported change (None when absent); the record itself is validated by its readers."""
+        relative = f".roclec/changes/{change_id}/change.json"
+        record = self.k.read(relative) if self.store.path(relative).is_file() else None
+        return record.get("kind") if isinstance(record, dict) else None
+
+    def chore_lane(self):
+        """Stages the current flow agrees for chores.
+
+        A flow that no longer enables chores yields CHORE_REQUIRED (no review): pending chores are already
+        refused by their gates (CHANGE_KIND_DISABLED) and integrated ones keep the policy their record froze.
+        """
+        return kind_stages(self.k._flow()[0], CHORE) or list(CHORE_REQUIRED)
 
     def set_policy(self, change_id, enabled, actor, reason):
         record, _, _ = self.k.change(change_id)
@@ -237,9 +256,12 @@ class Verification:
             self.k.gate(change_id, component, "implement")
         before = self.candidate(change_id, component, base)
         checks = self.k.profile.components[component]["verification"]
-        applicable = self.acceptance(self.target(change_id), component)
-        for check in checks:
-            need(set(check.get("acceptance_ids", [])) <= set(applicable), "INVALID_REFERENCE", "Check cites an inapplicable AC", entity=check["id"])
+        target = self.target(change_id)
+        applicable = self.acceptance(target, component)
+        # A chore has no ACs: the profile's checks still run in full, their AC tags simply cover nothing.
+        if target.get("kind") != CHORE:
+            for check in checks:
+                need(set(check.get("acceptance_ids", [])) <= set(applicable), "INVALID_REFERENCE", "Check cites an inapplicable AC", entity=check["id"])
         run_id = record_id("RUN")
         previous = self.run_heads(self.attempts(change_id, component)).get("run", [])
         root = f".roclec/runs/{run_id}"

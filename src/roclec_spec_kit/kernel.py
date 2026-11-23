@@ -365,16 +365,22 @@ class Kernel:
         raw = path.read_bytes()
         return project_flow.parse(raw, self.profile.root), raw
 
-    def _evaluate(self, point, criteria, outcome, flow=None):
+    def _evaluate(self, point, criteria, outcome, flow=None, *, kind=None):
         """Evaluate a decision's criteria against the current flow; return (criteria, flow sha256).
 
-        Exactly the criteria declared for `point` (D28); the sha pins the flow bytes evaluated.
+        Exactly the criteria declared for `point` (D28), or for a chore's approval those of [kinds.chore];
+        the sha pins the flow bytes evaluated.
         """
         if flow is None:
             flow = self._flow()
         parsed, raw = flow
-        rows = project_flow.evaluate(parsed, point, [] if criteria is None else criteria, outcome=outcome)
+        rows = project_flow.evaluate(parsed, point, [] if criteria is None else criteria, outcome=outcome, kind=kind)
         return rows, sha(raw)
+
+    @staticmethod
+    def _authoring_stage(record):
+        """Stage whose session produced the bundle an approval decides: define, or plan for a chore."""
+        return "plan" if record["kind"] == project_flow.CHORE else "define"
 
     def _cited(self, sessions, **scope):
         """The `sessions` key of a new decision: validated citations, omitted when none (TL.3)."""
@@ -407,7 +413,7 @@ class Kernel:
                                                                   subject=subject, release=release)
                          + f' Or set session_evidence = "optional" on [stages.{stage}] and agree the flow again.')
 
-    def require_gate_sessions(self, change_id, component, gate, parsed=None, *, subjects=()):
+    def require_gate_sessions(self, change_id, component, gate, parsed=None, *, subjects=(), kind=None):
         """Sessions a change gate demands for one component (GATE_SESSIONS); a disabled review needs none.
 
         `subjects` are the foundation references the component depends on: with a required foundation
@@ -416,7 +422,11 @@ class Kernel:
         if parsed is None:
             parsed = self._flow()[0]
         required = {row["name"] for row in parsed["stages"] if row["session_evidence"] == "required"}
-        stages = [stage for stage in GATE_SESSIONS[gate] if stage in required]
+        if kind is None:
+            kind = self.change(change_id)[0]["kind"]
+        # A chore skips the stages outside its lane; review still follows the change's review policy.
+        lane = project_flow.kind_stages(parsed, kind) or list(project_flow.CHORE_REQUIRED)  # None: a disabled chore.
+        stages = [stage for stage in GATE_SESSIONS[gate] if stage in required and (stage in lane or stage == "review")]
         subjects = sorted(subjects) if "foundation" in required else []
         if not stages and not subjects:
             return  # Nothing demanded: session records are not even read.
@@ -507,7 +517,8 @@ class Kernel:
             self.inspect_fut(fut)
         pin, files = service.subject(subject_type, entity)
         need(pin == subject_digest, "APPROVAL_STALE", "Rejection must cite the current subject digest", expected=pin, actual=subject_digest)
-        evaluated, flow_pin = self._evaluate(point, criteria, "rejected", flow)
+        kind = current["kind"] if subject_type == "change" else None
+        evaluated, flow_pin = self._evaluate(point, criteria, "rejected", flow, kind=kind)
         subject = {"type": subject_type, "entity": entity, "digest": pin}
         extra = {"subject": subject, "consequence": consequence, "corrections": list(corrections),
                  "criteria": evaluated, "flow": flow_pin, "files": {p: sha(b) for p, b in files.items()}}
@@ -911,12 +922,15 @@ class Kernel:
         record = read_json(local_path(folder, "change.json"))
         fields(record, ("model_schema", "id", "kind", "semantic", "proposal_digest"))
         schema(record)
-        need(record["id"] == change_id and record["kind"] in {"evolution", "fix", "refactor"},
-             "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2)
+        need(record["id"] == change_id and record["kind"] in project_flow.CHANGE_KINDS,
+             "INVALID_INPUT", "Change identity/kind mismatch", exit_code=2,
+             expected=list(project_flow.CHANGE_KINDS), actual=record.get("kind"))
         semantic = record["semantic"]
         fields(semantic, ("intention", "files", "components", "bases", "deltas", "proposed", "dependencies", "references"),
                ("baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes",
                 "sessions"))
+        if record["kind"] == project_flow.CHORE:
+            self._chore_shape(change_id, semantic)
         if "addresses" in semantic:
             addresses(semantic["addresses"])
         if "sessions" in semantic:
@@ -1047,7 +1061,7 @@ class Kernel:
                     need(set(delta["retire_acceptance_ids"]) == old_acs - new_acs
                          and set(delta["add_acceptance_ids"]) == new_acs - old_acs,
                          "INVALID_REFERENCE", "AC delta must exactly match this requirement's criteria")
-        else:
+        elif record["kind"] != project_flow.CHORE:  # A chore's empty contract lists are checked by _chore_shape.
             need(not semantic["deltas"] and not semantic["proposed"], "INVALID_REFERENCE",
                  "Fix/refactor must preserve the normative contract")
             need(bool(bases) or bool(semantic["references"]), "INVALID_REFERENCE", "Preservation needs a contract or pinned source")
@@ -1126,6 +1140,43 @@ class Kernel:
         files["change.json"] = encoded(record)
         return record, files, new_ids
 
+    @staticmethod
+    def _chore_shape(change_id, semantic):
+        """A chore has no observable behavior: no contract, obligation, prototype or historical baseline.
+
+        Its origins are a request (with actor) or a FUT and none of their criteria can be covered by an AC.
+        """
+        remediation = ("A chore cannot cite, add, change or retire capabilities, requirements or acceptance "
+                       "criteria. Work with observable behavior is an evolution (or a fix/refactor of an existing "
+                       "contract): change the kind and declare its bases.")
+        for key in ("bases", "deltas", "proposed"):
+            need(semantic[key] == [], "INVALID_REFERENCE", f"A chore cannot declare {key}", entity=change_id,
+                 path=f"semantic.{key}", expected=[], actual=semantic[key], remediation=remediation)
+        for key in ("baseline_release", "fixes", "prototypes"):
+            need(key not in semantic, "INVALID_REFERENCE", f"A chore cannot declare {key}", entity=change_id,
+                 path=f"semantic.{key}", expected="absent", actual=semantic.get(key), remediation=remediation)
+        for origin in semantic.get("origins", []) if isinstance(semantic.get("origins"), list) else []:
+            need(isinstance(origin, dict) and origin.get("kind") in {"request", "fut"}, "INVALID_ORIGIN",
+                 "A chore originates in a request or a FUT", entity=origin.get("id") if isinstance(origin, dict) else change_id,
+                 expected=["fut", "request"], actual=origin.get("kind") if isinstance(origin, dict) else None,
+                 remediation="Capture the request (with its actor) or cite the FUT; a story, issue or incident "
+                             "describes behavior and belongs to an evolution or fix.")
+        coverage = semantic.get("coverage")
+        if isinstance(coverage, dict):
+            rows = coverage.get("criteria") if isinstance(coverage.get("criteria"), list) else []
+            covered = [f"{r.get('origin')}/{r.get('criterion')}" for r in rows if isinstance(r, dict) and r.get("status") == "covered"]
+            need(not covered, "INVALID_COVERAGE", "A chore has no acceptance criteria to cover an origin criterion",
+                 entity=change_id, actual=covered,
+                 remediation="Mark the criterion excluded (with reason) or deferred (with a FUT), or classify the "
+                             "work as an evolution.")
+            need(coverage.get("derived") in ([], None), "INVALID_COVERAGE", "A chore cannot derive acceptance criteria",
+                 entity=change_id, remediation=remediation)
+
+    def _kind_flow(self, record, flow=None):
+        """(parsed flow, raw, stages of the record's kind); CHANGE_KIND_DISABLED for a chore the flow does not enable."""
+        parsed, raw = flow if flow is not None else self._flow()
+        return parsed, raw, project_flow.require_kind(parsed, record["kind"], record["id"])
+
     def new_change(self, source_file):
         need(source_file.name == "change.json", "INVALID_INPUT", "Bundle manifest must be named change.json", exit_code=2)
         record = read_json(source_file)
@@ -1135,6 +1186,8 @@ class Kernel:
         existing = self.store.path(destination).exists()
         need(not existing or Rejections(self).revising(change_id), "ID_COLLISION", "Change ID already exists", entity=change_id)
         record, files, new_ids = self.change(change_id, source=source_file.parent, check_base=True)
+        if record["kind"] == project_flow.CHORE:
+            self._kind_flow(record)  # Only a flow that enables chores accepts one.
         agent_sessions.cite(self, record["semantic"].get("sessions"), change_id=change_id)
         if existing:
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
@@ -1335,8 +1388,9 @@ class Kernel:
         # The approval records the flow it was given under and the evaluation of its criteria;
         # agreement of that flow is enforced at implement.
         flow = self._flow()
-        evaluated, flow_pin = self._evaluate("approve", criteria, "approved", flow)
-        self.require_session("define", flow[0], change_id=change_id)
+        self._kind_flow(record, flow)
+        evaluated, flow_pin = self._evaluate("approve", criteria, "approved", flow, kind=record["kind"])
+        self.require_session(self._authoring_stage(record), flow[0], change_id=change_id)
         extra = {"addresses": record["semantic"]["addresses"]} if "addresses" in record["semantic"] else {}
         extra.update(self._cited(sessions, change_id=change_id))
         # The skills applicable to its components at any stage, on their current files (TK.2). Agreement is
@@ -1390,8 +1444,10 @@ class Kernel:
             self._origin_approval(record)
             Adrs(self).approvable(record)
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
-            parsed = self._flow()[0]
-            self.require_session("define", parsed, change_id=change_id)
+            # Integrated work keeps its history: a flow that later drops [kinds.chore] does not reopen it.
+            integrated = any(self.integration(change_id, c) for c in record["semantic"]["components"])
+            parsed = self._flow()[0] if integrated else self._kind_flow(record)[0]
+            self.require_session(self._authoring_stage(record), parsed, change_id=change_id)
             self._skill_pins(record, parsed)  # Approval pins them: each applicable skill must be readable.
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
@@ -1403,17 +1459,22 @@ class Kernel:
             raise ModelError("FOUNDATION_INCOMPLETE", "Resolve foundation before implementation", entity=component,
                              actual=foundation["issues"])
         integrated = self.integration(change_id, component) is not None
+        chore = record["kind"] == project_flow.CHORE
+        if chore and not integrated:
+            self._kind_flow(record)  # The flow agreed at this gate must still enable chores; checked first.
         if not integrated:
             # An integrated component keeps its historical pins: no retroactive invalidation.
             Adrs(self).gate(record)
             self._prototype_gate(record)
             self.require_checkpoint(change_id, component, "pre-implement", record["proposal_digest"])
             self.require_gate_sessions(change_id, component, "implement",
-                                       subjects=[ref["id"] for ref in foundation["references"]])
-        assignments = [(r, entry) for r in self.releases() if r["record"]["component"] == component
-                       for entry in r["record"]["changes"] if entry["change_id"] == change_id
-                       and entry["intent_revision"] == record["proposal_digest"]]
-        need(len(assignments) == 1, "RELEASE_UNASSIGNED", "Change needs exactly one release assignment for this component", entity=component)
+                                       subjects=[ref["id"] for ref in foundation["references"]], kind=record["kind"])
+        # A chore never joins a release: its commits ship with the trunk the next release verifies.
+        assignments = [] if chore else [
+            (r, entry) for r in self.releases() if r["record"]["component"] == component
+            for entry in r["record"]["changes"] if entry["change_id"] == change_id
+            and entry["intent_revision"] == record["proposal_digest"]]
+        need(chore or len(assignments) == 1, "RELEASE_UNASSIGNED", "Change needs exactly one release assignment for this component", entity=component)
         for dep in record["semantic"]["dependencies"]:
             if "release" in dep:
                 satisfied = self.release(dep["component"], dep["release"])["publication"] is not None
@@ -1424,12 +1485,13 @@ class Kernel:
             from .verification import Verification
             verified = Verification(self).verify(change_id, component, final=stage == "integrate")
             if not integrated:
-                self.require_gate_sessions(change_id, component, stage)
+                self.require_gate_sessions(change_id, component, stage, kind=record["kind"])
             if stage == "integrate" and not integrated:
                 self.require_checkpoint(change_id, component, "pre-integrate", verified["candidate"]["inputs_digest"],
                                         run=verified["run_id"])
             return {**verified, "gate": stage}
-        return {"change": change_id, "component": component, "gate": stage, "release": assignments[0][0]["record"]["version"]}
+        return {"change": change_id, "component": component, "gate": stage,
+                "release": assignments[0][0]["record"]["version"] if assignments else None}
 
     def start(self, change_id, component, actor, *, sessions=()):
         result = self.gate(change_id, component, "implement")
@@ -1827,7 +1889,13 @@ class Kernel:
                 return self._entry("done", f"{component}/{published[0]['version']}", releases=rows, **hook)
             return self._entry("pending", releases=rows, **hook)
 
-        builders = {"foundation": foundation, "design": design, "plan": plan, "implement": implement,
+        def sealed_plan(component):
+            # A chore's plan is the sealed bundle its approval decides; it joins no release.
+            return self._entry("done", pin, sealed=True)
+
+        chore = record["kind"] == project_flow.CHORE
+        lane = project_flow.kind_stages(parsed, record["kind"]) or list(project_flow.CHORE_REQUIRED)
+        builders = {"foundation": foundation, "design": design, "plan": sealed_plan if chore else plan, "implement": implement,
                     "verify": verify, "review": review, "integrate": integrate, "release": release}
         stages = []
         for row in parsed["stages"]:
@@ -1836,8 +1904,17 @@ class Kernel:
             if not row["ai"]:
                 stage.update(reason=row["reason"], limitation=HUMAN_STAGE_LIMITATION)
             checkpoint = row.get("checkpoint")
+            if chore and name == "approve" and checkpoint:
+                checkpoint = {**checkpoint, "criteria": project_flow.approve_criteria(parsed, record["kind"])}
             stage["checkpoint"] = {**checkpoint, "hook": STAGE_HOOKS.get(name)} if checkpoint else None
-            if name == "define":
+            if chore and name not in lane and name not in {"foundation", "review"}:
+                # Outside the chore lane (define, design, release): nothing is expected or recorded.
+                outside = self._entry("n/a", kind=record["kind"])
+                if name == "define":
+                    stage["change"] = dict(outside, sessions=[])
+                else:
+                    stage["components"] = {c: dict(outside, sessions=[]) for c in components}
+            elif name == "define":
                 stage["change"] = self._entry("done", pin, sealed=True)
                 stage["change"]["sessions"] = stage_sessions(name)
             elif name == "approve":
@@ -2061,6 +2138,8 @@ class Kernel:
                      "INVALID_REFERENCE", "Release member is outside component scope")
                 need(release["record"]["kind"] == "release" or change["kind"] == "fix",
                      "VERSION_INVALID", "Correction release contains non-fix work")
+                need(change["kind"] != project_flow.CHORE, "VERSION_INVALID", "A chore is not release membership",
+                     entity=member["change_id"])
         self._release_history = copy.deepcopy(result)
         return result
 
@@ -2089,6 +2168,9 @@ class Kernel:
             self._component(change, component)
             self._approved(change)
             need(not any(d["kind"] == "change-cancel" for d in self.decisions(change_id)), "CHANGE_CANCELED", "Cannot assign canceled work")
+            need(change["kind"] != project_flow.CHORE, "VERSION_INVALID", "A chore is not release membership",
+                 entity=change_id, remediation="A chore has no observable behavior; its integrated commits ship with "
+                                               "the trunk the next release verifies. Plan the release without it.")
             if kind != "release":
                 need(change["kind"] == "fix", "VERSION_INVALID", "Hotfix/bugfix may contain only fixes")
             member = {"change_id": change_id, "intent_revision": change["proposal_digest"]}
