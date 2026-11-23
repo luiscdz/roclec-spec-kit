@@ -12,7 +12,7 @@ try:
 except ImportError:  # The viewer is an optional extra.
     flask = None
 
-from scripts.viewer_scenarios import partial_provenance_scenarios, published_scenarios, scenarios
+from scripts.viewer_scenarios import partial_provenance_scenarios, published_scenarios, review_attribution_scenarios, scenarios
 from test_kernel import invoke
 
 
@@ -46,6 +46,10 @@ class ViewerTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             published_scenarios(Path(directory), invoke, checker(self), Fetcher())
 
+    def test_review_attribution_matches_the_gate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review_attribution_scenarios(Path(directory), invoke, checker(self), Fetcher())
+
     def test_partial_publication_provenance(self):
         with tempfile.TemporaryDirectory() as directory:
             partial_provenance_scenarios(Path(directory), invoke, checker(self), Fetcher())
@@ -70,7 +74,9 @@ class ServerSafetyTest(unittest.TestCase):
         body = self.client.get("/api/v1/releases", base_url="http://localhost").get_json()
         self.assertEqual(body["data"], {"releases": []})
         tree = self.client.get("/api/v1/docs/tree", base_url="http://localhost").get_json()["data"]
-        self.assertEqual(tree["children"], [])
+        # init generates only the flow view and seeds the flow retrospective; a managed header is not taken as the title.
+        self.assertEqual([(c["path"], [(f["path"], f["title"]) for f in c["children"]]) for c in tree["children"]],
+                         [("docs", [("docs/flow-retro.md", "Flow retrospective"), ("docs/flow.md", "Project flow")])])
 
     def test_foreign_host_origin_and_methods_are_rejected(self):
         self.assertEqual(self.client.get("/api/v1/project", base_url="http://evil.example").status_code, 421)

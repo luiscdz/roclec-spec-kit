@@ -8,3 +8,17 @@ user_facing = false
 inputs = ["src/**", "tests/**"]
 generated = ["build/**"]
 verification = [{id="unit", argv=["python3", "-m", "unittest"], cwd=".", timeout_seconds=30}]
+
+# Optional: pin the model of a Roclec role per host. Without it, each role
+# inherits the model of the host session. Roles: specifier, implementer, reviewer.
+# [agents.implementer]
+# claude = "host-model-name"
+# codex = "host-model-name"
+
+# Optional: where ADRs live and which sections `check` expects. Defaults match
+# .roclec/templates/adr-template.md; adapt this list if you adapt the template.
+# [adr]
+# path = "docs/adr"
+# required_sections = ["Context and problem", "Decision drivers", "Considered options", "Decision",
+#                      "Consequences", "Compliance verification", "Relations"]
+# options_section = "Considered options"

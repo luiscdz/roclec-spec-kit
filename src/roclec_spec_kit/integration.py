@@ -40,6 +40,10 @@ class Integration:
         record, files, _ = self.k.change(change_id, check_base=True, check_component=component)
         self.k.preserve_integrated(record)
         verified = self.v.verify(change_id, component, run_id=run_id, final=True)
+        # A declared pre-integrate hook needs a human approval of exactly this run's candidate.
+        self.k.require_checkpoint(change_id, component, "pre-integrate", verified["candidate"]["inputs_digest"], run=run_id)
+        # A required implement, verify or review stage needs its agent session (the integrate gate, TL.4).
+        self.k.require_gate_sessions(change_id, component, "integrate")
         repo = self.k.profile.repo(component)
         target_ref = self.k.profile.components[component]["target_ref"]
         target_commit = target_tip(repo, target_ref)
@@ -65,7 +69,8 @@ class Integration:
         integration = {"model_schema": 2, "change_id": change_id, "component": component,
                        "proposal_digest": record["proposal_digest"], "run_id": run_id,
                        "candidate": verified["candidate"], "evidence": verified["evidence"],
-                       "policy_id": verified["policy_id"], "contracts": current["components"][component], **destination_tip}
+                       "policy_id": verified["policy_id"], "finding_state": verified["finding_state"],
+                       "contracts": current["components"][component], **destination_tip}
         if "baseline_release" in record["semantic"]:
             baseline = record["semantic"]["baseline_release"]
             integration["baseline_release"] = baseline

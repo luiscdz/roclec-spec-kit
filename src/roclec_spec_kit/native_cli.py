@@ -13,6 +13,7 @@ import traceback
 from . import __version__
 from .config import ConfigError, load_profile
 from .external_skills import SkillLockError
+from .flow import HOOKS
 from .kernel import Kernel
 from .model import ModelError, need, read_json
 from .store import Store
@@ -21,6 +22,37 @@ from .store import Store
 class Parser(argparse.ArgumentParser):
     def error(self, message):
         raise ModelError("INVALID_INPUT", message, exit_code=2, remediation=self.format_usage().strip())
+
+
+def subject_decision_arguments(parser):
+    for name in ("digest", "actor", "reason"):
+        parser.add_argument(f"--{name}", required=True)
+
+
+def json_file(path, default=None):
+    return read_json(path.resolve()) if path else default
+
+
+def session_argument(parser):
+    parser.add_argument("--session", action="append", default=[], metavar="EVD-ID",
+                        help="Agent session that produced this record (repeatable)")
+
+
+def rejection_arguments(parser):
+    parser.add_argument("--consequence", choices=("revise", "cancel", "defer"),
+                        help="Default: on_reject of the decision point in the project flow")
+    parser.add_argument("--corrections", type=Path, help="JSON list of requested corrections")
+    parser.add_argument("--fut", help="Captured FUT for a deferred rejection")
+    parser.add_argument("--criteria", type=Path, help="JSON list of evaluated criteria")
+    parser.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
+
+
+def record_rejection(kernel, args, subject_type):
+    return kernel.reject(subject_type, args.entity, args.digest, args.actor, args.reason,
+                         consequence=args.consequence, fut=args.fut,
+                         corrections=json_file(args.corrections, []),
+                         criteria=json_file(args.criteria), addresses=json_file(args.addresses),
+                         sessions=args.session)
 
 
 def build_parser():
@@ -32,13 +64,19 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status", help="Summarize component activity and pending gates")
     listing = sub.add_parser("list", help="List model records")
-    listing.add_argument("category", choices=("changes", "futs", "releases", "runs"))
+    listing.add_argument("category", choices=("adrs", "changes", "findings", "futs", "rejections", "releases", "runs"))
+    scope = listing.add_mutually_exclusive_group()
+    scope.add_argument("--change")
+    scope.add_argument("--release")
+    listing.add_argument("--component")
+    listing.add_argument("--open", action="store_true", help="Show open findings or rejections awaiting a revision")
+    listing.add_argument("--origin", help="Filter changes by source identifier")
     init = sub.add_parser("init", help="Initialize a profile-3 project on its configured Git trunk")
     init.add_argument("path")
     init.add_argument("--profile", required=True, type=Path)
     inspect = sub.add_parser("inspect", help="Read integrated, proposed or historical state")
     selectors = inspect.add_mutually_exclusive_group(required=True)
-    for name in ("capability", "change", "fut", "release"):
+    for name in ("adr", "capability", "change", "fut", "prototype", "reference", "release"):
         selectors.add_argument(f"--{name}")
     inspect.add_argument("--component")
     inspect.add_argument("--at")
@@ -51,6 +89,26 @@ def build_parser():
     agree = fsub.add_parser("agree")
     for name in ("ref", "actor", "reason"):
         agree.add_argument(f"--{name}", required=True)
+    agree.add_argument("--addresses", type=Path, help="JSON response to the previous rejection")
+    agree.add_argument("--criteria", type=Path, help="JSON list evaluating the foundation criteria of the flow")
+    agree.add_argument("--fut", action="append", default=[], metavar="FUT-ID",
+                       help="Process FUT this flow agreement addresses (repeatable; process reference only)")
+    session_argument(agree)
+    rejection = sub.add_parser("reject", help="Record a human rejection of an exact revision")
+    rejection.add_argument("subject_type", choices=("change", "adr", "reference", "prototype"))
+    rejection.add_argument("entity", help="Change or reference ID, or project-relative prototype path")
+    subject_decision_arguments(rejection)
+    rejection_arguments(rejection)
+    session_argument(rejection)
+    checkpoint = sub.add_parser("checkpoint", help="Record a human decision on a prototype revision or a flow hook")
+    checkpoint.add_argument("entity", metavar="PATH|CHG-NNN", help="Prototype path, or the change of a --hook checkpoint")
+    checkpoint.add_argument("--outcome", choices=("approved", "rejected"), required=True)
+    checkpoint.add_argument("--hook", choices=tuple(HOOKS), help="Flow hook of a change component")
+    checkpoint.add_argument("--component", help="Component of a --hook checkpoint")
+    checkpoint.add_argument("--run", help="Passed run whose candidate a pre-integrate checkpoint decides")
+    subject_decision_arguments(checkpoint)
+    rejection_arguments(checkpoint)
+    session_argument(checkpoint)
     reference = sub.add_parser("reference")
     rsub = reference.add_subparsers(dest="action", required=True)
     for name in ("add", "update"):
@@ -59,6 +117,8 @@ def build_parser():
         editor.add_argument("--path", required=True)
         editor.add_argument("--component", action="append", required=True)
         editor.add_argument("--role", required=True)
+        editor.add_argument("--supersedes", action="append", default=[], metavar="ADR-ID",
+                            help="ADR replaced by this decision reference (repeatable; role decision only)")
     change = sub.add_parser("change")
     csub = change.add_subparsers(dest="action", required=True)
     new = csub.add_parser("new")
@@ -69,15 +129,18 @@ def build_parser():
     approve = csub.add_parser("approve")
     approve.add_argument("id")
     approve.add_argument("--digest", required=True)
+    approve.add_argument("--criteria", type=Path, help="JSON list evaluating the approve criteria of the flow")
     for command in (approve, csub.add_parser("cancel")):
         if command is not approve:
             command.add_argument("id")
         command.add_argument("--actor", required=True)
         command.add_argument("--reason", required=True)
+        session_argument(command)
     start = csub.add_parser("start")
     start.add_argument("id")
     start.add_argument("--component", required=True)
     start.add_argument("--actor", required=True)
+    session_argument(start)
     fut = sub.add_parser("fut")
     fsub = fut.add_subparsers(dest="action", required=True)
     capture = fsub.add_parser("capture")
@@ -88,6 +151,7 @@ def build_parser():
     decide.add_argument("--actor", required=True)
     decide.add_argument("--reason", required=True)
     decide.add_argument("--target")
+    session_argument(decide)
     release = sub.add_parser("release")
     rsub = release.add_subparsers(dest="action", required=True)
     plan = rsub.add_parser("plan")
@@ -131,9 +195,14 @@ def build_parser():
     verify.add_argument("--release")
     verify.add_argument("--component", required=True)
     verify.add_argument("--base", required=True)
+    verify.add_argument("--role", required=True, help="Declared producer role: implementer, coordinator or human")
+    verify.add_argument("--context", required=True, help="Actual session or tool identity that produced the run")
+    session_argument(verify)
     evidence = sub.add_parser("evidence")
     record = evidence.add_subparsers(dest="action", required=True).add_parser("record")
     record.add_argument("--file", required=True, type=Path)
+    record.add_argument("--kind", choices=("agent-session",), help="Import an agent session: --file holds its metadata")
+    record.add_argument("--transcript", type=Path, help="Host-exported session transcript, kept without interpretation")
     review = sub.add_parser("review")
     policy = review.add_subparsers(dest="action", required=True).add_parser("policy")
     policy.add_argument("--change", required=True)
@@ -191,7 +260,31 @@ def execute(args):
     if command == "status":
         return kernel.status()
     if command == "list":
-        return {args.category: kernel.list_records(args.category)}
+        if args.category == "findings":
+            need(args.origin is None, "INVALID_INPUT", "--origin applies only to changes", exit_code=2)
+            return {"findings": list_findings(kernel, args)}
+        need(all(value is None for value in (args.change, args.release, args.component)),
+             "INVALID_INPUT", "Finding filters require list findings", exit_code=2)
+        need(not args.open or args.category == "rejections", "INVALID_INPUT",
+             "--open applies only to list findings or rejections", exit_code=2)
+        return {args.category: kernel.list_records(args.category, origin=args.origin, open_only=args.open)}
+    if command == "reject":
+        return record_rejection(kernel, args, args.subject_type)
+    if command == "checkpoint":
+        if args.hook:
+            return kernel.stage_checkpoint(args.entity, args.hook, args.component, args.digest, args.actor, args.reason,
+                                           outcome=args.outcome, criteria=json_file(args.criteria), run=args.run,
+                                           consequence=args.consequence, corrections=json_file(args.corrections, []),
+                                           fut=args.fut, addresses=json_file(args.addresses), sessions=args.session)
+        need(args.component is None and args.run is None, "INVALID_INPUT",
+             "--component and --run apply only to a --hook checkpoint", exit_code=2)
+        if args.outcome == "rejected":
+            return record_rejection(kernel, args, "prototype")
+        need(all(value is None for value in (args.consequence, args.corrections, args.fut)),
+             "INVALID_INPUT", "Rejection details apply only to a rejected checkpoint", exit_code=2)
+        return kernel.checkpoint(args.entity, args.digest, args.actor, args.reason, outcome=args.outcome,
+                                 addresses=json_file(args.addresses), criteria=json_file(args.criteria),
+                                 sessions=args.session)
     if command == "product":
         raise ModelError("FEATURE_UNAVAILABLE", "Product views require explicit consumer adoption; no schema-1 fallback")
     if command in {"skills", "speckit"}:
@@ -207,9 +300,10 @@ def execute(args):
         verification = Verification(kernel, release={"component": args.component, "version": args.release} if command == "run" and args.release else None)
         if command == "run":
             need((args.id is None) != (args.release is None), "INVALID_INPUT", "Select a change or --release, exclusively", exit_code=2)
-            return verification.run(args.id, args.component, args.base)
+            return verification.run(args.id, args.component, args.base, args.role, args.context, args.session)
         if command == "evidence":
-            return verification.record_evidence(args.file.resolve())
+            return verification.record_evidence(args.file.resolve(), kind=args.kind,
+                                                transcript=args.transcript.resolve() if args.transcript else None)
         return verification.set_policy(args.change, args.enabled == "true", args.actor, args.reason)
     if command == "integrate" or (command == "operation" and action == "apply"):
         from .integration import Integration
@@ -226,6 +320,13 @@ def execute(args):
             return kernel.inspect_change(args.change, deep=args.deep)
         if args.fut:
             return kernel.inspect_fut(args.fut)
+        if args.adr:
+            from .adr import Adrs
+            return Adrs(kernel).inspect(args.adr)
+        if args.reference:
+            return kernel.inspect_reference(args.reference)
+        if args.prototype:
+            return kernel.inspect_prototype(args.prototype)
         need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
         result = kernel.release(args.component, args.release)
         from .verification import Verification
@@ -237,10 +338,11 @@ def execute(args):
         return result
     if command == "foundation":
         if action == "agree":
-            return kernel.agree_foundation(args.ref, args.actor, args.reason)
+            return kernel.agree_foundation(args.ref, args.actor, args.reason, addresses=json_file(args.addresses),
+                                           criteria=json_file(args.criteria), sessions=args.session, futs=args.fut)
         return kernel.foundation(args.component, args.change)
     if command == "reference":
-        return kernel.write_reference(action, args.id, args.path, args.component, args.role)
+        return kernel.write_reference(action, args.id, args.path, args.component, args.role, args.supersedes)
     if command == "change":
         if action == "seal":
             from .authoring import seal
@@ -248,14 +350,15 @@ def execute(args):
         if action == "new":
             return kernel.new_change(args.file.resolve())
         if action == "approve":
-            return kernel.approve(args.id, args.digest, args.actor, args.reason)
+            return kernel.approve(args.id, args.digest, args.actor, args.reason, criteria=json_file(args.criteria),
+                                  sessions=args.session)
         if action == "start":
-            return kernel.start(args.id, args.component, args.actor)
-        return kernel.cancel(args.id, args.actor, args.reason)
+            return kernel.start(args.id, args.component, args.actor, sessions=args.session)
+        return kernel.cancel(args.id, args.actor, args.reason, sessions=args.session)
     if command == "fut":
         if action == "capture":
             return kernel.capture(args.file.resolve())
-        return kernel.decide_fut(args.id, args.outcome, args.actor, args.reason, args.target)
+        return kernel.decide_fut(args.id, args.outcome, args.actor, args.reason, args.target, sessions=args.session)
     if command == "release":
         return kernel.release_plan(args.component, args.version, args.kind, args.change, args.base_tag)
     if command == "views":
@@ -272,11 +375,92 @@ def execute(args):
     raise ModelError("INVALID_INPUT", "Unknown command", exit_code=2)
 
 
+def list_findings(kernel, args):
+    need((args.change is None) != (args.release is None), "INVALID_INPUT",
+         "Select --change or --release for findings", exit_code=2)
+    if args.release is not None:
+        from .releases import Releases
+        need(args.component is not None, "AMBIGUOUS_COMPONENT", "Select a release component", exit_code=2)
+        findings = Releases(kernel).findings(args.component, args.release)
+    else:
+        need(args.component is None, "INVALID_INPUT", "--component applies to release findings", exit_code=2)
+        from .verification import Verification
+        record, _, _ = kernel.change(args.change)
+        verifier = Verification(kernel)
+        findings = [row for component in sorted(record["semantic"]["components"])
+                    for row in verifier.findings(args.change, component)]
+    if args.open:
+        findings = [row for row in findings if row["status"] in {"open", "still-open"}]
+    return findings
+
+
+def findings_table(rows, indent):
+    headings = ("Key", "Component", "Severity", "Location", "Status", "State record")
+    cells = [headings]
+    for row in rows:
+        location = row["location"]
+        cells.append((row["key"], row["component"], row["severity"],
+                      f"{location['path']}:{location['line']}" if location else "—",
+                      row["status"], ", ".join(row["state_records"])))
+    widths = [max(map(len, column)) for column in zip(*cells)]
+    for line in cells:
+        print(indent + "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip())
+
+
+def conformance_table(flow, indent):
+    """Compact rendering of the `inspect --change` flow section; --json keeps every field."""
+    print(f"{indent}sha256: {flow['sha256']}")
+    print(f"{indent}agreed: {flow['agreed']}")
+    print(f"{indent}approved_under: {flow['approved_under'] or '—'}")
+    for issue in flow["agreement_issues"]:
+        print(f"{indent}{issue['code']}: {issue['message']}")
+
+    def short(value):
+        return "—" if value is None else value[:12] if len(value) == 64 else value
+
+    def detail(entry):
+        if "pending" in entry:
+            return f"{entry['pending']['decider']} decides " + (
+                ", ".join(c["id"] for c in entry["pending"]["criteria"]) or "(no criteria)")
+        if "issue" in entry:
+            return entry["issue"]["code"]
+        if "canceled" in entry:
+            return "canceled"
+        return ", ".join(f"{c['id']} {c['status']}" for c in entry["criteria"])
+
+    cells = [("Stage", "AI", "Component", "Status", "Record", "Actor", "Detail")]
+    notes = []
+    for stage in flow["stages"]:
+        ai = "yes" if stage["ai"] else "no"
+        entries = ([("—", stage["change"])] if "change" in stage else sorted(stage["components"].items()))
+        for component, entry in entries:
+            cells.append((stage["stage"], ai, component, entry["status"], short(entry["record"]), entry["actor"] or "—",
+                          detail(entry)))
+            if "hook" in entry:
+                hook = entry["hook"]
+                cells.append((f"  {hook['name']}", "no", component, hook["status"], short(hook["record"]),
+                              hook["actor"] or "—", detail(hook)))
+        if "limitation" in stage:
+            notes.append(f"{stage['stage']}: {stage['limitation']}")
+    widths = [max(map(len, column)) for column in zip(*cells)]
+    for line in cells:
+        print(indent + "  ".join(cell.ljust(width) for cell, width in zip(line, widths)).rstrip())
+    for note in notes:
+        print(f"{indent}Note — {note}")
+
+
 def human_output(value, depth=0):
     indent = "  " * depth
     if isinstance(value, dict) and value:
         for key, item in value.items():
-            if isinstance(item, (dict, list)) and item:
+            if key == "findings" and isinstance(item, list) and item and all(
+                    isinstance(row, dict) and "state_records" in row for row in item):
+                print(f"{indent}{key}:")
+                findings_table(item, indent + "  ")
+            elif key == "flow" and isinstance(item, dict) and isinstance(item.get("stages"), list):
+                print(f"{indent}{key}:")
+                conformance_table(item, indent + "  ")
+            elif isinstance(item, (dict, list)) and item:
                 print(f"{indent}{key}:")
                 human_output(item, depth + 1)
             else:
@@ -314,6 +498,8 @@ def main(argv=None):
             if args.command == "run":
                 issues = result.pop("issues")
                 exit_code = result.pop("exit_code")
+            if args.command == "evidence" and "warnings" in result:
+                issues = result.pop("warnings")  # e.g. a versioned-redacted copy that redacted nothing
             if args.command == "check" and "warnings" in result:
                 issues = result.pop("warnings")
             if args.command == "foundation" and args.action == "check" and result["issues"]:
@@ -321,9 +507,10 @@ def main(argv=None):
                 exit_code = 1
             if args.command == "inspect" and args.change:
                 status = result["status"]
-                if status != "canceled":
+                if status not in {"canceled", "rejected"}:
                     actions = {
                         "draft": ("change approve", "Review the proposal and approve the current digest"),
+                        "revised": ("change approve", "Review the corrections and approve the revised digest"),
                         "approved": ("check --gate implement", "Check foundation, dependencies and release assignment"),
                         "in-progress": ("run verify", "Run checks for the implementation candidate"),
                         "verified": ("integrate prepare", "Prepare integration using the current run"),

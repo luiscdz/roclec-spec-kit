@@ -14,8 +14,8 @@ from roclec_spec_kit.config import load_profile
 from roclec_spec_kit.kernel import Kernel
 from roclec_spec_kit.model import ModelError
 from roclec_spec_kit.store import Store
-from scripts.c1_scenarios import (bundle, digest, file_hash, foundation, init_trunk, profile, put_json,
-                                 scenarios, seed_current, seed_publication, snapshot, tree, write_snapshot)
+from scripts.c1_scenarios import (bundle, criteria, digest, file_hash, foundation, init_trunk, optional_sessions, profile, put_json,
+                                 rejection_scenarios, scenarios, seed_current, seed_publication, snapshot, tree, write_snapshot)
 
 
 def invoke(argv):
@@ -36,6 +36,7 @@ class KernelTest(unittest.TestCase):
         profile(config)
         result = invoke(["--json", "init", str(self.root), "--profile", str(config)])
         self.assertEqual(result.returncode, 0, result.stdout)
+        optional_sessions(self.root)  # Session demands (TL.4) are covered by test_session_links.
 
     def call(self, *args, expect=0, issue=None):
         before = tree(self.root)
@@ -60,12 +61,29 @@ class KernelTest(unittest.TestCase):
         # Same scenarios are subsequently run using only the installed wheel CLI.
         scenarios(self.workspace, invoke, self.check_case)
 
+    def test_human_rejection_consumer_scenarios(self):
+        def inject(code, argv):
+            with mock.patch("sys.argv", ["roclec", *argv]):
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    with self.assertRaises(SystemExit) as exited:
+                        exec(code, {})
+                return SimpleNamespace(returncode=exited.exception.code,
+                                       stdout=stdout.getvalue(), stderr=stderr.getvalue())
+
+        rejection_scenarios(self.workspace, invoke, self.check_case, inject)
+
     def test_foundation_authoring_binds_agreement_to_source_bytes(self):
         source = self.root / "foundation.md"
         source.write_text("# Foundation\n", encoding="utf-8")
         for role in ("context", "principles", "architecture", "stack", "engineering", "verification"):
             self.call("reference", "add", role, "--path", "foundation.md", "--role", role, "--component", "engine")
-            self.call("foundation", "agree", "--ref", role, "--actor", "Maintainer", "--reason", "Reviewed")
+            self.call("foundation", "agree", "--ref", role, "--actor", "Maintainer", "--reason", "Reviewed",
+                      *criteria(self.root, "foundation"))
+        self.call("reference", "add", "flow", "--path", ".roclec/flow.toml", "--role", "process",
+                  "--component", "engine", "--component", "viewer")
+        self.call("foundation", "agree", "--ref", "flow", "--actor", "Maintainer", "--reason", "Reviewed",
+                  *criteria(self.root, "foundation"))
         self.call("foundation", "check", "--component", "engine")
         source.write_text("# Revised foundation\n", encoding="utf-8")
         self.call("foundation", "check", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
@@ -97,7 +115,7 @@ class KernelTest(unittest.TestCase):
         self.call("change", "new", "--file", str(path))
         self.assertEqual(self.call("status")["data"]["components"]["engine"]["changes"][0]["status"], "draft")
         self.call("change", "approve", record["id"], "--digest", preview["proposal_digest"],
-                  "--actor", "Maintainer", "--reason", "Reviewed")
+                  "--actor", "Maintainer", "--reason", "Reviewed", *criteria(self.root, "approve"))
         self.call("change", "seal", str(folder), expect=3, issue="OPERATION_CONFLICT")
         self.assertEqual(sealed, path.read_bytes())
 
@@ -291,9 +309,11 @@ class KernelTest(unittest.TestCase):
         write_snapshot(stored / "proposed/CAP-001" / target["revision"], target)
         record["semantic"]["proposed"][0]["revision"] = target["revision"]
         record["semantic"]["deltas"][0]["add_acceptance_ids"] = ["AC-003"]
+        record["semantic"]["coverage"]["criteria"][0]["acceptance_ids"] = ["AC-003"]
         record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
         put_json(stored / "change.json", record)
-        self.call("change", "approve", "CHG-010", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "edited scope")
+        self.call("change", "approve", "CHG-010", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "edited scope",
+                  *criteria(self.root, "approve"))
         competitor = self.workspace / "competitor"
         bundle(competitor, change_id="CHG-011", base=base, target=target)
         self.call("change", "new", "--file", str(competitor / "change.json"), expect=1, issue="ID_COLLISION")
@@ -306,7 +326,8 @@ class KernelTest(unittest.TestCase):
         folder = self.workspace / "draft"
         record = bundle(folder)
         self.call("change", "new", "--file", str(folder / "change.json"))
-        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic")
+        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic",
+                  *criteria(self.root, "approve"))
         self.call("release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
         foundation(self.root)
         self.call("change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
@@ -317,7 +338,8 @@ class KernelTest(unittest.TestCase):
         record["semantic"]["files"]["proposal.md"] = file_hash(proposal.read_bytes())
         record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
         put_json(stored / "change.json", record)
-        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Updated intention")
+        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Updated intention",
+                  *criteria(self.root, "approve"))
         self.call("release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
         self.call("change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine")
         reference = self.root / "docs/reference.md"
@@ -325,7 +347,33 @@ class KernelTest(unittest.TestCase):
         self.call("foundation", "check", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
         self.call("change", "cancel", "CHG-001", "--actor", "fixture", "--reason", "Scope abandoned")
         self.call("release", "plan", "engine", "v0.1.0", "--clear")
-        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Retry", expect=1, issue="CHANGE_CANCELED")
+        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "Retry",
+                  *criteria(self.root, "approve"), expect=1, issue="CHANGE_CANCELED")
+
+    def test_release_plan_repeats_are_idempotent_and_restorations_replan(self):
+        folder = self.workspace / "draft"
+        record = bundle(folder)
+        self.call("change", "new", "--file", str(folder / "change.json"))
+        self.call("change", "approve", "CHG-001", "--digest", record["proposal_digest"], "--actor", "fixture", "--reason", "synthetic",
+                  *criteria(self.root, "approve"))
+        def plan(*members):
+            args = [arg for change in members for arg in ("--change", change)] or ["--clear"]
+            return self.call("release", "plan", "engine", "v0.1.0", *args)["data"]["receipt"]["operation_id"]
+        first = plan("CHG-001")
+        self.assertEqual(plan("CHG-001"), first)
+        self.assertEqual(plan("CHG-001"), first)
+        cleared = plan()
+        self.assertEqual(plan(), cleared)
+        restored = plan("CHG-001")  # A -> B -> A must not replay the diverged first receipt.
+        self.assertNotIn(restored, {first, cleared})
+        # Both A receipts wrote the current bytes; the repeat replays the first by receipt name, so either is valid.
+        repeat = plan("CHG-001")
+        self.assertIn(repeat, {first, restored})
+        self.assertEqual(plan("CHG-001"), repeat)
+        stored = self.root / ".roclec/releases/engine/v0.1.0/release.json"
+        stored.write_text(json.dumps(json.loads(stored.read_text()), indent=4) + "\n")  # Equal record, other bytes.
+        self.assertNotIn(plan("CHG-001"), {first, restored})
+        self.call("check")
 
 
 if __name__ == "__main__":

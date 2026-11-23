@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 from pathlib import Path
 import subprocess
+import tomllib
 
 
 def digest(value):
@@ -63,7 +66,8 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
     semantic = {"intention": "proposal.md", "files": {"proposal.md": file_hash(body.encode())},
                 "components": scopes, "bases": [{"capability_id": "CAP-001", "component": c,
                                                   "revision": base["revision"] if base else None} for c in scopes],
-                "deltas": [], "proposed": [], "dependencies": [], "references": []}
+                "deltas": [], "proposed": [], "dependencies": [], "references": [],
+                "architecture_decisions": {"none": "Synthetic fixture applies no architecture decision record."}}
     if kind == "evolution":
         target = target or snapshot(scopes)
         semantic["proposed"] = [{"capability_id": "CAP-001", "components": scopes, "revision": target["revision"]}]
@@ -75,6 +79,21 @@ def bundle(folder, *, change_id="CHG-001", target=None, base=None, components=("
         else:
             semantic["deltas"] = [{"op": "add", "capability_id": "CAP-001", "requirement_id": "REQ-001"}]
         write_snapshot(folder / "proposed" / "CAP-001" / target["revision"], target)
+    source_text = "Synthetic request: present the agreed result.\n"
+    source_path = "origins/request.md"
+    applicable = target if kind == "evolution" else base
+    acceptance_ids = sorted({item["id"] for item in applicable["descriptor"]["acceptance"]
+                             if set(item["components"]) & set(scopes)}) if applicable else []
+    semantic["files"][source_path] = file_hash(source_text.encode())
+    semantic["origins"] = [{"kind": "request", "id": f"request-{change_id}", "actor": "fixture user",
+                            "locator": "synthetic fixture", "captured": source_path, "criteria": ["criterion-1"]}]
+    semantic["coverage"] = {"criteria": [{"origin": f"request-{change_id}", "criterion": "criterion-1",
+                                           "status": "covered", "acceptance_ids": acceptance_ids}], "derived": []}
+    if not acceptance_ids:
+        semantic["origins"][0]["criteria"] = []
+        semantic["coverage"]["criteria"] = []
+    (folder / "origins").mkdir(exist_ok=True)
+    (folder / source_path).write_text(source_text, encoding="utf-8")
     record = {"model_schema": 2, "id": change_id, "kind": kind, "semantic": semantic}
     record["proposal_digest"] = digest({k: record[k] for k in ("id", "kind", "semantic")})
     put_json(folder / "change.json", record)
@@ -102,7 +121,88 @@ def seed_foundation(root, relative, names, roles):
         decision["id"] = digest(decision)
         put_json(root / f".roclec/decisions/{decision['id']}.json", decision)
         refs.append({"id": role, "path": relative, "components": sorted(names), "role": role, "decision_id": decision["id"]})
-    put_json(root / ".roclec/references.json", {"model_schema": 2, "references": refs})
+    flow = root / FLOW
+    if flow.is_file():
+        optional_sessions(root)
+        # `init` seeds the project flow; agree it as the single process reference.
+        decision = {"model_schema": 2, "entity": "flow", "previous": None, "kind": "foundation",
+                    "status": "agreed", "actor": "synthetic fixture", "reason": "Synthetic test setup",
+                    "sources": {"flow": file_hash(flow.read_bytes())}}
+        decision["id"] = digest(decision)
+        put_json(root / f".roclec/decisions/{decision['id']}.json", decision)
+        refs.append({"id": "flow", "path": FLOW, "components": sorted(names), "role": "process", "decision_id": decision["id"]})
+    put_json(root / ".roclec/references.json", {"model_schema": 2, "references": sorted(refs, key=lambda r: r["id"])})
+
+
+FLOW = ".roclec/flow.toml"
+REQUIRED_SESSIONS = b'session_evidence = "required"'
+
+
+def optional_sessions(root):
+    """Declare every stage's session_evidence optional in the consumer flow (the seeded flow requires them).
+
+    Synthetic lifecycle fixtures isolate the gates they exercise; session demands are covered by
+    their own scenarios. The rendered view does not show session_evidence, so it stays current.
+    """
+    path = Path(root) / FLOW
+    if path.is_file():
+        relaxed = path.read_bytes().replace(REQUIRED_SESSIONS, b'session_evidence = "optional"')
+        # Fail loudly if the seeded flow's formatting changes and the relaxation silently stops applying.
+        assert re.search(rb'session_evidence\s*=\s*"required"', relaxed) is None, f"required sessions remain in {path}"
+        path.write_bytes(relaxed)
+    return path
+
+
+HOOK_STAGES = {"pre-implement": "implement", "pre-integrate": "integrate", "handoff": "release"}
+
+
+def declared_criteria(root, point):
+    """Criteria the consumer flow declares for a decision point or hook ([] if the flow is absent or unreadable)."""
+    try:
+        data = tomllib.loads((Path(root) / FLOW).read_text(encoding="utf-8"))
+        checkpoint = data["stages"][HOOK_STAGES.get(point, point)].get("checkpoint") or {}
+        return list(checkpoint.get("criteria", []))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
+def criteria(root, point, outcome="approved", *, failing=None):
+    """`--criteria FILE` evaluating every criterion the consumer flow declares for `point`.
+
+    Approvals mark each criterion met; rejections mark `failing` (default: the first declared
+    criterion) not-met with a reason. Points are approve, foundation, design or a hook name. The
+    file lives beside the project, so writing it never changes the consumer tree.
+    """
+    ids = declared_criteria(root, point)
+    failing = set(failing if failing is not None else ids[:1] if outcome == "rejected" else [])
+    rows = [{"id": cid, "status": "not-met", "reason": "Synthetic reviewer found it unmet"} if cid in failing
+            else {"id": cid, "status": "met"} for cid in ids]
+    path = Path(root).parent / f"criteria-{digest([str(root), point, outcome, sorted(failing)])[:16]}.json"
+    put_json(path, rows)
+    return ("--criteria", str(path))
+
+
+def declare_hook(root, hook, *, declared=None, on_reject="revise", decider="owner"):
+    """Edit the consumer flow so `hook` declares a checkpoint; `declared` maps new CR IDs to their text."""
+    path = Path(root) / FLOW
+    text = path.read_text(encoding="utf-8")
+    header = f"[stages.{HOOK_STAGES[hook]}]\n"
+    assert text.count(header) == 1, header
+    ids = ", ".join(json.dumps(cid) for cid in declared or {})
+    text = text.replace(header, f'{header}checkpoint = {{ decider = "{decider}", criteria = [{ids}], on_reject = "{on_reject}" }}\n')
+    for cid, body in (declared or {}).items():
+        text += f"\n[criteria.{cid}]\ntext = {json.dumps(body)}\n"
+    path.write_text(text, encoding="utf-8")
+    return path.read_bytes()
+
+
+def agree_flow(call, label, root, names=("engine", "viewer"), **kwargs):
+    """Register and agree the seeded project flow through the public CLI."""
+    components = [arg for name in sorted(names) for arg in ("--component", name)]
+    optional_sessions(root)
+    call(f"{label} register flow", "reference", "add", "flow", "--path", FLOW, "--role", "process", *components, **kwargs)
+    call(f"{label} agree flow", "foundation", "agree", "--ref", "flow", "--actor", "Fixture maintainer",
+         "--reason", "Reviewed project flow", *criteria(root, "foundation"), **kwargs)
 
 
 def seed_current(root, snap, names=("engine", "viewer")):
@@ -181,6 +281,7 @@ def scenarios(workspace, invoke, check):
         return data
 
     call("I-001 initialize native profile", "init", str(root), "--profile", str(config), initial=True)
+    optional_sessions(root)
     check("consumer files preserved", (root / "AGENTS.md").read_text() == "# Existing consumer rules\n"
           and (root / ".roclec/templates/custom.md").read_text() == "Project-owned template\n", "")
     check("no phantom contracts or old skills", not (root / ".roclec/contracts").exists() and not (root / ".agents").exists(), "")
@@ -213,6 +314,7 @@ def scenarios(workspace, invoke, check):
     check("F1 seal preview preserves bundle", manifest.read_bytes() == original, "")
     call("F1 seal generates proposal and snapshot hashes", "change", "seal", str(bundle_dir))
     sealed = manifest.read_bytes()
+    check("FO seal includes captured source", "origins/request.md" in json.loads(sealed)["semantic"]["files"], "")
     repeated = call("F1 seal repeats", "change", "seal", str(bundle_dir))["data"]
     check("F1 seal is idempotent and leaves project intact", not repeated["changed"] and manifest.read_bytes() == sealed and tree(root) == before, "")
     saved_index = (root / ".roclec/current.json").read_bytes()
@@ -220,10 +322,13 @@ def scenarios(workspace, invoke, check):
     check("I-003 draft never advances current", (root / ".roclec/current.json").read_bytes() == saved_index, "")
     call("I-004 reject duplicate change ID", "change", "new", "--file", str(workspace / "draft-one/change.json"), expect=1, issue="ID_COLLISION")
     call("I-009 start requires approval", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="APPROVAL_STALE")
+    approved = criteria(root, "approve")
     call("I-007 reject mismatched approval digest", "change", "approve", "CHG-001", "--digest", "0" * 64,
-         "--actor", "fixture user", "--reason", "synthetic", expect=1, issue="APPROVAL_STALE")
+         "--actor", "fixture user", "--reason", "synthetic", *approved, expect=1, issue="APPROVAL_STALE")
+    call("FF approval must evaluate the declared criteria", "change", "approve", "CHG-001", "--digest", draft["proposal_digest"],
+         "--actor", "fixture user", "--reason", "synthetic", expect=2, issue="CRITERIA_MISMATCH")
     call("approve exact intention", "change", "approve", "CHG-001", "--digest", draft["proposal_digest"],
-         "--actor", "fixture user", "--reason", "synthetic")
+         "--actor", "fixture user", "--reason", "synthetic", *approved)
     call("F1 seal rejects approved snapshot", "change", "seal", str(bundle_dir), expect=3, issue="OPERATION_CONFLICT")
     call("I-009 foundation not inferred", "change", "start", "CHG-001", "--actor", "Fixture maintainer", "--component", "engine", expect=1, issue="FOUNDATION_INCOMPLETE")
     source = root / "docs/reference.md"
@@ -234,7 +339,21 @@ def scenarios(workspace, invoke, check):
         call("F1 add foundation source " + role, "reference", "add", role, "--path", "docs/reference.md",
              "--component", "engine", "--component", "viewer", "--role", role)
         call("F1 agree foundation source " + role, "foundation", "agree", "--ref", role,
-             "--actor", "Fixture maintainer", "--reason", "Reviewed synthetic source")
+             "--actor", "Fixture maintainer", "--reason", "Reviewed synthetic source", *criteria(root, "foundation"))
+    call("FF process reference still missing", "foundation", "check", "--component", "engine",
+         expect=1, issue="FOUNDATION_INCOMPLETE")
+    agree_flow(call, "FF", root)
+    seeded_flow = (root / FLOW).read_bytes()
+    # TL.6: the agreement is a flow revision in the view's learning section; regenerate it.
+    call("FF flow agreement refreshes the learning section", "views", "--write")
+    clean = call("FF seeded flow and view need no attention", "check")
+    check("FF check has no flow warnings", not [i for i in clean["issues"] if i["code"].startswith("FLOW_")], str(clean["issues"]))
+    (root / FLOW).write_bytes(seeded_flow.replace(b"Approve the exact intent", b"Approve the complete intent"))
+    call("FF edited flow invalidates its agreement", "foundation", "check", "--component", "engine",
+         expect=1, issue="FOUNDATION_INCOMPLETE")
+    stale = call("FF edited flow leaves its view stale", "check")
+    check("FF stale view is a warning", [i["code"] for i in stale["issues"]] == ["FLOW_VIEW_STALE"], str(stale["issues"]))
+    (root / FLOW).write_bytes(seeded_flow)
     call("agreed foundation checks", "foundation", "check", "--component", "engine", "--change", "CHG-001")
     source.write_bytes(original_source + b"Changed bytes\n")
     call("F1 edited source invalidates agreement", "foundation", "check", "--component", "engine",
@@ -270,7 +389,7 @@ def scenarios(workspace, invoke, check):
     call("evolve stable requirement with new AC", "change", "new", "--file", str(workspace / "draft-two/change.json"))
     live = call("I-003 pending delta preserves original AC", "inspect", "--capability", "CAP-001")["data"]
     check("DEF-001 original obligation retained", all(v["acceptance"][0]["id"] == "AC-001" for v in live["components"].values()), "")
-    call("approve evolution", "change", "approve", "CHG-002", "--digest", evolution["proposal_digest"], "--actor", "fixture user", "--reason", "synthetic")
+    call("approve evolution", "change", "approve", "CHG-002", "--digest", evolution["proposal_digest"], "--actor", "fixture user", "--reason", "synthetic", *approved)
     bad_folder = workspace / "invalid-bundle"
     bad_target = snapshot(ac="AC-010", behavior="two separate values")
     bad = bundle(bad_folder, change_id="CHG-010", base=first, target=bad_target)
@@ -307,7 +426,7 @@ def scenarios(workspace, invoke, check):
     call("I-023 historical new version rejected", "release", "plan", "engine", "v0.8", "--clear", expect=1, issue="VERSION_INVALID")
     fix = bundle(workspace / "fix", change_id="CHG-003", base=first, components=("engine",), kind="fix")
     call("capture preserving fix", "change", "new", "--file", str(workspace / "fix/change.json"))
-    call("approve preserving fix", "change", "approve", "CHG-003", "--digest", fix["proposal_digest"], "--actor", "fixture user", "--reason", "synthetic")
+    call("approve preserving fix", "change", "approve", "CHG-003", "--digest", fix["proposal_digest"], "--actor", "fixture user", "--reason", "synthetic", *approved)
     call("I-023 valid bugfix may skip patch numbers", "release", "plan", "engine", "v0.1.3", "--kind", "bugfix", "--base-tag", "v0.1.0", "--change", "CHG-003")
     base_commit = subprocess.check_output(["git", "rev-parse", "refs/tags/v0.1.0^{commit}"], cwd=root, text=True).strip()
     subprocess.run(["git", "tag", "-d", "v0.1.0"], cwd=root, check=True, capture_output=True)
@@ -339,6 +458,157 @@ def scenarios(workspace, invoke, check):
     call("reevaluate promoted discovery explicitly", "fut", "decide", "FUT-001", "--outcome", "evaluating", "--actor", "fixture user", "--reason", "new information")
     call("reject a two-discovery duplicate cycle", "fut", "decide", "FUT-001", "--outcome", "duplicate", "--target", "FUT-002", "--actor", "fixture user", "--reason", "synthetic", expect=1, issue="INVALID_REFERENCE")
 
+    # FO uses a preservation change so it can exercise approval independently of
+    # the normative delta scenarios above.
+    origin_folder = workspace / "origin-fixture"
+    origin_record = bundle(origin_folder, change_id="CHG-100", base=first, components=("viewer",), kind="fix")
+    origin_file = origin_folder / "change.json"
+    call("FO import origin-bearing change", "change", "new", "--file", str(origin_file))
+    stored_folder = root / ".roclec/changes/CHG-100"
+    stored_manifest = stored_folder / "change.json"
+
+    def edit_origin_record(record):
+        record["proposal_digest"] = digest({key: record[key] for key in ("id", "kind", "semantic")})
+        put_json(stored_manifest, record)
+        return record["proposal_digest"]
+
+    def approve_origin(name, record, *, expect=0, issue=None):
+        revision = edit_origin_record(record)
+        return call(name, "change", "approve", "CHG-100", "--digest", revision,
+                    "--actor", "fixture user", "--reason", "synthetic source review", *approved, expect=expect, issue=issue)
+
+    legacy = json.loads(json.dumps(origin_record))
+    del legacy["semantic"]["origins"]
+    del legacy["semantic"]["coverage"]
+    approve_origin("FO origin required for approval", legacy, expect=1, issue="ORIGIN_REQUIRED")
+    missing_file = json.loads(json.dumps(origin_record))
+    del missing_file["semantic"]["files"]["origins/request.md"]
+    approve_origin("FO captured source must be in manifest", missing_file, expect=1, issue="INVALID_ORIGIN")
+    gap = json.loads(json.dumps(origin_record))
+    gap["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                        "status": "gap", "question": "What should happen?"}
+    edit_origin_record(gap)
+    result = call("FO open gap blocks approval", "check", "--change", "CHG-100", "--gate", "approve", expect=1, issue="ORIGIN_GAP")
+    check("FO gap identifies criterion", "criterion-1" in json.dumps(result["issues"]), str(result))
+    approve_origin("FO open gap blocks actual approval", gap, expect=1, issue="ORIGIN_GAP")
+    no_coverage = json.loads(json.dumps(origin_record))
+    no_coverage["semantic"]["coverage"]["criteria"] = []
+    approve_origin("FO every source criterion needs coverage", no_coverage, expect=1, issue="INVALID_COVERAGE")
+    excluded = json.loads(json.dumps(origin_record))
+    excluded["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                             "status": "excluded", "reason": ""}
+    approve_origin("FO exclusion needs a reason", excluded, expect=1, issue="INVALID_COVERAGE")
+    unknown_fut = json.loads(json.dumps(excluded))
+    unknown_fut["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                                "status": "deferred", "fut": "FUT-999"}
+    approve_origin("FO deferral needs an existing FUT", unknown_fut, expect=1, issue="INVALID_REFERENCE")
+    missing_capture = stored_folder / "origins/request.md"
+    capture_bytes = missing_capture.read_bytes()
+    missing_capture.unlink()
+    approve_origin("FO missing captured file is rejected", origin_record, expect=1, issue="INVALID_REFERENCE")
+    missing_capture.write_bytes(capture_bytes)
+    for number in (3, 4, 5, 6, 7):
+        discovery = {"model_schema": 2, "id": f"FUT-{number:03}",
+                     "source": {"location": "docs/reference.md", "locator": "Synthetic context"},
+                     "finding": "Potential improvement", "impact": "Needs evaluation", "questions": []}
+        discovery_path = workspace / f"fo-fut-{number}.json"
+        put_json(discovery_path, discovery)
+        call("FO capture discovery " + str(number), "fut", "capture", "--file", str(discovery_path))
+    fut_origin = json.loads(json.dumps(origin_record))
+    fut_origin["semantic"]["origins"][0] = {"kind": "fut", "id": "FUT-003", "locator": "synthetic finding",
+                                               "captured": "origins/request.md", "criteria": ["criterion-1"]}
+    fut_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-003"
+    approve_origin("FO unpromoted FUT cannot approve", fut_origin, expect=1, issue="INVALID_ORIGIN")
+    # The FUT promotion resolves against the current imported draft.
+    edit_origin_record(fut_origin)
+    call("FO promote FUT to draft", "fut", "decide", "FUT-003", "--outcome", "promoted", "--target", "CHG-100",
+         "--actor", "fixture user", "--reason", "Requested work")
+    approve_origin("FO promoted FUT approves", fut_origin)
+    duplicate_origin = json.loads(json.dumps(fut_origin))
+    duplicate_origin["semantic"]["origins"][0]["id"] = "FUT-004"
+    duplicate_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-004"
+    edit_origin_record(duplicate_origin)
+    call("FO mark FUT duplicate of change", "fut", "decide", "FUT-004", "--outcome", "duplicate", "--target", "CHG-100",
+         "--actor", "fixture user", "--reason", "Same work")
+    approve_origin("FO duplicate FUT approves", duplicate_origin)
+    chained_origin = json.loads(json.dumps(fut_origin))
+    chained_origin["semantic"]["origins"][0]["id"] = "FUT-005"
+    chained_origin["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-005"
+    edit_origin_record(chained_origin)
+    call("FO duplicate FUT can resolve through another FUT", "fut", "decide", "FUT-005", "--outcome", "duplicate", "--target", "FUT-003",
+         "--actor", "fixture user", "--reason", "Same finding")
+    approve_origin("FO FUT duplicate chain approves", chained_origin)
+    excluded["semantic"]["coverage"]["criteria"][0]["reason"] = "Outside scope by user decision"
+    approve_origin("FO excluded criterion on preservation change approves", excluded)
+    deferred = json.loads(json.dumps(excluded))
+    deferred["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-100", "criterion": "criterion-1",
+                                                              "status": "deferred", "fut": "FUT-006"}
+    approve_origin("FO deferred criterion names existing FUT", deferred)
+    approve_origin("FO approve complete coverage", origin_record)
+    approved_revision = origin_record["proposal_digest"]
+    frozen = stored_folder / "revisions" / approved_revision / "origins/request.md"
+    captured_before = frozen.read_bytes()
+    captured = stored_folder / "origins/request.md"
+    captured.write_bytes(captured.read_bytes() + b"A revised request.\n")
+    changed_origin = json.loads(json.dumps(origin_record))
+    changed_origin["semantic"]["files"]["origins/request.md"] = file_hash(captured.read_bytes())
+    new_revision = edit_origin_record(changed_origin)
+    inspected_origin = call("FO changed source requires a new approval", "inspect", "--change", "CHG-100")["data"]
+    check("FO source snapshot stays frozen", new_revision != approved_revision and not inspected_origin["approval_current"]
+          and frozen.read_bytes() == captured_before, str(inspected_origin))
+    approve_origin("FO approve revised captured source", changed_origin)
+    second_folder = workspace / "shared-origin-fixture"
+    shared = bundle(second_folder, change_id="CHG-101", base=first, components=("viewer",), kind="fix")
+    shared["semantic"]["origins"][0]["id"] = "request-CHG-100"
+    shared["semantic"]["coverage"]["criteria"][0]["origin"] = "request-CHG-100"
+    shared["semantic"]["origins"].append({"kind": "issue", "id": "issue-extra", "locator": "synthetic issue",
+                                             "captured": "origins/request.md", "criteria": []})
+    shared["proposal_digest"] = digest({key: shared[key] for key in ("id", "kind", "semantic")})
+    put_json(second_folder / "change.json", shared)
+    call("FO import change with two origins", "change", "new", "--file", str(second_folder / "change.json"))
+    listed = call("FO inverse origin query", "list", "changes", "--origin", "request-CHG-100")["data"]["changes"]
+    check("FO inverse query returns both changes", {item["id"] for item in listed} == {"CHG-100", "CHG-101"}, str(listed))
+    displayed = call("FO inspect origins and coverage", "inspect", "--change", "CHG-101")["data"]
+    check("FO inspection exposes both origins and coverage", len(displayed["origins"]) == 2
+          and displayed["coverage"] == shared["semantic"]["coverage"], str(displayed))
+    call("FO promote FUT to a different change", "fut", "decide", "FUT-007", "--outcome", "promoted", "--target", "CHG-101",
+         "--actor", "fixture user", "--reason", "Different work")
+    wrong_target = json.loads(json.dumps(changed_origin))
+    wrong_target["semantic"]["origins"][0] = {"kind": "fut", "id": "FUT-007", "locator": "synthetic finding",
+                                                  "captured": "origins/request.md", "criteria": ["criterion-1"]}
+    wrong_target["semantic"]["coverage"]["criteria"][0]["origin"] = "FUT-007"
+    approve_origin("FO FUT promoted to another change is rejected", wrong_target, expect=1, issue="INVALID_ORIGIN")
+    edit_origin_record(changed_origin)
+
+    # An evolution retains AC-001 and introduces AC-102. Coverage is required
+    # for the new AC without reclassifying the existing obligation as derived.
+    evolution_target = snapshot(("viewer",), ac="AC-102")
+    evolution_target["content"]["acceptance/AC-001.md"] = first["content"]["acceptance/AC-001.md"]
+    descriptor = evolution_target["descriptor"]
+    descriptor["requirements"][0]["acceptance_ids"] = ["AC-001", "AC-102"]
+    descriptor["acceptance"].insert(0, {"id": "AC-001", "scenario": "acceptance/AC-001.md", "components": ["viewer"]})
+    descriptor["files"]["acceptance/AC-001.md"] = file_hash(evolution_target["content"]["acceptance/AC-001.md"].encode())
+    evolution_target["revision"] = digest(descriptor)
+    evolution_folder = workspace / "origin-evolution"
+    evolution = bundle(evolution_folder, change_id="CHG-102", base=first, target=evolution_target, components=("viewer",))
+    evolution["semantic"]["coverage"]["criteria"][0]["acceptance_ids"] = ["AC-102"]
+    evolution["proposal_digest"] = digest({key: evolution[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_folder / "change.json", evolution)
+    call("FO import evolution covering only new AC", "change", "new", "--file", str(evolution_folder / "change.json"))
+    evolution_manifest = root / ".roclec/changes/CHG-102/change.json"
+    uncovered = json.loads(json.dumps(evolution))
+    uncovered["semantic"]["coverage"]["criteria"][0] = {"origin": "request-CHG-102", "criterion": "criterion-1",
+                                                            "status": "excluded", "reason": "Out of scope"}
+    uncovered["proposal_digest"] = digest({key: uncovered[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_manifest, uncovered)
+    call("FO new AC needs coverage or a derived reason", "change", "approve", "CHG-102", "--digest", uncovered["proposal_digest"],
+         "--actor", "fixture user", "--reason", "synthetic review", *approved, expect=1, issue="INVALID_COVERAGE")
+    uncovered["semantic"]["coverage"]["derived"] = [{"id": "AC-102", "reason": "Gap identified during specification"}]
+    uncovered["proposal_digest"] = digest({key: uncovered[key] for key in ("id", "kind", "semantic")})
+    put_json(evolution_manifest, uncovered)
+    call("FO new derived AC approves without mapping unchanged AC", "change", "approve", "CHG-102", "--digest", uncovered["proposal_digest"],
+         "--actor", "fixture user", "--reason", "synthetic review", *approved)
+
     seed_current(root, second, names=("engine",))
     vector = call("I-011 read synthetic partial integration vector", "inspect", "--capability", "CAP-001")["data"]["components"]
     check("I-011 read scope only; C2 integration not executed", vector["engine"]["revision"] == second["revision"]
@@ -351,7 +621,504 @@ def scenarios(workspace, invoke, check):
     view = root / "specs/capabilities/CAP-001.md"
     view.write_text(view.read_text() + "Consumer edit\n")
     call("preserve hand-edited view", "views", "--write", expect=1, issue="UNMANAGED_FILE")
-    call("C2 requires explicit base", "run", "verify", "CHG-002", "--component", "engine", expect=2, issue="INVALID_INPUT")
+    call("C2 requires explicit base", "run", "verify", "CHG-002", "--component", "engine",
+         "--role", "implementer", "--context", "synthetic implementer session", expect=2, issue="INVALID_INPUT")
     call("C3 preparation requires explicit release run and output", "release", "prepare", "engine", "v0.3.0", expect=2, issue="INVALID_INPUT")
     call("JSON usage error has no success envelope", "inspect", "--nonsense", expect=2, issue="INVALID_INPUT")
     return root
+
+
+# ---- ADR scenarios (consumer architecture decision records), public CLI only ----
+
+ADR_SECTIONS = ("Context and problem", "Decision drivers", "Considered options", "Decision",
+                "Consequences", "Compliance verification", "Relations")
+
+
+def adr_markdown(title, *, options=2, sections=ADR_SECTIONS, extra=""):
+    """Minimal ADR with the default template sections; the c1 scenario proves parity with the shipped template."""
+    lines = [f"# {title}", ""]
+    for section in sections:
+        lines += [f"## {section}", "", f"{section} text.", ""]
+        if section == "Considered options":
+            for number in range(1, options + 1):
+                lines += [f"### Option {number}: Choice {number}", "", "- Advantages: some.", ""]
+    return "\n".join(lines) + extra
+
+
+def adr_bundle(folder, change_id, declaration, *, base=None, components=("engine",)):
+    """Unsealed refactor bundle; a None declaration omits architecture_decisions entirely."""
+    record = bundle(folder, change_id=change_id, kind="refactor", components=components, base=base)
+    if declaration is None:
+        record["semantic"].pop("architecture_decisions")
+    else:
+        record["semantic"]["architecture_decisions"] = declaration
+    record.pop("proposal_digest")
+    put_json(folder / "change.json", record)
+    return folder
+
+
+def adr_caller(root, invoke, check):
+    """call(label, *args, expect, issue, project) -> payload; rejections must leave the project tree unchanged."""
+    def call(label, *args, expect=0, issue=None, project=None):
+        project = project or root
+        before = tree(project)
+        result = invoke(["--project", str(project), "--json", *map(str, args)])
+        check(label, result.returncode == expect, result.stdout + result.stderr)
+        payload = json.loads(result.stdout)
+        check(label + ": JSON envelope", payload["ok"] == (expect == 0), result.stdout)
+        if issue:
+            check(label + ": issue " + issue, issue in [i["code"] for i in payload["issues"]], result.stdout)
+        if expect in (1, 2, 3):
+            check(label + ": rejection preserves bytes/modes", before == tree(project), result.stdout)
+        return payload
+    return call
+
+
+def adr_scenarios(workspace, invoke, check):
+    """ADR lifecycle on a native consumer: states, supersession, rejections, declarations and structure warnings."""
+    root = workspace / "adr consumer"
+    root.mkdir()
+    init_trunk(root)
+    config = workspace / "adr-profile.toml"
+    profile(config, names=("engine",))
+    result = invoke(["--json", "init", str(root), "--profile", str(config)])
+    check("ADR consumer initializes", result.returncode == 0, result.stdout + result.stderr)
+    optional_sessions(root)
+    call = adr_caller(root, invoke, check)
+    call("ADR skills install seeds the ADR template", "skills")
+    template = root / ".roclec/templates/adr-template.md"
+    check("ADR template is project-owned and seeded", template.is_file() and "## Considered options" in template.read_text(encoding="utf-8"), "")
+    adrs = root / "docs/adr"
+    adrs.mkdir(parents=True)
+
+    def write(adr_id, body=None, folder=adrs):
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{adr_id}.md"
+        path.write_text(body if body is not None else adr_markdown(f"{adr_id}: Decision"), encoding="utf-8")
+        return path
+
+    def register(label, adr_id, *supersedes, action="add", expect=0, issue=None):
+        args = ["reference", action, adr_id, "--path", f"docs/adr/{adr_id}.md", "--component", "engine", "--role", "decision"]
+        for older in supersedes:
+            args += ["--supersedes", older]
+        return call(label, *args, expect=expect, issue=issue)
+
+    def agree(label, adr_id):
+        return call(label, "foundation", "agree", "--ref", adr_id, "--actor", "Fixture maintainer", "--reason", "Accepted ADR",
+                    *criteria(root, "foundation"))
+
+    def view(adr_id):
+        return call(f"inspect {adr_id}", "inspect", "--adr", adr_id)["data"]
+
+    def state(adr_id):
+        return view(adr_id)["state"]
+
+    # Lifecycle: proposed -> accepted -> stale -> accepted.
+    first = write("ADR-001", template.read_text(encoding="utf-8").replace("# ADR-NNN: Title", "# ADR-001: Storage"))
+    register("ADR-001 registers", "ADR-001")
+    check("ADR-001 starts proposed with the file hash", view("ADR-001")["state"] == "proposed"
+          and view("ADR-001")["sha256"] == file_hash(first.read_bytes()), "")
+    agree("ADR-001 agreement", "ADR-001")
+    check("ADR-001 accepted", state("ADR-001") == "accepted", "")
+    first.write_text(first.read_text(encoding="utf-8") + "\nRevised after acceptance.\n", encoding="utf-8")
+    check("ADR-001 edit makes the agreement stale", state("ADR-001") == "stale", "")
+    agree("ADR-001 re-agreement", "ADR-001")
+    check("ADR-001 accepted again", state("ADR-001") == "accepted", "")
+    check("template-derived ADR needs no structure warning", not [i for i in call("check after template ADR", "check")["issues"] if i["code"] == "ADR_STRUCTURE"], "")
+
+    # Supersession takes effect only when the replacing ADR is agreed.
+    write("ADR-002")
+    register("ADR-002 supersedes ADR-001", "ADR-002", "ADR-001")
+    check("ADR-001 stays accepted while ADR-002 is proposed", (state("ADR-001"), state("ADR-002")) == ("accepted", "proposed"), "")
+    agree("ADR-002 agreement", "ADR-002")
+    older, newer = view("ADR-001"), view("ADR-002")
+    check("agreeing ADR-002 supersedes ADR-001", (older["state"], newer["state"]) == ("superseded", "accepted"), "")
+    check("supersession chain is reported both ways", older["superseded_by"] == ["ADR-002"] and older["chain"]["replaced_by"] == ["ADR-002"]
+          and newer["chain"]["replaces"] == ["ADR-001"], "")
+    listing = call("list adrs", "list", "adrs")["data"]["adrs"]
+    check("list adrs reports states", [(a["id"], a["state"]) for a in listing] == [("ADR-001", "superseded"), ("ADR-002", "accepted")], "")
+
+    # Rejections never mutate the consumer.
+    register("ADR supersession cycle is rejected", "ADR-001", "ADR-002", action="update", expect=1, issue="ADR_SUPERSESSION_INVALID")
+    register("ADR supersession of a missing ADR is rejected", "ADR-001", "ADR-009", action="update", expect=1, issue="ADR_SUPERSESSION_INVALID")
+    (root / "docs/notes.md").write_text("# Notes\n")
+    call("--supersedes on a non-decision role is rejected", "reference", "add", "notes", "--path", "docs/notes.md", "--component", "engine",
+         "--role", "context", "--supersedes", "ADR-001", expect=2, issue="INVALID_INPUT")
+    write("ADR-004", folder=root / "docs")
+    call("ADR outside the ADR folder is rejected", "reference", "add", "ADR-004", "--path", "docs/ADR-004.md", "--component", "engine",
+         "--role", "decision", expect=2, issue="INVALID_PATH")
+
+    # Declarations: approval needs one; seal fills the pin; a proposed ADR may be cited.
+    folder = adr_bundle(workspace / "adr-undeclared", "CHG-001", None)
+    call("seal undeclared bundle", "change", "seal", folder)
+    call("new undeclared change", "change", "new", "--file", folder / "change.json")
+    record = json.loads((folder / "change.json").read_text())
+    call("approve without ADR declaration is rejected", "change", "approve", "CHG-001", "--digest", record["proposal_digest"],
+         "--actor", "Fixture maintainer", "--reason", "Approved scope", *criteria(root, "approve"), expect=1, issue="ADR_UNDECLARED")
+    write("ADR-003")
+    register("ADR-003 registers", "ADR-003")
+    folder = adr_bundle(workspace / "adr-cited", "CHG-002", {"adrs": [{"id": "ADR-003"}]})
+    call("seal pins the cited ADR", "change", "seal", folder)
+    record = json.loads((folder / "change.json").read_text())
+    pin = record["semantic"]["architecture_decisions"]["adrs"][0]
+    check("seal fills the ADR sha256", pin == {"id": "ADR-003", "sha256": file_hash((adrs / "ADR-003.md").read_bytes())}, str(pin))
+    call("new change citing a proposed ADR", "change", "new", "--file", folder / "change.json")
+    call("approve citing a proposed ADR succeeds", "change", "approve", "CHG-002", "--digest", record["proposal_digest"],
+         "--actor", "Fixture maintainer", "--reason", "Approved scope", *criteria(root, "approve"))
+    check("inspect --adr lists the citing change", [c["id"] for c in view("ADR-003")["changes"]] == ["CHG-002"], "")
+
+    # Structural deficiencies warn without failing.
+    write("ADR-005", adr_markdown("ADR-005: Deficient", sections=[s for s in ADR_SECTIONS if s != "Consequences"]))
+    register("ADR-005 registers", "ADR-005")
+    warned = call("check warns about a deficient ADR without failing", "check")["issues"]
+    check("deficient ADR reports ADR_STRUCTURE as a warning", any(i["code"] == "ADR_STRUCTURE" and i["severity"] == "warning"
+                                                                and i["entity"] == "ADR-005" for i in warned), str(warned))
+    return root
+
+
+def skill_scenarios(workspace, invoke, check):
+    """Knowledge skills as foundation references: registration, agreement, approval pin, implement gate and flow assignment."""
+    root = workspace / "skill consumer"
+    root.mkdir()
+    init_trunk(root)
+    config = workspace / "skill-profile.toml"
+    profile(config, names=("engine",))
+    result = invoke(["--json", "init", str(root), "--profile", str(config)])
+    check("skill consumer initializes", result.returncode == 0, result.stdout + result.stderr)
+    foundation(root, ("engine",))
+    call = adr_caller(root, invoke, check)
+    actor = ("--actor", "Fixture maintainer", "--reason", "Reviewed skill")
+    name = "conventions"
+    location = f".agents/skills/{name}"
+    folder = root / location
+    template = root / ".roclec/templates/skill-template.md"
+
+    def register(label, skill=name, *, action="add", expect=0, issue=None):
+        return call(label, "reference", action, skill, "--path", f".agents/skills/{skill}", "--role", "skill",
+                    "--component", "engine", expect=expect, issue=issue)
+
+    def agree(label, *, expect=0, issue=None):
+        return call(label, "foundation", "agree", "--ref", name, *actor, *criteria(root, "foundation"), expect=expect, issue=issue)
+
+    def pin():
+        return digest({"files": {inner.relative_to(folder).as_posix(): file_hash(inner.read_bytes())
+                                 for inner in sorted(folder.rglob("*")) if inner.is_file()}})
+
+    def state():
+        return call("inspect skill", "inspect", "--reference", name)["data"]["state"]
+
+    # The skill template is seeded and consumer-owned.
+    call("skill install seeds the skill template", "skills")
+    check("skill template is seeded", template.is_file() and template.read_text(encoding="utf-8").strip() != "", "")
+    headings = ("## Purpose", "## Applies to", "## Authority", "## Conventions or procedure", "## Examples", "## Verification")
+    lines = template.read_text(encoding="utf-8").splitlines()
+    check("skill template has the six headings", all(h in lines for h in headings), str(lines))
+
+    # Unsafe skill folders are rejected without writes.
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n# Conventions\n", encoding="utf-8")
+    (folder / "examples").mkdir()
+    (folder / "examples/handler.md").write_text("# Handler example\n", encoding="utf-8")
+    (folder / ".hidden").write_text("hidden rule\n", encoding="utf-8")
+    (root / "shared.md").write_text("# Shared\n", encoding="utf-8")
+    os.symlink(root / "shared.md", folder / "linked.md")
+    rejected = register("skill with a symlink is rejected", expect=2, issue="INVALID_PATH")
+    check("symlink rejection names the link", rejected["issues"][0]["path"] == f"{location}/linked.md", str(rejected["issues"]))
+    (folder / "linked.md").unlink()
+    call("skill outside .agents/skills is rejected", "reference", "add", name, "--path", "docs/conventions", "--role", "skill",
+         "--component", "engine", expect=2, issue="INVALID_PATH")
+
+    # Lifecycle: registered draft -> approved -> stale on a nested edit -> approved again.
+    register("skill registers")
+    check("registered skill is a draft", state() == "draft", "")
+    decision = agree("skill agreement")["data"]["decision"]
+    check("agreement pins every file of the folder", decision["sources"] == {name: pin()}, str(decision["sources"]))
+    check("agreed skill is approved with its fingerprint", call("inspect approved skill", "inspect", "--reference", name)["data"]["sha256"] == pin(), "")
+
+    # The approval carries the skill pin; editing a nested file blocks the implement gate until re-agreed.
+    pinned = pin()
+    draft = workspace / "skill-bundle"
+    record = bundle(draft, components=("engine",))
+    call("skill change new", "change", "new", "--file", draft / "change.json")
+    approval = call("skill change approve", "change", "approve", "CHG-001", "--digest", record["proposal_digest"], *actor,
+                    *criteria(root, "approve"))["data"]["decision"]
+    check("approval decision pins the applicable skill", approval["skills"] == [{"id": name, "sha256": pinned}], str(approval.get("skills")))
+    call("skill release plan", "release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
+    gate = ("check", "--change", "CHG-001", "--component", "engine", "--gate", "implement")
+    call("implement gate passes with the agreed skill", *gate)
+    (folder / "examples/nested").mkdir()
+    (folder / "examples/nested/.rule").write_text("deep hidden rule\n", encoding="utf-8")
+    check("a nested hidden file makes the skill stale", state() == "stale", "")
+    blocked = call("implement gate blocks a changed skill", *gate, expect=1, issue="FOUNDATION_INCOMPLETE")
+    entry = next((i for i in blocked["issues"][0]["actual"] if i["entity"] == name), None)
+    check("gate names the changed skill with pinned and current fingerprints",
+          entry is not None and entry["expected"] == pinned and entry["actual"] == pin() and entry["actual"] != pinned, str(entry))
+    inspected = call("inspect change shows skill drift", "inspect", "--change", "CHG-001")["data"]
+    rows = [row for stage in inspected["skills"]["engine"].values() for row in stage]
+    check("inspect --change reports pinned vs current with drift", bool(rows) and all(
+        row["id"] == name and row["pinned"] == pinned and row["sha256"] == pin() and row["drift"] is True for row in rows), str(rows))
+    agree("skill re-agreement")
+    call("implement gate passes after re-agreement", *gate)
+    check("approval keeps its original pin", call("inspect change after re-agreement", "inspect", "--change", "CHG-001")["data"]["approval"]["skills"]
+          == [{"id": name, "sha256": pinned}], "")
+
+    # A flow stage may only name registered skill references.
+    flow = root / FLOW
+    valid = flow.read_text(encoding="utf-8")
+    header = "[stages.implement]\n"
+    check("flow declares the implement stage once", valid.count(header) == 1, "")
+    flow.write_text(valid.replace(header, header + 'skills = ["unknown"]\n'), encoding="utf-8")
+    failed = call("flow naming an unregistered skill fails check", "check", expect=2, issue="FLOW_SKILL_UNREGISTERED")
+    check("issue locates the stage and names the skill", failed["issues"][0]["entity"] == "stages.implement.skills"
+          and "names unknown" in failed["issues"][0]["message"], str(failed["issues"]))
+    call("flow agreement is rejected", "foundation", "agree", "--ref", "flow", *actor, *criteria(root, "foundation"),
+         expect=2, issue="FLOW_SKILL_UNREGISTERED")
+    flow.write_text(valid.replace(header, header + f'skills = ["{name}"]\n'), encoding="utf-8")
+    check("flow naming a registered skill is accepted", "FLOW_SKILL_UNREGISTERED" not in
+          [i["code"] for i in call("check with a registered flow skill", "check")["issues"]], "")
+    call("flow agreement with the registered skill", "foundation", "agree", "--ref", "flow", *actor, *criteria(root, "foundation"))
+
+    # A refresh keeps an edited template.
+    template.write_text("# Consumer skill template\n", encoding="utf-8")
+    call("skills refresh keeps the consumer skill template", "skills")
+    check("edited skill template is preserved", template.read_text(encoding="utf-8") == "# Consumer skill template\n", "")
+    return root
+
+
+def rejection_scenarios(workspace, invoke, check, inject):
+    """Exercise FX through the public CLI against the same fixture in both runners."""
+    root = workspace / "fx-consumer"
+    init_trunk(root)
+    config = workspace / "fx-profile.toml"
+    profile(config, ("engine",))
+    args = ["--project", str(root), "--json"]
+
+    def call(name, *command, fails=False, issue=None):
+        before = tree(root) if fails else None
+        result = invoke([*args, *map(str, command)])
+        data = json.loads(result.stdout)
+        check(name, (result.returncode != 0) == fails and data["ok"] == (not fails),
+              result.stdout + result.stderr)
+        if issue:
+            check(name + " code", issue in {item["code"] for item in data["issues"]}, result.stdout)
+        if fails:
+            check(name + " preserves files", before == tree(root), result.stdout)
+        return data["data"]
+
+    call("FX initialize", "init", root, "--profile", config)
+    foundation(root, ("engine",))
+    actor = ("--actor", "Human maintainer", "--reason", "Recorded during review")
+    correction_file = workspace / "fx-corrections.json"
+    put_json(correction_file, [{"id": "R-1", "description": "Explain the empty state"},
+                               {"id": "R-2", "description": "Show the update operation"}])
+    revise = ("--consequence", "revise", "--corrections", correction_file)
+    prototype = "mockups/preview.html"
+    preview = root / prototype
+    preview.parent.mkdir()
+    preview.write_bytes(b"<h1>Preview</h1>\r\n")
+    preview_hash = file_hash(preview.read_bytes())
+    folder = workspace / "fx-input"
+    draft = bundle(folder, components=("engine",))
+    draft["semantic"]["prototypes"] = [{"path": prototype}]
+    put_json(folder / "change.json", draft)
+    call("FX seal pins prototype", "change", "seal", folder)
+    draft = json.loads((folder / "change.json").read_bytes())
+    old_digest = draft["proposal_digest"]
+    call("FX import proposal", "change", "new", "--file", folder / "change.json")
+    change = root / ".roclec/changes/CHG-001"
+    original = {name: (change / name).read_bytes() for name in ("change.json", "proposal.md", "origins/request.md")}
+    base_reject = ("reject", "change", "CHG-001", "--digest", old_digest)
+    call("FX rejection requires actual actor", *base_reject, "--actor", " ", "--reason", "Review", *revise, fails=True)
+    call("FX rejection requires exact digest", "reject", "change", "CHG-001", "--digest", "0" * 64, *actor, *revise, fails=True)
+    call("FX revise requires corrections", *base_reject, *actor, "--consequence", "revise", fails=True)
+    evaluations = workspace / "fx-criteria.json"
+    put_json(evaluations, [{"id": "CR-002", "status": "met"}, {"id": "CR-003", "status": "met"}])
+    call("FX supplied criteria must include one not met", *base_reject, *actor, *revise, "--criteria", evaluations,
+         fails=True, issue="CRITERIA_REQUIRED")
+    call("FF rejection must evaluate the approve criteria", *base_reject, *actor, *revise,
+         *criteria(root, "foundation", "rejected"), fails=True, issue="CRITERIA_MISMATCH")
+    put_json(evaluations, [{"id": "CR-002", "status": "not-met"}, {"id": "CR-003", "status": "n/a", "reason": "Out of scope"}])
+    subprocess.run(["git", "-C", str(root), "symbolic-ref", "HEAD", "refs/heads/side"], check=True)
+    call("FX rejects off trunk", *base_reject, *actor, *revise, fails=True, issue="OFF_TRUNK")
+    subprocess.run(["git", "-C", str(root), "symbolic-ref", "HEAD", "refs/heads/main"], check=True)
+    rejection = call("FX reject exact draft", *base_reject, *actor, *revise, "--criteria", evaluations)["decision"]
+    check("FX retains actual actor and evaluations", rejection["actor"] == "Human maintainer"
+          and rejection["criteria"] == json.loads(evaluations.read_bytes()), str(rejection))
+    frozen = change / "rejected" / old_digest
+    check("FX freezes exact proposal bytes", all((frozen / name).read_bytes() == raw for name, raw in original.items()), str(frozen))
+    snapshot_file = frozen / "proposal.md"
+    snapshot_file.write_bytes(b"changed")
+    call("FX check detects changed rejection snapshot", "check", fails=True)
+    snapshot_file.write_bytes(original["proposal.md"])
+    rejected = call("FX inspect rejected draft", "inspect", "--change", "CHG-001")
+    check("FX inspection reports a rejected draft", rejected["status"] == "rejected" and not rejected["approval_current"], str(rejected))
+    call("FX rejects approval of unchanged draft", "change", "approve", "CHG-001", "--digest", old_digest, *actor,
+         *criteria(root, "approve"), fails=True, issue="REJECTION_UNRESOLVED")
+    opened = call("FX lists unresolved rejection", "list", "rejections", "--open")["rejections"]
+    check("FX open contains recorded rejection", any(item["id"] == rejection["id"] for item in opened), str(opened))
+
+    draft_file = folder / "change.json"
+    (folder / "proposal.md").write_bytes(original["proposal.md"] + b"Describe the empty state.\n")
+    response = {"rejection": rejection["id"], "corrections": [{"id": "R-1", "status": "addressed"}]}
+    draft["semantic"]["addresses"] = response
+    put_json(draft_file, draft)
+    call("FX sealing requires every correction", "change", "seal", folder, fails=True)
+    response["corrections"].append({"id": "R-2", "status": "disputed"})
+    put_json(draft_file, draft)
+    call("FX disputed correction requires reason", "change", "seal", folder, fails=True)
+    response["corrections"][-1]["reason"] = "Update operation is already shown in the source"
+    put_json(draft_file, draft)
+    call("FX seal addressed proposal", "change", "seal", folder)
+    call("FX import addressed proposal under the same ID", "change", "new", "--file", draft_file)
+    new_digest = json.loads(draft_file.read_bytes())["proposal_digest"]
+    revised = call("FX inspect revised proposal", "inspect", "--change", "CHG-001")
+    check("FX inspection reports a revised draft", revised["status"] == "revised", str(revised))
+    check("FX revision closes rejection before approval",
+          not call("FX list open after revision", "list", "rejections", "--open")["rejections"], "")
+    intermediate = new_digest
+    second_rejection = call("FX rejects unapproved revision", "reject", "change", "CHG-001",
+                            "--digest", intermediate, *actor, *revise, *criteria(root, "approve", "rejected"))["decision"]
+    draft["semantic"]["addresses"] = {**response, "rejection": second_rejection["id"]}
+    put_json(draft_file, draft)
+    call("FX seal second revision", "change", "seal", folder)
+    call("FX import second revision", "change", "new", "--file", draft_file)
+    new_digest = json.loads(draft_file.read_bytes())["proposal_digest"]
+    check("FX repeated rejection keeps the earlier correction link",
+          not call("FX list open after second revision", "list", "rejections", "--open")["rejections"], "")
+    call("FX approve addressed revision explicitly", "change", "approve", "CHG-001", "--digest", new_digest, *actor,
+         *criteria(root, "approve"))
+    history = call("FX inspect proposal history", "inspect", "--change", "CHG-001")
+    history_json = json.dumps(history)
+    check("FX inspection carries rejected and revised digests and disputed correction",
+          old_digest in history_json and new_digest in history_json and "disputed" in history_json, history_json)
+    call("FX an approved revision cannot be imported over again", "change", "new", "--file", draft_file, fails=True)
+    call("FX plan proposal release", "release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
+    gate = ("check", "--gate", "implement", "--change", "CHG-001", "--component", "engine")
+    call("FX implement blocks without prototype checkpoint", *gate, fails=True)
+    checkpoint = ("checkpoint", prototype, "--digest", preview_hash)
+    call("FX approves exact prototype", *checkpoint, *actor, "--outcome", "approved", *criteria(root, "design"))
+    call("FX implement accepts current visual approval", *gate)
+    preview.write_bytes(b"<h1>Changed preview</h1>\n")
+    call("FX edited prototype blocks implementation", *gate, fails=True)
+    preview.write_bytes(b"<h1>Preview</h1>\r\n")
+    first_preview = call("FX negative checkpoint revokes visual approval", *checkpoint,
+                         *actor, "--outcome", "rejected", *revise, *criteria(root, "design", "rejected"))["decision"]
+    call("FX rejected checkpoint blocks implementation", *gate, fails=True)
+    second_preview = call("FX records another rejection on the same prototype bytes", *checkpoint,
+                          *actor, "--outcome", "rejected", *revise, *criteria(root, "design", "rejected"))["decision"]
+    preview.write_bytes(b"<h1>Revised prototype</h1>\n")
+    last_preview = call("FX rejects another prototype revision", "checkpoint", prototype, "--digest",
+                        file_hash(preview.read_bytes()), *actor, "--outcome", "rejected", *revise,
+                        *criteria(root, "design", "rejected"))["decision"]
+    prototype_history = call("FX inspects prototype history", "inspect", "--prototype", prototype)["rejections"]
+    check("FX superseded prototype rounds preserve history without inferring responses",
+          [(row["id"], row["superseded_by"], row["revision"], row["open"]) for row in prototype_history] ==
+          [(first_preview["id"], second_preview["id"], None, False),
+           (second_preview["id"], last_preview["id"], None, False),
+           (last_preview["id"], None, None, True)], str(prototype_history))
+    still_open = call("FX lists only the latest prototype round", "list", "rejections", "--open")["rejections"]
+    check("FX open list drops superseded prototype rounds", [row["id"] for row in still_open] == [last_preview["id"]], str(still_open))
+
+    adr_file = root / "docs/adr/001-choice.md"
+    adr_file.parent.mkdir()
+    adr_content = b"# Synthetic ADR\r\n"
+    adr_file.write_bytes(adr_content)
+    call("FX register ADR", "reference", "add", "ADR-001", "--path", adr_file.relative_to(root),
+         "--component", "engine", "--role", "decision")
+    adr_hash = file_hash(adr_content)
+    call("FX cancel ADR", "reject", "adr", "ADR-001", "--digest", adr_hash, *actor, "--consequence", "cancel",
+         *criteria(root, "foundation", "rejected"))
+    withdrawn = call("FX inspect withdrawn ADR", "inspect", "--adr", "ADR-001")
+    check("FX ADR state is withdrawn", withdrawn["state"] == "withdrawn", str(withdrawn))
+    adr_file.write_bytes(adr_content + b"Reconsidered\n")
+    call("FX canceled ADR cannot be agreed using same ID", "foundation", "agree", "--ref", "ADR-001", *actor,
+         *criteria(root, "foundation"), fails=True, issue="SUBJECT_WITHDRAWN")
+
+    fut_file = workspace / "fx-fut.json"
+    put_json(fut_file, {"model_schema": 2, "id": "FUT-001", "finding": "Review later",
+                        "impact": "Architecture needs follow-up", "questions": [],
+                        "source": {"location": "request", "locator": "FX fixture"}})
+    ref_path = root / "docs/reference.md"
+    ref_reject = ("reject", "reference", "architecture", "--digest", file_hash(ref_path.read_bytes()), *actor,
+                  "--consequence", "defer", "--corrections", correction_file, "--fut", "FUT-001",
+                  *criteria(root, "foundation", "rejected"))
+    call("FX defer rejects missing FUT", *ref_reject, fails=True)
+    call("FX capture deferred work", "fut", "capture", "--file", fut_file)
+    call("FX defer links captured FUT", *ref_reject)
+    inspected = call("FX inspect deferred reference", "inspect", "--reference", "architecture")
+    check("FX reference history includes FUT", "FUT-001" in json.dumps(inspected), str(inspected))
+    agreed = criteria(root, "foundation")
+    call("FX explicitly resume deferred reference", "foundation", "agree", "--ref", "architecture", *actor, *agreed)
+    revised_ref = root / "docs/engineering.md"
+    revised_ref.write_bytes(b"# Initial engineering reference\r\n")
+    call("FX repoint engineering reference", "reference", "update", "engineering", "--path",
+         revised_ref.relative_to(root), "--component", "engine", "--role", "engineering")
+    call("FX agrees on engineering reference", "foundation", "agree", "--ref", "engineering", *actor, *agreed)
+    ref_pin = file_hash(revised_ref.read_bytes())
+    ref_decision = call("FX records requested changes to an agreed reference", "reject", "reference",
+                        "engineering", "--digest", ref_pin, *actor, *revise, *criteria(root, "foundation", "rejected"))["decision"]
+    call("FX old agreement no longer satisfies foundation", "foundation", "check", "--component", "engine", fails=True)
+    revised_ref.write_bytes(b"# Engineering with requested changes\r\n")
+    call("FX reference agreement requires addresses", "foundation", "agree", "--ref", "engineering", *actor, *agreed,
+         fails=True, issue="CORRECTIONS_REQUIRED")
+    ref_addresses = workspace / "fx-reference-addresses.json"
+    put_json(ref_addresses, {**response, "rejection": ref_decision["id"]})
+    second_ref = call("FX reject revised reference with prior responses", "reject", "reference", "engineering",
+                      "--digest", file_hash(revised_ref.read_bytes()), *actor, *revise, "--addresses", ref_addresses,
+                      *criteria(root, "foundation", "rejected"))["decision"]
+    revised_ref.write_bytes(b"# Engineering with a second revision\r\n")
+    put_json(ref_addresses, {**response, "rejection": second_ref["id"]})
+    call("FX agree with linked reference corrections", "foundation", "agree", "--ref", "engineering",
+         *actor, "--addresses", ref_addresses, *agreed)
+    call("FX revised reference satisfies foundation", "foundation", "check", "--component", "engine")
+    reference_history = call("FX inspect addressed reference", "inspect", "--reference", "engineering")
+    check("FX reference inspection links revision to rejection",
+          {item["id"] for item in reference_history["rejections"] if item["revision"] and not item["open"]}
+          == {ref_decision["id"], second_ref["id"]} and "disputed" in json.dumps(reference_history),
+          str(reference_history))
+    call("FX check validates recorded history", "check")
+
+    injector = """
+import sys
+from unittest.mock import patch
+from roclec_spec_kit.cli import main
+from roclec_spec_kit.store import Store
+original = Store._atomic
+count = 0
+
+def interrupted(store, path, content):
+    global count
+    count += 1
+    if count == 3:
+        raise OSError("FX injected interruption")
+    return original(store, path, content)
+
+with patch.object(Store, "_atomic", interrupted):
+    raise SystemExit(main(sys.argv[1:]))
+"""
+    result = inject(injector, [*args, "reject", "change", "CHG-001", "--digest", new_digest,
+                               *actor, "--consequence", "cancel", *criteria(root, "approve", "rejected")])
+    pending = json.loads(result.stdout)
+    check("FX cancel interruption leaves a recoverable journal",
+          result.returncode == 4 and pending["data"]["partial"], result.stdout + result.stderr)
+    operation = pending["data"]["operation_id"]
+    call("FX recover paired change rejection and cancellation", "operation", "recover", operation)
+    history = call("FX inspect canceled change", "inspect", "--change", "CHG-001")
+    check("FX recovery records rejection and change cancellation",
+          history["status"] == "canceled" and {"rejection", "change-cancel"} <= {d["kind"] for d in history["decisions"]},
+          str(history))
+    before = tree(root)
+    call("FX recover cancellation a second time", "operation", "recover", operation)
+    check("FX recovery is idempotent", before == tree(root), "")
+    call("FX check validates recovered cancellation", "check")
+
+    root = workspace / "fx-previously-canceled"
+    init_trunk(root)
+    args = ["--project", str(root), "--json"]
+    call("FX initialize legacy cancellation fixture", "init", root, "--profile", config)
+    standalone = workspace / "fx-cancel-input"
+    unrelated = bundle(standalone, components=("engine",))
+    call("FX import fresh proposal for ordinary cancellation", "change", "new", "--file", standalone / "change.json")
+    call("FX ordinary cancellation", "change", "cancel", "CHG-001", *actor)
+    call("FX already canceled change cannot be rejected", "reject", "change", "CHG-001", "--digest", unrelated["proposal_digest"],
+         *actor, *revise, fails=True, issue="CHANGE_CANCELED")

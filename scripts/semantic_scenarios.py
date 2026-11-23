@@ -18,11 +18,13 @@ import sys
 import time
 
 try:
-    from .c1_scenarios import bundle, digest, put_json, seed_foundation, tree
+    from .c1_scenarios import bundle, criteria, digest, put_json, seed_foundation, tree
 except ImportError:
-    from c1_scenarios import bundle, digest, put_json, seed_foundation, tree
+    from c1_scenarios import bundle, criteria, digest, put_json, seed_foundation, tree
 
 CATALOG = Path(__file__).with_name("semantic_cases.json")
+# Fixture preparation declares its own producer; it never executes an agent.
+PRODUCER = ("--role", "human", "--context", "semantic fixture preparation")
 
 
 def sha(content):
@@ -221,7 +223,8 @@ class Fixture:
         put_json(source / "change.json", record)
         self.call("change", "new", "--file", source / "change.json")
         if approved:
-            self.call("change", "approve", change_id, "--digest", record["proposal_digest"], "--actor", "Synthetic fixture owner", "--reason", "Explicit initial fixture scope, not a real product approval")
+            self.call("change", "approve", change_id, "--digest", record["proposal_digest"], "--actor", "Synthetic fixture owner", "--reason", "Explicit initial fixture scope, not a real product approval",
+                      *criteria(self.root, "approve"))
         return record, target
 
     def assign(self, change_id="CHG-001", *, version="v1.0.0", component=None, members=None):
@@ -232,7 +235,7 @@ class Fixture:
 
     def run(self, change_id="CHG-001", *, component="engine", release=None, expected=0):
         target = ["--release", release] if release else [change_id]
-        return self.call("run", "verify", *target, "--component", component, "--base", self.base, expected=expected)["data"]["run"]
+        return self.call("run", "verify", *target, "--component", component, "--base", self.base, *PRODUCER, expected=expected)["data"]["run"]
 
     def integrate(self, change_id="CHG-001", *, component="engine"):
         run = self.run(change_id, component=component)

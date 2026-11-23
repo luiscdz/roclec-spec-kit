@@ -2,7 +2,9 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from .adr import declaration
 from .model import canonical, digest, encoded, fields, fingerprint, identifier, local_path, need, read_json, sha, text
+from .origins import captured_paths
 from .store import Store
 
 
@@ -27,6 +29,21 @@ def contents(root, paths):
     return result
 
 
+def pin_adrs(kernel, value):
+    """Pin each cited ADR without a sha256 to its current file bytes; given pins are kept."""
+    refs = kernel.references()
+    for entry in value["adrs"]:
+        if "sha256" in entry:
+            continue
+        ref = refs.get(entry["id"])
+        need(ref is not None and ref["role"] == "decision", "INVALID_REFERENCE", "Change cites an unregistered ADR",
+             entity=entry["id"], remediation="Register the ADR with reference add ADR-NNN --role decision first.")
+        pin = kernel.reference_fingerprint(ref)
+        need(pin is not None, "INVALID_REFERENCE", "Cited ADR file is missing", entity=entry["id"], path=ref["path"])
+        entry["sha256"] = pin
+    value["adrs"] = sorted(value["adrs"], key=lambda entry: entry["id"])
+
+
 def seal(kernel, folder, *, check=False):
     managed = kernel.store.path(".roclec")
     need(folder.is_dir() and managed not in (folder, *folder.parents), "INVALID_PATH",
@@ -34,16 +51,40 @@ def seal(kernel, folder, *, check=False):
     record = read_json(local_path(folder, "change.json"))
     fields(record, ("model_schema", "id", "kind", "semantic"), ("proposal_digest",))
     change_id = identifier(record["id"], "CHG")
-    need(not any(d["kind"] == "change-approve" for d in kernel.decisions(change_id)),
+    from .rejection import Rejections
+    revising = Rejections(kernel).revising(change_id)
+    need(revising or not any(d["kind"] == "change-approve" for d in kernel.decisions(change_id)),
          "OPERATION_CONFLICT", "Cannot seal a change with an approved snapshot", entity=change_id, exit_code=3)
-    need(not kernel.store.path(f".roclec/changes/{change_id}").exists(),
+    need(revising or not kernel.store.path(f".roclec/changes/{change_id}").exists(),
          "ID_COLLISION", "Change ID already exists", entity=change_id)
     semantic = record["semantic"]
     fields(semantic, ("intention", "components", "bases", "deltas", "proposed", "dependencies", "references"),
-           ("files", "baseline_release", "fixes"))
+           ("files", "baseline_release", "fixes", "origins", "coverage", "architecture_decisions", "addresses", "prototypes",
+            "sessions"))
+    if "architecture_decisions" in semantic and "adrs" in declaration(semantic["architecture_decisions"], sealed=False):
+        pin_adrs(kernel, semantic["architecture_decisions"])
+    need(isinstance(semantic.get("prototypes", []), list), "INVALID_INPUT", "prototypes must be a list", exit_code=2)
+    for entry in semantic.get("prototypes", []):
+        fields(entry, ("path",), ("sha256",))
+        kernel.store.path(entry["path"])
+        if "sha256" not in entry:
+            source = kernel.store.path(entry["path"])
+            need(source.is_file(), "INVALID_REFERENCE", "Prototype source is missing", path=entry["path"])
+            entry["sha256"] = sha(source.read_bytes())
+    if "prototypes" in semantic:
+        semantic["prototypes"] = sorted(semantic["prototypes"], key=lambda entry: entry["path"])
+    if "sessions" in semantic:
+        # Sessions that drafted this bundle: existing agent sessions of this change, sorted; omitted when empty.
+        from .sessions import cite
+        cited = cite(kernel, semantic["sessions"], change_id=change_id)
+        if cited:
+            semantic["sessions"] = cited
+        else:
+            del semantic["sessions"]
     manifest = semantic.get("files", {})
     need(isinstance(manifest, dict), "INVALID_INPUT", "files must be an object", exit_code=2)
-    files = contents(folder, [semantic["intention"], *manifest])
+    captures = captured_paths(semantic["origins"], entity=change_id) if "origins" in semantic else ()
+    files = contents(folder, [semantic["intention"], *manifest, *captures])
     semantic["files"] = {p: sha(b) for p, b in files.items()}
     generated = {}
     for key in ("components", "deltas", "dependencies", "fixes"):
@@ -81,6 +122,9 @@ def seal(kernel, folder, *, check=False):
         generated.update({f"{prefix}/{path}": data for path, data in documents.items()})
         generated[f"{prefix}/contract.json"] = encoded(descriptor)
     record["proposal_digest"] = digest({key: record[key] for key in ("id", "kind", "semantic")})
+    if revising:
+        Rejections(kernel).require_addresses("change", change_id, record["proposal_digest"], semantic.get("addresses"))
+        kernel.preserve_integrated(record)
     generated["change.json"] = encoded(record)
     with TemporaryDirectory(prefix="roclec-seal-") as temporary:
         stage = Path(temporary)

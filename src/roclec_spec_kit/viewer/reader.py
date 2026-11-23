@@ -18,7 +18,7 @@ from ..config import load_profile
 from ..kernel import Kernel
 from ..model import ModelError, digest, fingerprint, identifier, version_key
 from ..releases import Releases
-from ..verification import Verification
+from ..verification import Verification, same_context
 
 STAGES = ("approved", "in-progress", "verified", "integrated", "not-evaluated", "canceled")
 ID_PATTERN = re.compile(r"\b(?:(?:CHG|CAP|REQ|AC|FUT)-[0-9]{3,}|(?:RUN|EVD)-[0-7][0-9A-HJKMNP-TV-Z]{25})\b")
@@ -65,7 +65,10 @@ def entities_in(*values):
 
 def title_of(markdown, fallback):
     for line in markdown.splitlines():
-        line = line.strip().lstrip("#").strip()
+        line = line.strip()
+        if line.startswith("<!--") and line.endswith("-->"):
+            continue  # Managed-view headers and other one-line comments are not titles.
+        line = line.lstrip("#").strip()
         if line:
             return line[:140]
     return fallback
@@ -158,7 +161,9 @@ class Reader:
             for path in sorted(self.store.path(".roclec/evidence").glob("EVD-*.json")):
                 try:
                     report = self.verifier.read_evidence(path, runs)
-                    result[report["id"]] = report
+                    # Finding decisions and agent sessions are not observation reports.
+                    if report["kind"] not in {"finding-decision", "agent-session"}:
+                        result[report["id"]] = report
                 except ModelError as exc:
                     invalid.append({"id": path.stem, "issue": exc.issue})
             return {"reports": result, "invalid": invalid}
@@ -591,8 +596,21 @@ class Reader:
             current = run is not None and report["candidate_digest"] == run["candidate"]["inputs_digest"]
             state = ("superseded" if report["id"] not in head_ids else "stale" if not current else
                      "applicable" if report["outcome"] in {"pass", "ready"} and report["checks"] else "unfavorable")
+            uncounted = None
+            if report["kind"] == "independent-review" and state == "applicable" and not published:
+                # Same rule as the verify gate: a favorable review counts only with a declared role and
+                # a context that differs from the producer of the cited run and of the gated run.
+                cited = runs["runs"].get(report["run_id"])
+                producers = [cited.get("producer") if cited else None, run.get("producer")]
+                if "role" not in report or None in producers:
+                    uncounted = "unattributed"
+                elif any(same_context(report["context"], p["context"]) for p in producers):
+                    uncounted = "self-review-declared"
+                if uncounted:
+                    state = "stale"
             reports.append({"id": report["id"], "kind": report["kind"], "outcome": report["outcome"], "actor": report["actor"],
-                            "acceptance_ids": report["acceptance_ids"], "state": state, "run_id": report["run_id"]})
+                            "acceptance_ids": report["acceptance_ids"], "state": state, "run_id": report["run_id"],
+                            "role": report.get("role"), "uncounted": uncounted})
         by_report = {r["id"]: r for r in reports}
         criteria = {}
         for ac in sorted(acs):

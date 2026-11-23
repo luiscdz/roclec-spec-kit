@@ -14,6 +14,10 @@ CONFIG_PATH = Path(".roclec/project.toml")
 LINK_PATH = Path(".roclec/link.toml")
 DEFAULT_LOG_QUOTA = 16 * 1024 * 1024
 DEFAULT_MAX_LOG_BYTES = 0
+FINDING_SEVERITIES = ("info", "minor", "major", "blocker")
+# Agent-session transcripts (M-34): where the imported copy lives and the per-session size limit.
+SESSION_STORAGES = ("versioned-redacted", "local", "versioned-raw")
+SESSION_DEFAULTS = {"storage": "versioned-redacted", "quota_bytes": 16 * 1024 * 1024}
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -130,10 +134,80 @@ class Profile:
     def components(self):
         return self.data["components"]
 
+    @property
+    def review_enabled(self) -> bool:
+        return self.data.get("review", {}).get("enabled", True)
+
+    @property
+    def material_severity(self) -> str:
+        return self.data.get("review", {}).get("material_severity", "major")
+
     def repo(self, component: str) -> Path:
         from .model import need
         need(component in self.components, "INVALID_REFERENCE", "Unknown component", entity=component)
         return (self.root / self.components[component]["repo"]).resolve()
+
+    @property
+    def sessions(self) -> dict:
+        """Agent-session storage policy and per-session quota, with defaults."""
+        return {**SESSION_DEFAULTS, **self.data.get("sessions", {})}
+
+    @property
+    def adr(self) -> dict:
+        """ADR location and structure, with the shipped template's defaults (D13)."""
+        return {**ADR_DEFAULTS, **self.data.get("adr", {})}
+
+    def agent_model(self, role: str, host: str) -> str | None:
+        """Model pinned for a role's host binding, or None to inherit the host session's model."""
+        return self.data.get("agents", {}).get(role, {}).get(host)
+
+
+def validate_agents(agents):
+    """Optional ``[agents.<role>]`` tables: one model name per host, passed to the host uninterpreted (D10)."""
+    from .agents import HOSTS, subagent_roles
+    from .model import need, text
+    roles = subagent_roles()
+    need(isinstance(agents, dict), "INVALID_INPUT", "agents must be a table of roles", exit_code=2,
+         remediation="Use [agents.<role>] tables, or remove agents to inherit each host session's model.")
+    for role, hosts in agents.items():
+        need(role in roles, "INVALID_INPUT", "Unknown agent role", exit_code=2, entity=role,
+             expected=list(roles), actual=role,
+             remediation=f"Use one of {', '.join(roles)}; the coordinator runs in the user's session and uses its model.")
+        need(isinstance(hosts, dict), "INVALID_INPUT", "An agent role must be a table of hosts", exit_code=2, entity=role,
+             remediation=f"Write [agents.{role}] with host = \"model\" entries.")
+        for host, model in hosts.items():
+            need(host in HOSTS, "INVALID_INPUT", "Unsupported agent host", exit_code=2, entity=f"{role}.{host}",
+                 expected=list(HOSTS), actual=host, remediation=f"Use one of {', '.join(HOSTS)} under [agents.{role}].")
+            need(text(model) and model == model.strip() and not any(ord(c) < 32 or c in "\"'\\" for c in model),
+                 "INVALID_INPUT", "Agent model must be a single-line name", exit_code=2, entity=f"{role}.{host}",
+                 remediation="Write the host's model name, or remove the entry to inherit the session's model.")
+
+
+ADR_DEFAULTS = {
+    "path": "docs/adr",
+    "required_sections": ["Context and problem", "Decision drivers", "Considered options", "Decision",
+                          "Consequences", "Compliance verification", "Relations"],
+    "options_section": "Considered options",
+}
+
+
+def validate_adr(adr):
+    """Optional ``[adr]`` table: ADR folder, required ``##`` sections and the section holding ``###`` options."""
+    from .model import fields, need, text
+    need(isinstance(adr, dict), "INVALID_INPUT", "adr must be a table", exit_code=2,
+         remediation="Write [adr] with path, required_sections or options_section, or remove it to use the defaults.")
+    fields(adr, (), tuple(ADR_DEFAULTS))
+    merged = {**ADR_DEFAULTS, **adr}
+    path = merged["path"]
+    need(text(path) and not Path(path).is_absolute() and ".." not in Path(path).parts and "\\" not in path,
+         "INVALID_PATH", "adr.path must be a relative folder inside the project", exit_code=2, actual=path)
+    sections = merged["required_sections"]
+    need(isinstance(sections, list) and bool(sections) and all(text(s) and s == s.strip() and "\n" not in s for s in sections)
+         and len({s.casefold() for s in sections}) == len(sections),
+         "INVALID_INPUT", "adr.required_sections must list distinct single-line section titles", exit_code=2)
+    need(text(merged["options_section"]) and merged["options_section"].casefold() in {s.casefold() for s in sections},
+         "INVALID_INPUT", "adr.options_section must be one of adr.required_sections", exit_code=2,
+         remediation="Name the required section whose ### subsections are the considered options.")
 
 
 def validate_ref(ref, prefix):
@@ -151,8 +225,28 @@ def validate_profile(root: Path, data: dict) -> Profile:
          exit_code=2, expected=3, actual=data.get("schema") if isinstance(data, dict) else None,
          remediation="Use the previous wheel for an existing profile, or initialize profile 3 in a separate project.")
     fields(data, ("schema", "name", "components", "trunk_ref"),
-           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns"))
+           ("log_quota_bytes", "max_log_bytes", "secret_env", "redact_patterns", "agents", "adr", "review", "sessions"))
     validate_ref(data["trunk_ref"], "refs/heads/")
+    if "agents" in data:
+        validate_agents(data["agents"])
+    if "adr" in data:
+        validate_adr(data["adr"])
+    review = data.get("review", {})
+    fields(review, (), ("enabled", "material_severity"))
+    need(type(review.get("enabled", True)) is bool, "INVALID_INPUT", "review.enabled must be boolean", exit_code=2)
+    need(review.get("material_severity", "major") in FINDING_SEVERITIES,
+         "INVALID_INPUT", "Unknown review.material_severity", exit_code=2,
+         expected=list(FINDING_SEVERITIES), actual=review.get("material_severity"))
+    sessions = data.get("sessions", {})
+    need(isinstance(sessions, dict), "INVALID_INPUT", "sessions must be a table", exit_code=2,
+         remediation="Write [sessions] with storage or quota_bytes, or remove it to use the defaults.")
+    fields(sessions, (), tuple(SESSION_DEFAULTS))
+    need(sessions.get("storage", SESSION_DEFAULTS["storage"]) in SESSION_STORAGES, "INVALID_INPUT",
+         "Unknown sessions.storage", exit_code=2, expected=list(SESSION_STORAGES), actual=sessions.get("storage"),
+         remediation="Use one of: " + ", ".join(SESSION_STORAGES) + ".")
+    session_quota = sessions.get("quota_bytes", SESSION_DEFAULTS["quota_bytes"])
+    need(type(session_quota) is int and session_quota > 0, "INVALID_INPUT", "sessions.quota_bytes must be a positive integer",
+         exit_code=2, actual=session_quota, remediation="Set quota_bytes to a positive number of bytes, or remove it.")
     quota = data.get("log_quota_bytes", DEFAULT_LOG_QUOTA)
     excerpt = data.get("max_log_bytes", DEFAULT_MAX_LOG_BYTES)
     need(type(quota) is int and quota > 0 and type(excerpt) is int and 0 <= excerpt <= min(quota, 1024 * 1024),

@@ -1,0 +1,97 @@
+# Project flow. This file is project-owned: Roclec seeds it once and refreshes never overwrite it.
+# It is agreed with the user as the `process` reference; change it only with their approval.
+# `roclec views --write` generates the readable view (default docs/flow.md) from it.
+#
+# Every stage is mandatory. Checkpoints are required on foundation, approve and design, optional on
+# implement, integrate and release, and not allowed elsewhere. To add an optional hook, e.g. before
+# implementing, add to [stages.implement]:
+#   checkpoint = { decider = "owner", criteria = [], on_reject = "revise" }
+# (implement = pre-implement, integrate = pre-integrate, release = handoff).
+# A handoff checkpoint (release) must use on_reject = "defer". Every decision at a checkpoint is recorded
+# with --criteria FILE: the person's own evaluation (met, not-met or n/a with a reason) of exactly the
+# criteria listed in that checkpoint; agents never fill it in.
+#
+# session_evidence = "required" (allowed only with ai = true) makes the gate that closes the stage demand
+# at least one imported agent session citing it: `roclec evidence record --kind agent-session --file
+# META.json --transcript EXPORT`. Set it to "optional" (the default) to stop demanding sessions there.
+schema = 1
+view = "docs/flow.md"
+
+[roles.owner]
+kind = "human"
+description = "Person who agrees references, approves intent and accepts prototypes."
+
+[criteria.CR-001]
+text = "The reference reflects the practice the user agreed."
+
+[criteria.CR-002]
+text = "Every origin criterion is covered, excluded or deferred."
+
+[criteria.CR-003]
+text = "The proposal states the intended behavior."
+
+[criteria.CR-004]
+text = "The prototype matches the approved intention."
+
+[stages.foundation]
+description = "Agree the project references (constitution, ADRs, process) before changes depend on them."
+ai = true
+session_evidence = "required"
+role = "coordinator"
+checkpoint = { decider = "owner", criteria = ["CR-001"], on_reject = "revise" }
+
+[stages.define]
+description = "Capture discovery and draft the capability/change bundle with sources and acceptance criteria."
+ai = true
+session_evidence = "required"
+role = "specifier"
+
+[stages.approve]
+description = "Approve the exact intent of the change; approval freezes its digest."
+ai = false
+reason = "Only a person decides which intent is accepted."
+role = "owner"
+checkpoint = { decider = "owner", criteria = ["CR-002", "CR-003"], on_reject = "revise" }
+
+[stages.design]
+description = "Produce and review user-facing design or prototypes before implementation."
+ai = true
+session_evidence = "required"
+role = "coordinator"
+checkpoint = { decider = "owner", criteria = ["CR-004"], on_reject = "revise" }
+
+[stages.plan]
+description = "Assign the approved change to a release and plan the implementation work."
+ai = true
+session_evidence = "required"
+role = "implementer"
+
+[stages.implement]
+description = "Implement the approved change within its declared scope."
+ai = true
+session_evidence = "required"
+role = "implementer"
+
+[stages.verify]
+description = "Run the configured checks and record evidence covering the acceptance criteria."
+ai = true
+session_evidence = "required"
+role = "implementer"
+
+[stages.review]
+description = "Independent review of the candidate; findings stay open until resolved or decided."
+ai = true
+session_evidence = "required"
+role = "reviewer"
+
+[stages.integrate]
+description = "Integrate the verified, reviewed candidate per component."
+ai = true
+session_evidence = "required"
+role = "coordinator"
+
+[stages.release]
+description = "Verify the combined release, prepare it and record the existing Git publication."
+ai = true
+session_evidence = "required"
+role = "coordinator"

@@ -142,7 +142,7 @@ def viewer_harness(wheel: Path, workspace: Path, cases: list[dict]):
 
 
 def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibility=False):
-    from c1_scenarios import bundle, init_trunk, scenarios, tree
+    from c1_scenarios import bundle, init_trunk, rejection_scenarios, scenarios, tree
 
     def check(name, condition, evidence=''):
         cases.append({'scope': 'C1-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -157,10 +157,34 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     check('native wheel installs without runtime dependencies', result.returncode == 0, result.stdout + result.stderr)
     cli = env / 'bin/roclec'
     with zipfile.ZipFile(wheel) as archive:
-        for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py'):
+        for name in ('model.py', 'store.py', 'kernel.py', 'native_cli.py', 'verification.py', 'integration.py', 'releases.py', 'installation.py',
+                     'agents.py', 'adr.py', 'findings.py', 'rejection.py', 'flow.py', 'sessions.py', 'knowledge.py', 'instructions.py', 'assets/project/flow.toml',
+                     'assets/project/flow-retro.md', 'assets/templates/adr-template.md', 'assets/templates/skill-template.md',
+                     'assets/project/model.md', 'assets/skills/roclec-reviewer/references/report-template.md',
+                     *(f'assets/skills/roclec-{skill}/SKILL.md' for skill in ('analyze', 'clarify', 'coordinator', 'foundation', 'prototype', 'reviewer', 'specify')),
+                     *(f'assets/agents/{role}.md' for role in ('coordinator', 'specifier', 'implementer', 'reviewer'))):
             check('wheel includes ' + name, 'roclec_spec_kit/' + name in archive.namelist())
+        # Knowledge-skill duties (plan section 9.7) stay in the shipped procedure skills and role contracts.
+        duties = {
+            'skills/roclec-foundation/SKILL.md': ('.agents/skills/', 'SKILL_UNREGISTERED'),
+            'skills/roclec-coordinator/SKILL.md': ('inspect --change', 'by id and path'),
+            'skills/roclec-analyze/SKILL.md': ('restate', 'duplication'),
+            'skills/roclec-reviewer/SKILL.md': ("skill's Verification section",),
+            **{f'agents/{role}.md': ('knowledge skills you applied' if role != 'reviewer' else 'knowledge skills whose Verification you applied',)
+               for role in ('implementer', 'specifier', 'reviewer')}}
+        for name, phrases in duties.items():
+            text = archive.read('roclec_spec_kit/assets/' + name).decode('utf-8').lower()
+            for phrase in phrases:
+                check(f'{name} states: {phrase}', phrase.lower() in text)
     scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
-    from c2_scenarios import scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios, branch_scenarios
+    from c1_scenarios import adr_scenarios as c1_adr_scenarios
+    c1_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
+    from c1_scenarios import skill_scenarios as c1_skill_scenarios
+    c1_skill_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check)
+    rejection_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), check,
+                        lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace))
+    from c2_scenarios import (scenarios as c2_scenarios, execution_scenarios, conflict_scenarios, edge_scenarios,
+                              branch_scenarios, findings_scenarios, flow_scenarios, session_scenarios)
 
     def c2_check(name, condition, evidence=''):
         cases.append({'scope': 'C2-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -169,6 +193,9 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
 
     c2_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     branch_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    findings_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    flow_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    session_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     execution_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c2_faults import capture_scenarios, lock_scenarios, scenarios as fault_scenarios
     fault_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
@@ -187,6 +214,10 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
         return results
     conflict_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check, race=race)
     edge_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    from c2_scenarios import adr_scenarios as c2_adr_scenarios
+    c2_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
+    from c2_scenarios import skill_scenarios as c2_skill_scenarios
+    c2_skill_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c2_check)
     from c3_scenarios import combined_and_fix_scenarios as c3_scenarios
     def c3_check(name, condition, evidence=''):
         cases.append({'scope': 'C3-native', 'name': name, 'passed': bool(condition), 'evidence': evidence})
@@ -195,7 +226,14 @@ def native_harness(wheel: Path, workspace: Path, cases: list[dict], compatibilit
     c3_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     from c3_scenarios import review_scenarios
     review_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
-    from c3_installation import scenarios as install_scenarios, verified_restore_scenarios
+    from c3_scenarios import adr_scenarios as c3_adr_scenarios
+    c3_adr_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
+    from c3_scenarios import hook_scenarios
+    hook_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
+    from c3_scenarios import session_release_scenarios
+    session_release_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
+    from c3_installation import scenarios as install_scenarios, skill_installation_scenarios, verified_restore_scenarios
+    skill_installation_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check)
     verified_restore_scenarios(workspace, lambda argv: execute([cli, *argv], workspace),
                                lambda code, argv: execute([env / 'bin/python', '-c', code, *argv], workspace), c3_check)
     install_scenarios(workspace, lambda argv: execute([cli, *argv], workspace), c3_check, compatibility=compatibility)
