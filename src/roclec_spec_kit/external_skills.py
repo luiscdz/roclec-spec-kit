@@ -125,6 +125,14 @@ def read_lock(root: Path) -> dict:
     return data
 
 
+def lock_names(root: Path) -> frozenset[str]:
+    """Skill names declared in root/skills-lock.json; empty when it is missing or unreadable. Read-only."""
+    try:
+        return frozenset(read_lock(Path(root))["skills"])
+    except (SkillLockError, ValueError, OSError):  # Includes a lock that is not UTF-8.
+        return frozenset()
+
+
 def ensure_design_lock(root: Path) -> list[str]:
     """Add the pinned design profile without replacing consumer-chosen versions."""
     path = root / "skills-lock.json"

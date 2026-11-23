@@ -219,8 +219,11 @@ class FlowConformanceTest(unittest.TestCase):
         missing = self.inspect()
         self.assertEqual(missing["flow"]["error"]["code"], "FLOW_MISSING")
         self.assertEqual(set(missing["flow"]), {"error"})
-        self.assertEqual({k: v for k, v in missing.items() if k != "flow"},
-                         {k: v for k, v in with_flow.items() if k != "flow"}, "only the flow section differs")
+        # The skills brief is flow-derived too (TK.6): null without a flow, nothing else differs.
+        self.assertIsNone(missing["skills"])
+        self.assertEqual({k: v for k, v in missing.items() if k not in {"flow", "skills"}},
+                         {k: v for k, v in with_flow.items() if k not in {"flow", "skills"}},
+                         "only the flow-derived sections differ")
         path.write_bytes(b"schema = [")
         self.assertEqual(self.inspect()["flow"]["error"]["code"], "FLOW_INVALID")
         path.write_bytes(original)

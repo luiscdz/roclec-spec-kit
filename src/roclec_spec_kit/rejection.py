@@ -8,7 +8,11 @@ record (``outcome``), they carry their own corrections/consequence and never pai
 import re
 
 from .flow import HOOKS
+from .knowledge import SKILL_ROLE, manifest_digest, skill_files
 from .model import digest, fields, fingerprint, identifier, need, read_json, sha, text
+
+# A rejected skill freezes every file of its directory under this prefix (TK.1).
+FROZEN_DIRECTORY = "content/"
 
 STAGE_FIELDS = ("model_schema", "id", "kind", "entity", "previous", "actor", "reason", "subject", "hook", "component",
                 "outcome", "criteria", "flow")
@@ -137,6 +141,20 @@ def validate_decision(record):
         fingerprint(pin)
 
 
+def frozen_digest(record):
+    """Fingerprint the frozen files of a reference, ADR or prototype rejection stand for; None if malformed.
+
+    A file subject freezes one `content` file (its sha256); a skill freezes `content/<path>` files
+    (their manifest). The record itself tells them apart, so a later role change cannot reinterpret it.
+    """
+    files = record["files"]
+    if set(files) == {"content"}:
+        return files["content"]
+    if record["subject"]["type"] != "reference" or not all(p.startswith(FROZEN_DIRECTORY) for p in files):
+        return None
+    return digest({"files": {p[len(FROZEN_DIRECTORY):]: pin for p, pin in files.items()}})
+
+
 class Rejections:
     def __init__(self, kernel):
         self.k = kernel
@@ -149,6 +167,10 @@ class Rejections:
         if kind in {"adr", "reference"}:
             ref = self.k.references().get(entity)
             need(ref is not None and (ref["role"] == "decision") == (kind == "adr"), "INVALID_REFERENCE", "Unknown subject reference", entity=entity)
+            if ref["role"] == SKILL_ROLE:
+                # The subject digest is the skill manifest; the frozen copy holds each of its files.
+                files = skill_files(self.k.profile.root, ref["path"])
+                return manifest_digest(files), {f"{FROZEN_DIRECTORY}{p}": data for p, data in files.items()}
             path = ref["path"]
         else:
             path = entity
@@ -371,5 +393,5 @@ class Rejections:
                      and digest({k: change[k] for k in ("id", "kind", "semantic")}) == record["subject"]["digest"],
                      "HASH_MISMATCH", "Rejected proposal digest differs from its subject", path=root)
             else:
-                need(record["files"] == {"content": record["subject"]["digest"]}, "HASH_MISMATCH",
+                need(frozen_digest(record) == record["subject"]["digest"], "HASH_MISMATCH",
                      "Frozen bytes differ from the rejected subject fingerprint", path=root)

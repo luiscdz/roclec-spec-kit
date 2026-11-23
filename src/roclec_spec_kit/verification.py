@@ -14,6 +14,7 @@ import subprocess
 from .causality import one_head, record_id, scoped_heads
 from .config import DEFAULT_LOG_QUOTA
 from .flow import RETRO_PATH
+from .knowledge import SKILL_ROLE
 from .findings import OPEN, SEVERITIES, finding_key, project as project_findings, validate_findings, validate_resolutions
 from . import sessions as agent_sessions
 from .run_logs import execute as execute_check
@@ -155,6 +156,11 @@ class Verification:
         # ADRs of this component are classified like its references; their state is the ADR gate's concern.
         reference_paths |= {(self.k.profile.root / r["path"]).resolve() for r in self.k.references().values()
                             if r["role"] == "decision" and component in r["components"]}
+        # Every file of a knowledge skill naming this component is a reference input (TK.3); foundation
+        # already required it agreed and current. Its `.claude/skills/<id>/` copy is generated, so operational.
+        skill_paths = [(self.k.profile.root / r["path"]).resolve() for r in refs["references"] if r["role"] == SKILL_ROLE]
+        copy_paths = [self.k.profile.root / ".claude/skills" / r["id"] for r in self.k.references().values()
+                      if r["role"] == SKILL_ROLE]
         # The generated flow view is operational like capability views; foundation already required a valid flow.
         # So is the seeded flow retrospective: project process notes, never a code input (TL.6).
         flow_view = self.k._flow_view()
@@ -167,11 +173,12 @@ class Verification:
             if absolute.is_relative_to(self.k.profile.root / ".roclec/runtime"):
                 continue
             metadata = (absolute.is_relative_to(self.k.profile.root / ".roclec") or absolute.is_relative_to(self.k.profile.root / "specs/capabilities")
-                        or absolute.resolve() in (flow_view, retro))
+                        or absolute.resolve() in (flow_view, retro) or any(absolute.is_relative_to(p) for p in copy_paths))
             if metadata:
                 categories[relative] = "operational"
                 continue
-            is_input = any(matches(relative, c["inputs"]) for c in configured) or absolute.resolve() in reference_paths or relative == ".gitignore"
+            is_input = (any(matches(relative, c["inputs"]) for c in configured) or absolute.resolve() in reference_paths
+                        or any(absolute.resolve().is_relative_to(p) for p in skill_paths) or relative == ".gitignore")
             ignored = any(matches(relative, c["generated"] + c.get("excluded", [])) for c in configured)
             need(not (is_input and ignored), "CANDIDATE_INCOMPLETE", "Input overlaps generated/excluded classification", path=relative)
             if not is_input:

@@ -97,6 +97,16 @@ Al cerrar una etapa con `session_evidence = "required"`, el coordinador registra
 
 Cuando una etapa te estorba, el coordinador lo captura como FUT de proceso (`scope` `process`) y, al acordar la nueva revisión del flujo, la decisión cita los FUT que atiende y el motivo. `roclec views --write` agrega a la vista del flujo la sección «Flow learning» con lo que muestran los registros, sin juicios: revisiones del flujo, rechazos por etapa, hallazgos, etapas sin IA y sesiones por rol y etapa. `docs/flow-retro.md`, que Roclec siembra una vez y no sobrescribe, es tu espacio para la reflexión que los datos no derivan. [Aprendizaje del flujo](c2.md#aprendizaje-del-flujo)
 
+## Skills de conocimiento
+
+Además de las skills de procedimiento que instala Roclec, el proyecto puede registrar sus propias skills de conocimiento (convenciones, patrones, procedimientos) como referencias de fundación. Entran al flujo en tres puntos:
+
+- **Fundación.** El coordinador inventaría las convenciones del proyecto con `roclec-foundation`, propone registrarlas con `reference add ... --role skill` y las acuerdas con `foundation agree`. Una skill sin acuerdo no se aplica.
+- **Coordinador.** Al aprobar, la decisión fija las skills aplicables. En cada etapa el coordinador lee `inspect --change` (sección `skills`) y entrega a cada rol, en su encargo, solo las skills de esa etapa y componente. Si una skill quedó `stale`, el gate de implementación se detiene hasta que la acuerdes de nuevo.
+- **Revisión.** El revisor verifica que el candidato respete las skills aplicadas y declara cuáles comprobó.
+
+Los roles aplican las skills recibidas y declaran en su salida de texto las que usaron. La vista del flujo agrega la sección «Knowledge skills» solo cuando hay skills registradas, aunque aún no estén acordadas; el mapa de autoridad de `AGENTS.md`/`CLAUDE.md`, en cambio, solo lista las acordadas. Registro, fijación y mapa de autoridad: [Skills de conocimiento](c1.md#skills-de-conocimiento).
+
 ## Hallazgos de revisión
 
 La revisión registra hallazgos con severidad, ubicación, criterios afectados, condición e impacto. Cada hallazgo conserva su clave `EVD-ID#F-n` al cambiar el candidato. El implementador cita las claves que atendió y una revisión posterior declara cuáles quedaron corregidas o siguen abiertas. El coordinador te presenta los hallazgos materiales que no se pueden corregir dentro del alcance para que decidas si aceptas el riesgo, los consideras inválidos o los difieres a un FUT.

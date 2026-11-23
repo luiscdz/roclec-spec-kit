@@ -14,18 +14,19 @@ import tomllib
 from . import __version__
 from .agents import bindings, is_binding_path
 from .flow import DEFAULT_VIEW, RETRO_PATH
-from .model import ModelError, digest, encoded, need, read_json, sha
+from . import instructions as agent_instructions
+from .knowledge import SKILL_ROLE, skill_files
+from .model import ModelError, digest, encoded, local_path, need, read_json, sha
 from .store import Store
 
 MARKER = "<!-- managed by roclec-spec-kit -->"
-START, END = "<!-- roclec-spec-kit:begin -->", "<!-- roclec-spec-kit:end -->"
 MANIFEST = ".roclec/installation.json"
 NATIVE_FILES = (".roclec/workflow.md", ".roclec/model.md", ".roclec/run")
 EDITED_REMEDIATION = ("Restore each listed file (for example `git checkout -- PATH`) or delete it to accept the refreshed "
                       "version, then retry; move consumer content into a consumer-owned file.")
 
 
-def _native(relative):
+def _native(relative, skills=frozenset()):
     """Paths that only Roclec's own installer writes and may compare by hash or prune.
 
     Seeded templates/constitution, root instruction blocks, `.gitignore`, links,
@@ -33,12 +34,19 @@ def _native(relative):
     are deliberately excluded, whatever an installation manifest claims. Role
     bindings match only `roclec-<one lowercase word>` directly in a host's
     `agents/` folder, so hyphenated or other consumer role files never do.
+    Knowledge-skill copies (TK.3) count only inside `.claude/skills/<id>/` for an
+    ID in `skills`, the currently registered skill references: a manifest alone
+    never makes a consumer skill prunable, and copies of a skill that is no longer
+    registered are left in place (`check` reports them as SKILL_UNREGISTERED).
+    The canonical `.agents/skills/<id>/` is consumer-owned and never native.
     """
+    parts = relative.split("/")
     return relative in NATIVE_FILES or is_binding_path(relative) or any(
-        relative.startswith(f"{host}/skills/roclec-") and relative.count("/") >= 3 for host in (".agents", ".claude"))
+        relative.startswith(f"{host}/skills/roclec-") and relative.count("/") >= 3 for host in (".agents", ".claude")) or (
+        len(parts) >= 4 and parts[:2] == [".claude", "skills"] and parts[2] in skills)
 
 
-def _previous(store):
+def _previous(store, skills=frozenset()):
     """Return (recorded native hashes, generation) from the previous manifest.
 
     Empty hashes mean a first install. Manifests without the optional `managed`
@@ -60,7 +68,7 @@ def _previous(store):
     if not isinstance(files, dict) or not isinstance(managed, list):
         return {}, generation
     return {p: files[p] for p in managed
-            if isinstance(p, str) and _native(p) and isinstance(files.get(p), str)}, generation
+            if isinstance(p, str) and _native(p, skills) and isinstance(files.get(p), str)}, generation
 
 
 def _generation(store, token):
@@ -108,9 +116,14 @@ def install(kernel, *, into=None, restore=False, adapter=False):
         read_lock(destination)
     assets = files("roclec_spec_kit").joinpath("assets")
     writes = {}
-    previous, generation = _previous(store)
+    # Knowledge skills are copied only into the project root, where their canonical directories live.
+    skills = {}
+    if destination == profile.root and store.path(".roclec/references.json").is_file():
+        skills = {ref_id: ref for ref_id, ref in kernel.references().items() if ref["role"] == SKILL_ROLE}
+    previous, generation = _previous(store, frozenset(skills))
     managed, edited = set(), []
     observed = {}  # Bytes each owned or retired path held when it was judged.
+    sources = {}  # Files of each copied canonical skill directory, rechecked under the lock.
 
     def owned(relative, content):
         path = store.path(relative)
@@ -139,18 +152,35 @@ def install(kernel, *, into=None, restore=False, adapter=False):
     # Subagent role bindings for both hosts, with the project's pinned models.
     for relative, content in bindings(profile).items():
         owned(relative, content)
-    block = START + "\n" + assets.joinpath("project/agent-instructions.md").read_text(encoding="utf-8").strip() + "\n" + END
-    for name in ("AGENTS.md", "CLAUDE.md"):
-        path = store.path(name)
-        body = path.read_text(encoding="utf-8") if path.exists() else ""
-        need(body.count(START) == body.count(END) and body.count(START) <= 1, "UNMANAGED_FILE", "Malformed managed instruction block", path=name)
-        if START in body:
-            before, rest = body.split(START, 1)
-            _, after = rest.split(END, 1)
-            content = before + block + after
-        else:
-            content = body + ("\n\n" if body else "") + block + "\n"
-        writes[name] = content.encode("utf-8")
+
+    def copied(relative, content):
+        # A knowledge-skill copy carries no marker: it is Roclec's only when recorded or already identical.
+        path = store.path(relative)  # Rejects a symlinked `.claude/skills/<id>` or ancestor.
+        need(not path.exists() or path.is_file(), "UNMANAGED_FILE", "Skill copy target is not a file", path=relative)
+        current = path.read_bytes() if path.is_file() else None
+        observed[relative] = current
+        if current is not None and current != content:
+            need(relative in previous, "UNMANAGED_FILE", "Skill copy would overwrite a file Roclec did not write",
+                 path=relative, remediation=f"Move consumer content out of {relative} or delete it, then retry.")
+            if sha(current) != previous[relative]:
+                edited.append(relative)
+        writes[relative] = content
+        managed.add(relative)
+
+    # Registered knowledge skills (TK.3): `.agents/skills/<id>/` byte for byte into `.claude/skills/<id>/`.
+    # The canonical directory is consumer-owned: read here, never written, compared or pruned.
+    for ref_id, ref in sorted(skills.items()):
+        if not local_path(profile.root, ref["path"]).is_dir():  # INVALID_PATH for a symlinked directory.
+            continue  # No source: its recorded copies retire below.
+        try:
+            content = skill_files(profile.root, ref["path"])  # INVALID_PATH for any symlink inside.
+        except ModelError as exc:
+            if exc.issue["code"] != "INVALID_REFERENCE":
+                raise
+            continue  # An empty directory has no files to copy.
+        sources[ref["path"]] = content
+        for inner, data in sorted(content.items()):
+            copied(f".claude/skills/{ref_id}/{inner}", data)
     owned(".roclec/workflow.md", assets.joinpath("project/workflow.md").read_bytes())
     owned(".roclec/model.md", assets.joinpath("project/model.md").read_bytes())
     relative = os.path.relpath(profile.root, destination)
@@ -182,6 +212,14 @@ def install(kernel, *, into=None, restore=False, adapter=False):
             observed[RETRO_PATH] = None  # Outside the store token: recheck it is still absent under the lock.
         if not store.path(".roclec/constitution.md").exists() and not store.path(".specify/memory/constitution.md").exists():
             writes[".roclec/constitution.md"] = assets.joinpath("templates/constitution-template.md").read_bytes()
+    # Root instruction blocks: routing text plus the authority map (TK.4); a linked repo points to the root's map.
+    if destination == profile.root:
+        root_block = kernel.instruction_block(flow_raw=writes.get(".roclec/flow.toml"))
+    for name in agent_instructions.FILES:
+        path = store.path(name)
+        body = agent_instructions.decode(path.read_bytes(), name) if path.exists() else ""
+        block = root_block if destination == profile.root else agent_instructions.linked_block(relative, name)
+        writes[name] = agent_instructions.place(body, block, name).encode("utf-8")
     for notice in assets.joinpath("notices").iterdir():
         target = f".roclec/notices/{notice.name}"
         path = store.path(target)
@@ -248,10 +286,16 @@ def install(kernel, *, into=None, restore=False, adapter=False):
         content = encoded({**manifest, "generation": _generation(store, token)})
     writes[MANIFEST] = content
     def unchanged():
-        # The store token does not hash `.claude/agents/`; recheck under the
-        # lock that no judged file changed before anything is journaled.
+        # The store token does not hash `.claude/agents/` or skill copies; recheck under
+        # the lock that no judged file or copied source changed before anything is journaled.
         need(all(_current(store, p) == b for p, b in observed.items()), "BASE_CONFLICT",
              "Project inputs changed during validation", exit_code=3)
+        for location, content in sources.items():
+            try:
+                same = skill_files(profile.root, location) == content
+            except ModelError:
+                same = False
+            need(same, "BASE_CONFLICT", "Project inputs changed during validation", exit_code=3, path=location)
 
     receipt = store.apply("skills-install", {"version": __version__, "adapter": adapter}, writes, token, validate=unchanged)
     # Executability is installed as part of the journal's mode metadata.

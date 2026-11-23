@@ -11,12 +11,15 @@ Pure module: no writes, no kernel state. Public API (stable):
 * ``evaluate(flow, name, evaluations, *, outcome) -> list``: check criteria evaluations of a decision.
   A rejection cites at least one ``not-met`` criterion only when the point declares criteria.
 * ``SUBJECT_POINTS``: decision point of each rejectable subject type.
-* ``render(flow, profile_data, learning=None) -> bytes``: generated Markdown view with a managed-view
-  header. The stage table, criteria and diagram come from the flow alone; a "Flow learning" section
-  follows, projected by the kernel from records (``learning``, see ``LEARNING_KEYS``; ``None`` is a
-  project without records). Rendering sorts every list it receives except flow revisions, which keep
-  the decision order the caller gives.
-* ``view_status(flow, profile_data, existing, learning=None) -> "current"|"stale"|"missing"|"edited"``.
+* ``render(flow, profile_data, learning=None, skills=None) -> bytes``: generated Markdown view with a
+  managed-view header. The stage table, criteria and diagram come from the flow alone; a "Knowledge
+  skills" section lists the registered skill references the kernel passes (``skills``: ``[{id, path,
+  components}]``) with the stages each applies to, derived from the flow's stage ``skills`` (a skill no
+  stage lists applies to every stage); it is omitted when there are none, so such a view keeps its
+  earlier bytes. A "Flow learning" section follows, projected by the kernel from records (``learning``,
+  see ``LEARNING_KEYS``; ``None`` is a project without records). Rendering sorts every list it receives
+  except flow revisions, which keep the decision order the caller gives.
+* ``view_status(flow, profile_data, existing, learning=None, skills=None) -> "current"|"stale"|"missing"|"edited"``.
 * ``RETRO_PATH``: project-owned retrospective the view links to (seeded, never generated).
 
 Every failure is a ``model.ModelError`` with exit code 2 unless noted.
@@ -54,7 +57,7 @@ FINDING_STATUSES = ("open", "still-open", "fixed", "accepted", "deferred", "inva
 ROLE_RE = re.compile(r"[a-z][a-z0-9-]*\Z")
 RESERVED_RE = re.compile(r"roclec-[a-z]+\Z")
 CRITERION_RE = re.compile(r"CR-[0-9]{3,}\Z")
-SKILL_RE = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
+SKILL_RE = re.compile(r"[a-z][a-z0-9-]*\Z")  # Same shape as a reference ID.
 HEADER_RE = re.compile(rb"<!-- roclec-managed-view sha256=([0-9a-f]{64}) -->\Z")
 
 
@@ -318,7 +321,7 @@ def _model(row, flow, profile_data):
     return ", ".join(pairs) if pairs else "session model"
 
 
-def _body(flow, profile_data, learning=None):
+def _body(flow, profile_data, learning=None, knowledge=None):
     lines = ["# Project flow", "",
              f"Generated from `{FLOW_PATH}` by `roclec views --write`. Do not edit by hand.", "",
              "| Step | Stage | Description | AI | Role | Skills and model | Deliverables | Human checkpoint | Criteria | On reject |",
@@ -352,6 +355,8 @@ def _body(flow, profile_data, learning=None):
     if checks:
         lines.append(f"  class {','.join(checks)} checkpoint;")
     lines += ["```", ""]
+    if knowledge:
+        lines += _skills(flow, knowledge) + [""]
     lines += _learning(flow, learning or {}) + [""]
     return "\n".join(lines).encode("utf-8")
 
@@ -368,6 +373,30 @@ def _link(target, view):
 def _rows(headings, rows):
     lines = ["| " + " | ".join(headings) + " |", "| " + " | ".join("---" for _ in headings) + " |"]
     return lines + ["| " + " | ".join(row) + " |" for row in rows]
+
+
+def _skills(flow, skills):
+    """Registered knowledge skills (TK.6): where each applies, then the skills each stage's brief lists."""
+    every = [row["name"] for row in flow["stages"]]
+    listed = {}
+    for row in flow["stages"]:
+        for name in row["skills"]:
+            listed.setdefault(name, []).append(row["name"])
+    rows = sorted(skills, key=lambda s: s["id"])
+    lines = ["## Knowledge skills", "",
+             "Registered skill references (`roclec reference add <id> --role skill`). A skill applies to its components "
+             "at the stages whose `skills` list it, or at every stage when no stage lists it. "
+             "`roclec inspect --change CHG-ID` gives each role this list with its fingerprints.", ""]
+    lines += _rows(("Skill", "Path", "Components", "Stages"),
+                   [[f"`{s['id']}`", f"[{_cell(s['path'])}]({_link(s['path'], flow['view'])})",
+                     ", ".join(sorted(s["components"])), ", ".join(listed[s["id"]]) if s["id"] in listed else "every stage"]
+                    for s in rows])
+    lines += ["", "### Skills by stage", ""]
+    by_stage = [[stage, "<br>".join(f"`{s['id']}` ({', '.join(sorted(s['components']))})" for s in rows
+                                    if stage in listed.get(s["id"], every))]
+                for stage in every]
+    lines += _rows(("Stage", "Skills (components)"), [row for row in by_stage if row[1]])
+    return lines
 
 
 def _learning(flow, data):
@@ -436,16 +465,16 @@ def _learning(flow, data):
     return lines
 
 
-def render(flow, profile_data, learning=None) -> bytes:
-    body = _body(flow, profile_data, learning)
+def render(flow, profile_data, learning=None, skills=None) -> bytes:
+    body = _body(flow, profile_data, learning, skills)
     return f"<!-- roclec-managed-view sha256={sha(body)} -->\n".encode() + body
 
 
-def view_status(flow, profile_data, existing, learning=None):
+def view_status(flow, profile_data, existing, learning=None, skills=None):
     if existing is None:
         return "missing"
     header, _, body = existing.partition(b"\n")
     match = HEADER_RE.match(header)
     if not match or match.group(1).decode() != sha(body):
         return "edited"
-    return "current" if existing == render(flow, profile_data, learning) else "stale"
+    return "current" if existing == render(flow, profile_data, learning, skills) else "stale"

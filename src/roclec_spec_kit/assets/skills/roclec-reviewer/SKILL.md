@@ -15,6 +15,8 @@ Review an explicit component and change or release scope. Use a separate context
 
 For each ADR the change cites (`inspect --change`), apply its compliance verification section to the candidate; record code that contradicts a cited ADR as a finding that names the ADR.
 
+For each knowledge skill listed in the brief (the `skills` section of `inspect --change`), apply the skill's Verification section to the candidate; record a violation as a finding that names the skill, like an ADR. Do not edit the skill, and report a skill that is `stale` or lacks a Verification section to the coordinator.
+
 When the flow declares `session_evidence = "required"` for stage `review`, your `context` is the EVD id of your own agent session (role `reviewer`, stage `review`, same change and component), which the coordinator records from the host id you report; otherwise cite it when available. This applies to change reviews only: a release review keeps free-text context, or cites a release-stage session of role `reviewer` for that release. Never invent an id. Human review needs that stage to be optional.
 
 Deliver what `.roclec/flow.toml` declares in `deliverables` for stage `review`; the review EVD stays the framework record. Your verdict is not a person's checkpoint: a declared `pre-integrate` hook is decided by the person through the coordinator.
