@@ -836,6 +836,37 @@ MERGE = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", 
 FLOW_ACTOR = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
 
 
+def skill_scenarios(workspace, invoke, check):
+    """A knowledge skill is a file input of the components it names; its host copy is operational."""
+    root, base = setup(workspace / "c2-skill", invoke, names=("engine",))
+    call = adr_caller(root, invoke, check)
+    name = "conventions"
+    folder = root / ".agents/skills" / name
+    for relative, body in {"SKILL.md": "# Conventions\n", "examples/handler.md": "# Handler example\n", ".hidden": "hidden rule\n"}.items():
+        (folder / relative).parent.mkdir(parents=True, exist_ok=True)
+        (folder / relative).write_text(body, encoding="utf-8")
+    verify = ("run", "verify", "CHG-001", "--component", "engine", "--base", base, *PRODUCER)
+    incomplete = call("C2 SK unregistered skill files need registration or classification", *verify, expect=1, issue="CANDIDATE_INCOMPLETE")
+    check("C2 SK every unregistered skill file is unclassified", incomplete["issues"][0]["actual"] == sorted(
+        f".agents/skills/{name}/{inner}" for inner in (".hidden", "SKILL.md", "examples/handler.md")), str(incomplete["issues"][0]["actual"]))
+    call("C2 SK skill registers", "reference", "add", name, "--path", f".agents/skills/{name}", "--role", "skill", "--component", "engine")
+    call("C2 SK skill agreement", "foundation", "agree", "--ref", name, "--actor", "Maintainer", "--reason", "Agreed",
+         *criteria(root, "foundation"))
+    # The host copy `roclec skills` writes; the full installer would add unclassified stage files this fixture profile does not declare.
+    shutil.copytree(folder, root / ".claude/skills" / name)
+    run = call("C2 SK registered skill is classified", *verify)["data"]["run"]
+    categories, inputs = run["candidate"]["categories"], run["candidate"]["inputs"]["files"]
+    check("C2 SK canonical files are inputs, copies operational", run["status"] == "pass" and all(
+        categories[f".agents/skills/{name}/{inner}"] == "input" and categories[f".claude/skills/{name}/{inner}"] == "operational"
+        and f".agents/skills/{name}/{inner}" in inputs and f".claude/skills/{name}/{inner}" not in inputs
+        for inner in (".hidden", "SKILL.md", "examples/handler.md")), str(categories))
+    (folder / "examples/handler.md").write_text("# Handler example, revised\n", encoding="utf-8")
+    call("C2 SK skill re-agreement", "foundation", "agree", "--ref", name, "--actor", "Maintainer", "--reason", "Re-agreed",
+         *criteria(root, "foundation"))
+    call("C2 SK editing the skill invalidates earlier evidence", "check", "--change", "CHG-001", "--component", "engine", "--gate", "verify",
+         expect=1, issue="EVIDENCE_STALE")
+
+
 def flow_scenarios(workspace, invoke, check):
     """FF hooks and flow edits across real Git branches merged in both orders.
 

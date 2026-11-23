@@ -7,10 +7,10 @@ import subprocess
 import tomllib
 
 try:
-    from .c1_scenarios import file_hash, put_json, tree
+    from .c1_scenarios import adr_markdown, adr_caller, criteria, file_hash, put_json, tree
     from .c2_scenarios import setup, git
 except ImportError:
-    from c1_scenarios import file_hash, put_json, tree
+    from c1_scenarios import adr_markdown, adr_caller, criteria, file_hash, put_json, tree
     from c2_scenarios import setup, git
 
 
@@ -214,6 +214,94 @@ def scenarios(workspace, invoke, check, *, compatibility=False):
           {p: b for p, b in bindings(code).items()} == {p: b for p, b in bindings(root).items() if "/roclec-" in p})
     check("I-033 linked install points to original authority", 'project_root = "../code with spaces"' in (code / ".roclec/link.toml").read_text())
     call("I-033 installed native consumer validates", "check")
+
+
+def skill_installation_scenarios(workspace, invoke, check):
+    """Knowledge-skill host copies (.agents -> .claude), divergence, unregistered skills and the authority map."""
+    root, _ = setup(workspace / "c3-skill-installation", invoke, names=("engine",))
+    call = adr_caller(root, invoke, check)
+    name = "conventions"
+    canonical = root / ".agents/skills" / name
+    copy = root / ".claude/skills" / name
+    files = {"SKILL.md": f"---\nname: {name}\n---\n\n# Conventions\n", "examples/handler.md": "# Handler example\n",
+             ".hidden": "hidden rule\n"}
+    for relative, body in files.items():
+        (canonical / relative).parent.mkdir(parents=True, exist_ok=True)
+        (canonical / relative).write_text(body, encoding="utf-8")
+    before_text, after_text = b"# Team rules\n\nRun the project tests.\n\n", b"\n## Local notes\n\nKeep this paragraph.\n"
+    (root / "AGENTS.md").write_bytes(before_text.rstrip(b"\n") + b"\n")
+    (root / "CLAUDE.md").write_bytes(before_text.rstrip(b"\n") + b"\n")
+
+    def warnings(label, code):
+        return [i for i in call(label, "check")["issues"] if i["code"] == code]
+
+    def listing(folder):
+        return {p.relative_to(folder).as_posix(): p.read_bytes() for p in sorted(folder.rglob("*")) if p.is_file()}
+
+    call("SK skill registers", "reference", "add", name, "--path", f".agents/skills/{name}", "--role", "skill", "--component", "engine")
+    call("SK skills install copies the skill", "skills")
+    check("SK copy equals canonical byte for byte, hidden files included", listing(copy) == listing(canonical)
+          and sorted(listing(copy)) == sorted(files), str(sorted(listing(copy))))
+    manifest = json.loads((root / ".roclec/installation.json").read_text(encoding="utf-8"))
+    check("SK copy files are recorded as managed with their hashes", all(
+        manifest["files"].get(f".claude/skills/{name}/{inner}") == file_hash(data) and f".claude/skills/{name}/{inner}" in manifest["managed"]
+        for inner, data in listing(canonical).items()), str(manifest["files"]))
+    check("SK canonical skill is never recorded or written", not any(p.startswith(f".agents/skills/{name}") for p in manifest["files"])
+          and not (canonical / ".roclec").exists(), "")
+    check("SK a faithful copy raises no warnings", warnings("SK check after install", "SKILL_COPY_DIVERGED") == []
+          and warnings("SK check unregistered after install", "SKILL_UNREGISTERED") == [], "")
+
+    # Editing only the copy diverges it and blocks the refresh.
+    original = (copy / "SKILL.md").read_bytes()
+    (copy / "SKILL.md").write_text("# Edited only in the copy\n", encoding="utf-8")
+    diverged = warnings("SK check reports a diverged copy", "SKILL_COPY_DIVERGED")
+    check("SK divergence is a warning naming the differing file", [(w["severity"], w["entity"], w["actual"]) for w in diverged]
+          == [("warning", name, ["SKILL.md"])], str(diverged))
+    refused = call("SK refresh refuses an edited copy", "skills", expect=1, issue="MANAGED_FILE_EDITED")
+    check("SK refusal names the edited file", refused["issues"][0]["actual"] == [f".claude/skills/{name}/SKILL.md"], str(refused["issues"]))
+    (copy / "SKILL.md").write_bytes(original)
+    call("SK refresh after restoring the copy", "skills")
+    (canonical / "examples/handler.md").write_text("# Handler example, revised\n", encoding="utf-8")
+    check("SK canonical edit before refresh diverges the copy", len(warnings("SK check after canonical edit", "SKILL_COPY_DIVERGED")) == 1, "")
+    call("SK refresh updates the copy", "skills")
+    check("SK refreshed copy equals canonical", listing(copy) == listing(canonical)
+          and warnings("SK check after refresh", "SKILL_COPY_DIVERGED") == [], "")
+
+    # An unregistered skill warns without blocking; registering clears it.
+    (root / ".agents/skills/foo").mkdir()
+    (root / ".agents/skills/foo/SKILL.md").write_text("# Foo\n", encoding="utf-8")
+    found = warnings("SK unregistered skill does not block check", "SKILL_UNREGISTERED")
+    check("SK unregistered skill is a warning naming its folder", [(w["entity"], w["severity"]) for w in found] == [("foo", "warning")]
+          and ".agents/skills/foo" in found[0]["actual"], str(found))
+    call("SK foo registers", "reference", "add", "foo", "--path", ".agents/skills/foo", "--role", "skill", "--component", "engine")
+    check("SK registering clears the warning", warnings("SK check after registering foo", "SKILL_UNREGISTERED") == [], "")
+
+    # Authority map: the managed block lists agreed references, ADRs and skills; consumer text outside it survives.
+    for host in ("AGENTS.md", "CLAUDE.md"):
+        path = root / host
+        path.write_bytes(path.read_bytes() + after_text)
+    call("SK block regenerates before agreement", "views", "--write")
+    stale = lambda label: sorted(w["path"] for w in warnings(label, "AGENT_INSTRUCTIONS_STALE"))
+    check("SK registered but unagreed skills keep the block current", stale("SK check before agreement") == [], "")
+    adr = root / "docs/adr/ADR-001.md"
+    adr.parent.mkdir(parents=True, exist_ok=True)
+    adr.write_text(adr_markdown("ADR-001: Decision"), encoding="utf-8")
+    call("SK ADR registers", "reference", "add", "ADR-001", "--path", "docs/adr/ADR-001.md", "--component", "engine", "--role", "decision")
+    for ref in (name, "ADR-001"):
+        call("SK agree " + ref, "foundation", "agree", "--ref", ref, "--actor", "Maintainer", "--reason", "Agreed",
+             *criteria(root, "foundation"))
+    check("SK agreement without regeneration makes both host files stale", stale("SK check after agreement") == ["AGENTS.md", "CLAUDE.md"],
+          str(stale("SK check after agreement again")))
+    call("SK views --write regenerates the block", "views", "--write")
+    check("SK regeneration clears the staleness warning", stale("SK check after regeneration") == [], "")
+    for host in ("AGENTS.md", "CLAUDE.md"):
+        text = (root / host).read_text(encoding="utf-8")
+        check(f"SK {host} lists the agreed skill and ADR", f"- `{name}`: [.agents/skills/{name}](.agents/skills/{name}); components: all components; stages: every stage" in text
+              and "- `ADR-001`: [docs/adr/ADR-001.md](docs/adr/ADR-001.md); components: all components" in text, text)
+        check(f"SK {host} keeps consumer text outside the block", text.startswith("# Team rules\n\nRun the project tests.\n")
+              and text.endswith(after_text.decode()) and text.count("<!-- roclec-spec-kit:begin -->") == 1, text)
+    call("SK installed consumer validates", "check")
+    return root
 
 
 _STAGED_SKILL_INSTALLER = '''

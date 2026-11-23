@@ -38,9 +38,9 @@ def pin_adrs(kernel, value):
         ref = refs.get(entry["id"])
         need(ref is not None and ref["role"] == "decision", "INVALID_REFERENCE", "Change cites an unregistered ADR",
              entity=entry["id"], remediation="Register the ADR with reference add ADR-NNN --role decision first.")
-        path = kernel.store.path(ref["path"])
-        need(path.is_file(), "INVALID_REFERENCE", "Cited ADR file is missing", entity=entry["id"], path=ref["path"])
-        entry["sha256"] = sha(path.read_bytes())
+        pin = kernel.reference_fingerprint(ref)
+        need(pin is not None, "INVALID_REFERENCE", "Cited ADR file is missing", entity=entry["id"], path=ref["path"])
+        entry["sha256"] = pin
     value["adrs"] = sorted(value["adrs"], key=lambda entry: entry["id"])
 
 

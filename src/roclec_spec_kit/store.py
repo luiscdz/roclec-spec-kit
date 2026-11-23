@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 from datetime import datetime, timezone
 import fcntl
+import json
 import os
 import re
 from pathlib import Path
@@ -12,6 +13,7 @@ import subprocess
 import tempfile
 import tomllib
 
+from .instructions import FILES as INSTRUCTION_FILES, decode as decode_instructions, split as split_instructions
 from .model import ModelError, digest, encoded, fingerprint, local_path, need, read_json, sha
 
 # Operations whose journal may contain a forward deletion (a `None` write).
@@ -37,6 +39,20 @@ def _flow_view(payload):
     return (view,)
 
 
+def _instructions(payload):
+    """Root instruction files a views operation may rewrite, named by its payload (TK.4).
+
+    Only their managed block may change: `Store._block_only` compares the text outside it before
+    any write, so a replayed journal cannot touch consumer-owned instructions.
+    """
+    names = payload.get("instructions")
+    if names is None:
+        return ()
+    need(isinstance(names, list) and bool(names) and names == sorted(set(names)) and set(names) <= set(INSTRUCTION_FILES),
+         "OPERATION_CONFLICT", "Invalid instruction targets", exit_code=3, actual=str(names))
+    return tuple(names)
+
+
 class Store:
     def __init__(self, root: Path):
         self.root = root.resolve()
@@ -58,7 +74,10 @@ class Store:
              and actual == expected, "OFF_TRUNK", "This operation requires the configured specs trunk",
              exit_code=3, expected=expected, actual=actual, remediation="Switch to the configured local trunk branch.")
 
-    def inputs(self):
+    def inputs(self, references=None):
+        """Hash every project input; `references` (bytes) overrides `.roclec/references.json` as the
+        source of reference paths, so a journal guard derives the same entries when prepared and when
+        recovered after a partial write of that file."""
         files = {}
         ignore = self.path(".gitignore")
         files[".gitignore"] = sha(ignore.read_bytes()) if ignore.is_file() else None
@@ -72,14 +91,19 @@ class Store:
                     path = self.path(relative)
                     if path.is_file():
                         files[relative] = sha(path.read_bytes())
-            references = self.path(".roclec/references.json")
-            if references.exists():
-                data = read_json(references)
+            source = self.path(".roclec/references.json")
+            if references is not None or source.exists():
+                try:
+                    data = json.loads(references) if references is not None else read_json(source)
+                except (ValueError, UnicodeDecodeError):
+                    data = None  # The journal's own bytes were validated by the kernel before writing.
                 if isinstance(data, dict) and isinstance(data.get("references"), list):
                     for ref in data["references"]:
                         if isinstance(ref, dict) and isinstance(ref.get("path"), str):
                             path = self.path(ref["path"])
                             files[ref["path"]] = sha(path.read_bytes()) if path.is_file() else None
+                            if path.is_dir():
+                                files.update(self._directory_inputs(ref["path"], path))
         views = self.path("specs/capabilities")
         if views.exists():
             for path in sorted(views.glob("*.md")):
@@ -97,6 +121,24 @@ class Store:
                 self.path(relative)
                 if item.is_file():
                     files[relative] = sha(item.read_bytes())
+        return files
+
+    @staticmethod
+    def _directory_inputs(relative, directory):
+        """Each entry of a directory reference (a knowledge skill), keyed `<ref path>/<inner path>`.
+
+        Symlinks are recorded by their target text and never followed; the kernel rejects them when
+        it fingerprints the skill, while the token still notices them changing.
+        """
+        files = {}
+        for base, folders, names in os.walk(directory, followlinks=False):
+            for name in [*folders, *names]:
+                item = Path(base) / name
+                key = f"{relative}/{item.relative_to(directory).as_posix()}"
+                if item.is_symlink():
+                    files[key] = "symlink:" + sha(os.fsencode(os.readlink(item)))
+                elif item.is_file():
+                    files[key] = sha(item.read_bytes())
         return files
 
     def token(self):
@@ -189,7 +231,7 @@ class Store:
             "fut-capture": (f".roclec/futs/{payload.get('id')}.json",),
             "fut-decide": (".roclec/decisions/",),
             "release-plan": (f".roclec/releases/{payload.get('component')}/{payload.get('version')}/release.json",),
-            "views": ("specs/capabilities/", *_flow_view(payload)),
+            "views": ("specs/capabilities/", *_flow_view(payload), *_instructions(payload)),
             "run-verify": (f".roclec/runs/{payload.get('id')}/",),
             "run-start": (f".roclec/runs/{payload.get('id')}/start.json",),
             "evidence-record": (f".roclec/evidence/{payload.get('id')}.json",),
@@ -295,9 +337,13 @@ class Store:
             if validate:
                 validate()
             self._source_guards(payload)
+            if kind == "views":  # Refuse before journaling: a pending journal would block the project.
+                for relative in _instructions(payload):
+                    if relative in writes:
+                        self._block_only(relative, writes[relative])
             previous = {p: self.path(p).read_bytes() if self.path(p).exists() else None for p in writes}
             before = {p: sha(b) if b is not None else None for p, b in previous.items()}
-            guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
+            guard = {p: h for p, h in self.inputs(writes.get(".roclec/references.json")).items() if p not in writes and p != receipt_path}
             journal = {"model_schema": 2, "operation_id": operation_id, "kind": kind, "payload": payload,
                        "before": before, "guard": guard,
                        "writes": {p: None if b is None else base64.b64encode(b).decode("ascii") for p, b in writes.items()}}
@@ -342,7 +388,7 @@ class Store:
                  "OPERATION_CONFLICT", "Integration guard differs from prepared plan", exit_code=3)
             if journal.get("rolling_back") or not self._target_current(payload):
                 return self._rollback(journal, writes)
-        guard = {p: h for p, h in self.inputs().items() if p not in writes and p != receipt_path}
+        guard = {p: h for p, h in self.inputs(writes.get(".roclec/references.json")).items() if p not in writes and p != receipt_path}
         need(guard == journal["guard"], "OPERATION_CONFLICT",
              "Other project inputs changed since the operation was prepared", exit_code=3)
         if journal["kind"] == "integrate":
@@ -374,6 +420,10 @@ class Store:
             current = sha(path.read_bytes()) if path.exists() else None
             need(current in (journal["before"][relative], _hash(content)), "OPERATION_CONFLICT",
                  "A journal destination diverged; manual resolution required", exit_code=3, path=relative)
+        if journal["kind"] == "views":
+            for relative in _instructions(journal["payload"]):
+                if relative in writes:
+                    self._block_only(relative, writes[relative])
         try:
             for relative, content in writes.items():
                 path = self.path(relative)
@@ -396,6 +446,23 @@ class Store:
                                entity=operation_id, remediation=f"operation recover {operation_id}")
             error.operation_id, error.partial = operation_id, True
             raise error from exc
+
+    def _block_only(self, relative, content):
+        """OPERATION_CONFLICT unless `content` keeps the text outside the managed block of `relative`.
+
+        Checked before any write of the operation: either the file already holds `content`, or it
+        holds the prior bytes, and both have one well-formed block with identical surroundings.
+        """
+        current = self.path(relative).read_bytes() if self.path(relative).is_file() else None
+        if current == content:
+            return
+        try:
+            old = split_instructions(decode_instructions(current or b"", relative), relative)
+            new = None if content is None else split_instructions(decode_instructions(content, relative), relative)
+        except ModelError:
+            old = new = None
+        need(old is not None and new is not None and (old[0], old[2]) == (new[0], new[2]), "OPERATION_CONFLICT",
+             "A views operation may rewrite only the managed instruction block", exit_code=3, path=relative)
 
     def _source_guards(self, payload):
         for relative, pin in payload.get("source_guards", {}).items():

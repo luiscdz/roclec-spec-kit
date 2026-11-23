@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 import subprocess
@@ -772,6 +773,115 @@ def adr_scenarios(workspace, invoke, check):
     warned = call("check warns about a deficient ADR without failing", "check")["issues"]
     check("deficient ADR reports ADR_STRUCTURE as a warning", any(i["code"] == "ADR_STRUCTURE" and i["severity"] == "warning"
                                                                 and i["entity"] == "ADR-005" for i in warned), str(warned))
+    return root
+
+
+def skill_scenarios(workspace, invoke, check):
+    """Knowledge skills as foundation references: registration, agreement, approval pin, implement gate and flow assignment."""
+    root = workspace / "skill consumer"
+    root.mkdir()
+    init_trunk(root)
+    config = workspace / "skill-profile.toml"
+    profile(config, names=("engine",))
+    result = invoke(["--json", "init", str(root), "--profile", str(config)])
+    check("skill consumer initializes", result.returncode == 0, result.stdout + result.stderr)
+    foundation(root, ("engine",))
+    call = adr_caller(root, invoke, check)
+    actor = ("--actor", "Fixture maintainer", "--reason", "Reviewed skill")
+    name = "conventions"
+    location = f".agents/skills/{name}"
+    folder = root / location
+    template = root / ".roclec/templates/skill-template.md"
+
+    def register(label, skill=name, *, action="add", expect=0, issue=None):
+        return call(label, "reference", action, skill, "--path", f".agents/skills/{skill}", "--role", "skill",
+                    "--component", "engine", expect=expect, issue=issue)
+
+    def agree(label, *, expect=0, issue=None):
+        return call(label, "foundation", "agree", "--ref", name, *actor, *criteria(root, "foundation"), expect=expect, issue=issue)
+
+    def pin():
+        return digest({"files": {inner.relative_to(folder).as_posix(): file_hash(inner.read_bytes())
+                                 for inner in sorted(folder.rglob("*")) if inner.is_file()}})
+
+    def state():
+        return call("inspect skill", "inspect", "--reference", name)["data"]["state"]
+
+    # The skill template is seeded and consumer-owned.
+    call("skill install seeds the skill template", "skills")
+    check("skill template is seeded", template.is_file() and template.read_text(encoding="utf-8").strip() != "", "")
+    headings = ("## Purpose", "## Applies to", "## Authority", "## Conventions or procedure", "## Examples", "## Verification")
+    lines = template.read_text(encoding="utf-8").splitlines()
+    check("skill template has the six headings", all(h in lines for h in headings), str(lines))
+
+    # Unsafe skill folders are rejected without writes.
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\n---\n\n# Conventions\n", encoding="utf-8")
+    (folder / "examples").mkdir()
+    (folder / "examples/handler.md").write_text("# Handler example\n", encoding="utf-8")
+    (folder / ".hidden").write_text("hidden rule\n", encoding="utf-8")
+    (root / "shared.md").write_text("# Shared\n", encoding="utf-8")
+    os.symlink(root / "shared.md", folder / "linked.md")
+    rejected = register("skill with a symlink is rejected", expect=2, issue="INVALID_PATH")
+    check("symlink rejection names the link", rejected["issues"][0]["path"] == f"{location}/linked.md", str(rejected["issues"]))
+    (folder / "linked.md").unlink()
+    call("skill outside .agents/skills is rejected", "reference", "add", name, "--path", "docs/conventions", "--role", "skill",
+         "--component", "engine", expect=2, issue="INVALID_PATH")
+
+    # Lifecycle: registered draft -> approved -> stale on a nested edit -> approved again.
+    register("skill registers")
+    check("registered skill is a draft", state() == "draft", "")
+    decision = agree("skill agreement")["data"]["decision"]
+    check("agreement pins every file of the folder", decision["sources"] == {name: pin()}, str(decision["sources"]))
+    check("agreed skill is approved with its fingerprint", call("inspect approved skill", "inspect", "--reference", name)["data"]["sha256"] == pin(), "")
+
+    # The approval carries the skill pin; editing a nested file blocks the implement gate until re-agreed.
+    pinned = pin()
+    draft = workspace / "skill-bundle"
+    record = bundle(draft, components=("engine",))
+    call("skill change new", "change", "new", "--file", draft / "change.json")
+    approval = call("skill change approve", "change", "approve", "CHG-001", "--digest", record["proposal_digest"], *actor,
+                    *criteria(root, "approve"))["data"]["decision"]
+    check("approval decision pins the applicable skill", approval["skills"] == [{"id": name, "sha256": pinned}], str(approval.get("skills")))
+    call("skill release plan", "release", "plan", "engine", "v0.1.0", "--change", "CHG-001")
+    gate = ("check", "--change", "CHG-001", "--component", "engine", "--gate", "implement")
+    call("implement gate passes with the agreed skill", *gate)
+    (folder / "examples/nested").mkdir()
+    (folder / "examples/nested/.rule").write_text("deep hidden rule\n", encoding="utf-8")
+    check("a nested hidden file makes the skill stale", state() == "stale", "")
+    blocked = call("implement gate blocks a changed skill", *gate, expect=1, issue="FOUNDATION_INCOMPLETE")
+    entry = next((i for i in blocked["issues"][0]["actual"] if i["entity"] == name), None)
+    check("gate names the changed skill with pinned and current fingerprints",
+          entry is not None and entry["expected"] == pinned and entry["actual"] == pin() and entry["actual"] != pinned, str(entry))
+    inspected = call("inspect change shows skill drift", "inspect", "--change", "CHG-001")["data"]
+    rows = [row for stage in inspected["skills"]["engine"].values() for row in stage]
+    check("inspect --change reports pinned vs current with drift", bool(rows) and all(
+        row["id"] == name and row["pinned"] == pinned and row["sha256"] == pin() and row["drift"] is True for row in rows), str(rows))
+    agree("skill re-agreement")
+    call("implement gate passes after re-agreement", *gate)
+    check("approval keeps its original pin", call("inspect change after re-agreement", "inspect", "--change", "CHG-001")["data"]["approval"]["skills"]
+          == [{"id": name, "sha256": pinned}], "")
+
+    # A flow stage may only name registered skill references.
+    flow = root / FLOW
+    valid = flow.read_text(encoding="utf-8")
+    header = "[stages.implement]\n"
+    check("flow declares the implement stage once", valid.count(header) == 1, "")
+    flow.write_text(valid.replace(header, header + 'skills = ["unknown"]\n'), encoding="utf-8")
+    failed = call("flow naming an unregistered skill fails check", "check", expect=2, issue="FLOW_SKILL_UNREGISTERED")
+    check("issue locates the stage and names the skill", failed["issues"][0]["entity"] == "stages.implement.skills"
+          and "names unknown" in failed["issues"][0]["message"], str(failed["issues"]))
+    call("flow agreement is rejected", "foundation", "agree", "--ref", "flow", *actor, *criteria(root, "foundation"),
+         expect=2, issue="FLOW_SKILL_UNREGISTERED")
+    flow.write_text(valid.replace(header, header + f'skills = ["{name}"]\n'), encoding="utf-8")
+    check("flow naming a registered skill is accepted", "FLOW_SKILL_UNREGISTERED" not in
+          [i["code"] for i in call("check with a registered flow skill", "check")["issues"]], "")
+    call("flow agreement with the registered skill", "foundation", "agree", "--ref", "flow", *actor, *criteria(root, "foundation"))
+
+    # A refresh keeps an edited template.
+    template.write_text("# Consumer skill template\n", encoding="utf-8")
+    call("skills refresh keeps the consumer skill template", "skills")
+    check("edited skill template is preserved", template.read_text(encoding="utf-8") == "# Consumer skill template\n", "")
     return root
 
 

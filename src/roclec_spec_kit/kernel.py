@@ -21,6 +21,9 @@ from .model import (ModelError, checked_files, digest, encoded, fields, fingerpr
 from .store import Store
 from .origins import captured_paths, validate_coverage
 from .rejection import Rejections, addresses, evaluations, is_stage, validate_decision
+from .knowledge import (RESERVED_PREFIXES, SKILL_FILE, SKILL_ROLE, SKILL_ROOT, check_skill_reference, manifest_digest,
+                        require_skill, skill_files, skill_location, source_fingerprint)
+from . import instructions as agent_instructions
 
 FOUNDATION_ROLES = {"context", "principles", "architecture", "stack", "engineering", "verification", "operations", "design", "process"}
 REFERENCE_ID = r"[a-z][a-z0-9-]*"
@@ -151,7 +154,7 @@ class Kernel:
         refs = {}
         for ref in record["references"]:
             fields(ref, ("id", "path", "components", "role", "decision_id"), ("supersedes",))
-            need(ref["role"] in FOUNDATION_ROLES | {"decision"}, "INVALID_INPUT", "Unknown foundation role", exit_code=2,
+            need(ref["role"] in FOUNDATION_ROLES | {"decision", SKILL_ROLE}, "INVALID_INPUT", "Unknown foundation role", exit_code=2,
                  actual=ref["role"])
             decision = ref["role"] == "decision"
             need(is_adr(ref["id"]) if decision else text(ref["id"]) and re.fullmatch(REFERENCE_ID, ref["id"]) is not None,
@@ -169,6 +172,8 @@ class Kernel:
                 adr_ids(ref["supersedes"])
             if ref["role"] == "process":
                 self._process_reference(ref, refs, writing=writing)
+            if ref["role"] == SKILL_ROLE:
+                check_skill_reference(ref)
             refs[ref["id"]] = ref
         supersession(refs)
         return refs
@@ -186,6 +191,171 @@ class Kernel:
         need(not writing or sorted(ref["components"]) == every, "INVALID_REFERENCE",
              "The process reference must apply to every configured component", entity=ref["id"],
              expected=every, actual=sorted(ref["components"]), remediation=command)
+
+    def reference_fingerprint(self, ref):
+        """Current fingerprint of a reference source (file sha256 or skill manifest); None when missing."""
+        return source_fingerprint(self.profile.root, ref)
+
+    def flow_skills(self, parsed, refs=None):
+        """FLOW_SKILL_UNREGISTERED unless every stage's `skills` names a registered skill reference (TK.2)."""
+        refs = self.references() if refs is None else refs
+        for row in parsed["stages"]:
+            for name in row["skills"]:
+                ref = refs.get(name)
+                if ref is not None and ref["role"] == SKILL_ROLE:
+                    continue
+                entity = f"stages.{row['name']}.skills"
+                remediation = (f"Register it: roclec reference add {name} --path {skill_location(name)} --role skill "
+                               "--component NAME, then agree it with roclec foundation agree --ref "
+                               f"{name}; or remove it from {entity}." if ref is None else
+                               f"Remove {name} from {entity}: it is a {ref['role']} reference, not a skill.")
+                raise ModelError("FLOW_SKILL_UNREGISTERED", f"{entity} names {name}, which is not a registered skill",
+                                 exit_code=2, entity=entity, path=project_flow.FLOW_PATH, expected=SKILL_ROLE,
+                                 actual=None if ref is None else ref["role"], remediation=remediation)
+
+    def applicable_skills(self, component, stage=None, *, parsed=None):
+        """Registered skill references that apply to `component` at `stage`, or at any stage when None.
+
+        A skill applies to a component in its reference `components`, and to the stages whose `skills`
+        list it; a skill no stage lists applies to every stage. Read-only: no fingerprints or writes.
+        Each row is the reference plus `stages`, the stages where it applies, in flow order.
+        """
+        need(component in self.profile.components, "INVALID_REFERENCE", "Unknown component", entity=component)
+        need(stage is None or stage in project_flow.STAGES, "INVALID_INPUT", "Unknown stage", exit_code=2,
+             expected=list(project_flow.STAGES), actual=stage)
+        if parsed is None:
+            parsed = self._flow()[0]
+        every = [row["name"] for row in parsed["stages"]]
+        listed = defaultdict(list)
+        for row in parsed["stages"]:
+            for name in row["skills"]:
+                listed[name].append(row["name"])
+        result = []
+        for ref_id, ref in sorted(self.references().items()):
+            if ref["role"] != SKILL_ROLE or component not in ref["components"]:
+                continue
+            stages = listed.get(ref_id) or every
+            if stage is None or stage in stages:
+                result.append({**ref, "stages": list(stages)})
+        return result
+
+    def _skill_pins(self, record, parsed):
+        """The `skills` pin of a change approval: current fingerprints of skills applicable to its components."""
+        applicable = {ref["id"]: ref for component in record["semantic"]["components"]
+                      for ref in self.applicable_skills(component, parsed=parsed)}
+        return [{"id": ref_id, "sha256": manifest_digest(require_skill(self.profile.root, ref_id, applicable[ref_id]["path"]))}
+                for ref_id in sorted(applicable)]
+
+    def instruction_block(self, *, flow_raw=None):
+        """The managed block of the project root's AGENTS.md/CLAUDE.md: routing text plus authority map (TK.4).
+
+        A pure function of `.roclec/references.json` (none yet: an empty map), the stage `skills` of the
+        flow (`flow_raw`, e.g. the bytes `skills` is seeding, or the flow file) and the profile components.
+        The flow is read only when an agreed skill is listed, and only its structure: binding files are
+        `check`'s concern. A missing flow lists every agreed skill at every stage.
+        """
+        refs = self.references() if self.store.path(".roclec/references.json").is_file() else {}
+        stages, every = {}, list(project_flow.STAGES)
+        if any(ref["role"] == SKILL_ROLE and ref["decision_id"] is not None for ref in refs.values()):
+            if flow_raw is None:
+                path = self.store.path(project_flow.FLOW_PATH)
+                flow_raw = path.read_bytes() if path.is_file() else None
+            if flow_raw is not None:
+                try:
+                    parsed = project_flow.parse(flow_raw)
+                except ModelError as exc:
+                    # The installer must not depend on a file it does not own: an invalid flow lists every
+                    # agreed skill at every stage, and `check` keeps reporting FLOW_INVALID.
+                    if exc.issue["code"] != "FLOW_INVALID":
+                        raise
+                    parsed = None
+                if parsed is not None:
+                    every = [row["name"] for row in parsed["stages"]]
+                    for component in sorted(self.profile.components):
+                        for row in self.applicable_skills(component, parsed=parsed):
+                            stages[row["id"]] = row["stages"]
+        return agent_instructions.block(agent_instructions.authority_map(refs, stages, every, self.profile.components))
+
+    def _skill_warnings(self):
+        """SKILL_COPY_DIVERGED and SKILL_UNREGISTERED (TK.3): non-blocking, each with its remediation."""
+        from .external_skills import lock_names
+
+        def warning(code, message, remediation, **context):
+            return {**ModelError(code, message, remediation=remediation, **context).issue, "severity": "warning"}
+        skills = {ref_id: ref for ref_id, ref in self.references().items() if ref["role"] == SKILL_ROLE}
+        result = []
+        for ref_id, ref in sorted(skills.items()):
+            try:
+                canonical = skill_files(self.profile.root, ref["path"])
+            except ModelError:
+                continue  # A missing, empty or unsafe skill is the foundation gate's finding.
+            copy_path = f".claude/skills/{ref_id}"
+            if not (self.profile.root / copy_path).exists() and not (self.profile.root / copy_path).is_symlink():
+                result.append(warning(
+                    "SKILL_COPY_DIVERGED", f"The {copy_path} copy is missing", "Run `roclec skills` to copy it.",
+                    entity=ref_id, path=copy_path, expected=ref["path"], actual="missing"))
+                continue
+            try:
+                copied = skill_files(self.profile.root, copy_path)
+            except ModelError:
+                copied = {}  # Empty or unsafe: nothing in it is a copy.
+            differing = sorted(p for p in set(canonical) | set(copied) if canonical.get(p) != copied.get(p))
+            if differing:
+                result.append(warning(
+                    "SKILL_COPY_DIVERGED", f"The {copy_path} copy differs from {ref['path']}",
+                    f"Edit only {ref['path']}/, delete files that exist only in {copy_path}/ and run `roclec skills`.",
+                    entity=ref_id, path=copy_path, expected=ref["path"], actual=differing))
+        locked, found = lock_names(self.profile.root), defaultdict(list)
+        for host in (".agents", ".claude"):
+            base = self.profile.root / host / "skills"
+            if base.is_symlink() or not base.is_dir() or (self.profile.root / host).is_symlink():
+                continue
+            for entry in sorted(base.iterdir()):
+                name = entry.name
+                if name.startswith(RESERVED_PREFIXES) or name in skills or name in locked:
+                    continue
+                if entry.is_dir() and (entry / SKILL_FILE).is_file():
+                    found[name].append(f"{host}/skills/{name}")
+        for name, places in sorted(found.items()):
+            result.append(warning(
+                "SKILL_UNREGISTERED", f"Skill {name} is not a registered knowledge skill",
+                f"Move it to {SKILL_ROOT}/{name} if needed, then `roclec reference add {name} --path "
+                f"{skill_location(name)} --role skill --component NAME` and `roclec foundation agree --ref {name}`; "
+                "or delete it.", entity=name, path=places[0], actual=places))
+        return result
+
+    def _instruction_warnings(self):
+        """AGENT_INSTRUCTIONS_STALE per root instruction file whose managed block differs from its generation (TK.4)."""
+        result, expected = [], None
+        for name in agent_instructions.FILES:
+            path = self.store.path(name)
+            if not path.is_file():
+                continue
+            try:
+                body = agent_instructions.decode(path.read_bytes(), name)
+            except ModelError as exc:
+                result.append({**exc.issue, "severity": "warning", "actual": "not-utf8",
+                               "remediation": f"Save {name} as UTF-8 text; `roclec skills` and `roclec views --write` "
+                                              "refuse the file until then."})
+                continue
+            try:
+                parts = agent_instructions.split(body, name)
+            except ModelError as exc:
+                # Same code `skills` and `views --write` refuse this file with; only a manual fix unblocks them.
+                result.append({**exc.issue, "code": "UNMANAGED_FILE", "severity": "warning", "actual": "malformed",
+                               "remediation": f"Fix the {agent_instructions.START} / {agent_instructions.END} markers "
+                                              f"of {name} by hand (one pair, begin before end); `roclec skills` and "
+                                              "`roclec views --write` refuse the file until then."})
+                continue
+            if parts is None:
+                continue  # No block: `roclec skills` adds one; the consumer may keep the file Roclec-free.
+            expected = self.instruction_block() if expected is None else expected
+            if parts[1] != expected:
+                result.append({**ModelError(
+                    "AGENT_INSTRUCTIONS_STALE", f"The managed block of {name} differs from the current authorities",
+                    path=name, actual="stale", remediation="Run `roclec views --write` (or `roclec skills`).").issue,
+                    "severity": "warning"})
+        return result
 
     def _flow(self):
         """Return (parsed flow, raw bytes) from one read; FLOW_MISSING or FLOW_INVALID otherwise."""
@@ -273,6 +443,8 @@ class Kernel:
              f"Cannot {action} reference with this ID", entity=ref_id)
         need(not supersedes or role == "decision", "INVALID_INPUT", "--supersedes applies only to role decision",
              exit_code=2, entity=ref_id, remediation="Remove --supersedes, or register an ADR-NNN with --role decision.")
+        if action == "update" and refs[ref_id]["role"] == SKILL_ROLE and role != SKILL_ROLE:
+            self._uncited_skill(ref_id)
         ref = {"id": ref_id, "path": path, "components": sorted(components),
                "role": role, "decision_id": None}
         if role == "decision":
@@ -285,13 +457,30 @@ class Kernel:
              "An ADR must be a Markdown file inside the configured ADR folder", exit_code=2, entity=ref_id,
              expected=folder, actual=path, remediation="Place the ADR under the [adr] path of the profile (default docs/adr).")
         source = self.store.path(path)
-        need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
-             "Reference requires an existing nonempty source", path=path)
+        if role == SKILL_ROLE:
+            require_skill(self.profile.root, ref_id, path)
+        else:
+            need(source.is_file() and bool(source.read_bytes().strip()), "INVALID_REFERENCE",
+                 "Reference requires an existing nonempty source", path=path)
         if role == "process":
             project_flow.parse(source.read_bytes(), self.profile.root)
         receipt = self.store.apply("reference-" + action, {"id": ref_id},
                                    {".roclec/references.json": encoded(record)}, self.token)
         return {"reference": ref, "receipt": receipt}
+
+    def _uncited_skill(self, ref_id):
+        """INVALID_REFERENCE when the current flow assigns skill `ref_id` to a stage (it must keep its role)."""
+        try:
+            parsed, _ = self._flow()
+        except ModelError as exc:
+            if exc.issue["code"] == "FLOW_MISSING":
+                return  # No flow cites anything.
+            raise
+        stages = [row["name"] for row in parsed["stages"] if ref_id in row["skills"]]
+        need(not stages, "INVALID_REFERENCE", "The project flow assigns this skill to stages; it must keep role skill",
+             entity=ref_id, path=project_flow.FLOW_PATH, actual=stages,
+             remediation=f"Remove {ref_id} from the skills of stages {', '.join(stages)} and agree the flow first, "
+                         "or keep --role skill.")
 
     def reject(self, subject_type, entity, subject_digest, actor, reason, *, consequence=None, corrections=(), fut=None,
                criteria=None, addresses=None, sessions=()):
@@ -524,12 +713,14 @@ class Kernel:
         ref = self.references().get(ref_id)
         need(ref is not None, "INVALID_REFERENCE", "Unknown reference", entity=ref_id)
         kind = "adr" if ref["role"] == "decision" else "reference"
-        source = self.store.path(ref["path"])
-        pin = sha(source.read_bytes()) if source.is_file() else None
+        pin = self.reference_fingerprint(ref)
         agreements = [d for d in self.decisions(ref_id) if d["kind"] == "foundation"]
         approved = bool(agreements and agreements[-1]["sources"][ref_id] == pin and ref["decision_id"] == agreements[-1]["id"])
         service = Rejections(self)
-        return {"reference": ref, "sha256": pin, "state": service.state(kind, ref_id, pin, approved=approved),
+        state = service.state(kind, ref_id, pin, approved=approved)
+        if kind == "reference" and state == "draft" and agreements:
+            state = "stale"  # Agreed before and edited since: foundation agree again.
+        return {"reference": ref, "sha256": pin, "state": state,
                 "rejections": service.history(kind, ref_id), "decisions": self.decisions(ref_id)}
 
     def inspect_prototype(self, entity):
@@ -584,14 +775,18 @@ class Kernel:
         refs = self.references()
         need(ref_id in refs, "INVALID_REFERENCE", "Unknown foundation reference", entity=ref_id)
         ref = refs[ref_id]
-        source = self.store.path(ref["path"])
-        need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
-        content = source.read_bytes()
-        need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
+        if ref["role"] == SKILL_ROLE:
+            pin = manifest_digest(require_skill(self.profile.root, ref_id, ref["path"], code="FOUNDATION_INCOMPLETE"))
+        else:
+            source = self.store.path(ref["path"])
+            need(source.is_file(), "FOUNDATION_INCOMPLETE", "Reference source is missing", path=ref["path"])
+            content = source.read_bytes()
+            need(bool(content.strip()), "FOUNDATION_INCOMPLETE", "Reference source is empty", path=ref["path"])
+            pin = sha(content)
         if ref["role"] == "process":
-            # Agreement freezes exactly these bytes, so they must be a valid flow.
-            project_flow.parse(content, self.profile.root)
-        Rejections(self).require_addresses("adr" if ref["role"] == "decision" else "reference", ref_id, sha(content), addresses)
+            # Agreement freezes exactly these bytes, so they must be a valid flow whose skills are registered.
+            self.flow_skills(project_flow.parse(content, self.profile.root), refs)
+        Rejections(self).require_addresses("adr" if ref["role"] == "decision" else "reference", ref_id, pin, addresses)
         flow = self._flow()
         evaluated, flow_pin = self._evaluate("foundation", criteria, "approved", flow)
         extra = {"supersedes": list(ref["supersedes"])} if ref["role"] == "decision" else {}
@@ -602,7 +797,7 @@ class Kernel:
             extra["futs"] = cited
         extra.update(self._cited(sessions, subject=ref_id))
         self.require_session("foundation", flow[0], subject=ref_id)
-        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: sha(content)},
+        decision, path = self._decision("foundation", ref_id, actor, reason, status="agreed", sources={ref_id: pin},
                                         criteria=evaluated, flow=flow_pin, **extra)
         decision_id = decision["id"]
         ref["decision_id"] = decision_id
@@ -643,27 +838,39 @@ class Kernel:
             if component not in ref["components"] or ref["role"] == "decision":
                 continue
             try:
-                path = self.store.path(ref["path"])
-                need(path.is_file() and bool(path.read_bytes().strip()), "FOUNDATION_INCOMPLETE",
-                     "Reference has no content", path=ref["path"])
-                need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE", "Reference has no agreement", entity=ref["id"])
+                skill = ref["role"] == SKILL_ROLE
+                agree = f"roclec foundation agree --ref {ref['id']} --actor <person> --reason <why>"
+                if skill:
+                    pin = manifest_digest(require_skill(self.profile.root, ref["id"], ref["path"], code="FOUNDATION_INCOMPLETE"))
+                else:
+                    path = self.store.path(ref["path"])
+                    need(path.is_file() and bool(path.read_bytes().strip()), "FOUNDATION_INCOMPLETE",
+                         "Reference has no content", path=ref["path"])
+                    pin = sha(path.read_bytes())
+                need(ref["decision_id"] is not None, "FOUNDATION_INCOMPLETE",
+                     "Skill has no agreement" if skill else "Reference has no agreement", entity=ref["id"],
+                     **({"remediation": agree} if skill else {}))
                 decision = self.read(f".roclec/decisions/{ref['decision_id']}.json")
                 fields(decision, ("model_schema", "id", "kind", "entity", "previous", "status", "actor", "reason", "sources"),
                        ("addresses", "criteria", "flow", "sessions", "futs"))
                 need(decision["id"] == ref["decision_id"] and decision["kind"] == "foundation"
                      and decision["status"] == "agreed" and text(decision["actor"]) and text(decision["reason"]),
                      "FOUNDATION_INCOMPLETE", "Reference decision is not agreed", entity=ref["id"])
-                need(isinstance(decision["sources"], dict) and decision["sources"].get(ref["id"]) == sha(path.read_bytes()),
-                     "FOUNDATION_INCOMPLETE", "Reference changed since its agreement", entity=ref["id"])
-                state = Rejections(self).state("reference", ref["id"], sha(path.read_bytes()), approved=True, decisions=decisions)
+                # A skill is agreed on its current files: drift from a change's approval pin is re-agreed, not re-approved.
+                need(isinstance(decision["sources"], dict) and decision["sources"].get(ref["id"]) == pin,
+                     "FOUNDATION_INCOMPLETE", "Skill changed since its agreement" if skill else
+                     "Reference changed since its agreement", entity=ref["id"], path=ref["path"] if skill else None,
+                     expected=decision["sources"].get(ref["id"]) if skill and isinstance(decision["sources"], dict) else None,
+                     actual=pin if skill else None, **({"remediation": agree} if skill else {}))
+                state = Rejections(self).state("reference", ref["id"], pin, approved=True, decisions=decisions)
                 need(state == "approved", "FOUNDATION_INCOMPLETE", "Foundation reference was rejected or withdrawn", entity=ref["id"])
                 if ref["role"] == "process":
                     # Agreed bytes can still fail later checks (e.g. a deleted agent binding).
                     invalid_flow = True
-                    project_flow.parse(path.read_bytes(), self.profile.root)
+                    self.flow_skills(project_flow.parse(path.read_bytes(), self.profile.root), refs)
                     invalid_flow = False
                 roles.add(ref["role"])
-                resolved.append({**ref, "sha256": sha(path.read_bytes())})
+                resolved.append({**ref, "sha256": pin})
             except ModelError as exc:
                 issues.append(exc.issue)
         required = {"context", "principles", "architecture", "stack", "engineering", "verification", "process"}
@@ -695,8 +902,7 @@ class Kernel:
             if historical:
                 continue
             need(ref["id"] in available, "INVALID_REFERENCE", "Unknown pinned reference", entity=ref["id"])
-            path = self.store.path(available[ref["id"]]["path"])
-            need(path.is_file() and sha(path.read_bytes()) == ref["sha256"], "INVALID_REFERENCE",
+            need(self.reference_fingerprint(available[ref["id"]]) == ref["sha256"], "INVALID_REFERENCE",
                  "Pinned reference changed or is missing", entity=ref["id"])
 
     def change(self, change_id, *, source=None, check_base=False, historical=False, check_component=None):
@@ -963,7 +1169,7 @@ class Kernel:
             record = self.read(path.relative_to(self.profile.root).as_posix())
             fields(record, ("model_schema", "id", "kind", "entity", "previous", "actor", "reason"),
                    ("proposal_digest", "component", "components", "outcome", "target", "enabled", "status", "sources", "supersedes", "subject", "consequence", "corrections", "criteria", "fut", "files", "addresses", "rejection", "flow",
-                    "hook", "run", "sessions", "futs"))
+                    "hook", "run", "sessions", "futs", "skills"))
             fingerprint(record["id"])
             need(record["id"] not in seen, "ID_COLLISION", "Duplicate decision digest", entity=record["id"])
             seen.add(record["id"])
@@ -1027,6 +1233,10 @@ class Kernel:
                 need(record["kind"] in SESSION_DECISIONS, "INVALID_INPUT", "This decision cannot cite agent sessions",
                      exit_code=2, path=path.name)
                 agent_sessions.ids(record["sessions"])
+            if "skills" in record:
+                need(record["kind"] == "change-approve", "INVALID_INPUT", "Only a change approval pins skills",
+                     exit_code=2, path=path.name)
+                self._skill_pin_shape(record["skills"], path.name)
             if "futs" in record:
                 need(record["kind"] == "foundation" and not is_adr(record["entity"]), "INVALID_INPUT",
                      "Only a process agreement cites FUTs", exit_code=2, path=path.name)
@@ -1059,6 +1269,20 @@ class Kernel:
             if entity is None or chain[0] == entity:
                 result.extend(ordered)
         return result
+
+    @staticmethod
+    def _skill_pin_shape(value, name):
+        """A change approval's `skills`: nonempty [{id, sha256}] sorted and unique by ID (TK.2)."""
+        need(isinstance(value, list) and bool(value), "INVALID_INPUT", "Pinned skills must be a nonempty list",
+             exit_code=2, path=name)
+        for row in value:
+            fields(row, ("id", "sha256"))
+            need(text(row["id"]) and re.fullmatch(REFERENCE_ID, row["id"]) is not None, "INVALID_INPUT",
+                 "Invalid pinned skill ID", exit_code=2, path=name, actual=row["id"])
+            fingerprint(row["sha256"])
+        ids = [row["id"] for row in value]
+        need(ids == sorted(set(ids)), "INVALID_INPUT", "Pinned skills must be sorted and unique by ID", exit_code=2,
+             path=name)
 
     def _decision(self, kind, entity, actor, reason, **extra):
         need(text(actor) and text(reason), "INVALID_INPUT", "Decision needs actor and reason", exit_code=2)
@@ -1115,6 +1339,11 @@ class Kernel:
         self.require_session("define", flow[0], change_id=change_id)
         extra = {"addresses": record["semantic"]["addresses"]} if "addresses" in record["semantic"] else {}
         extra.update(self._cited(sessions, change_id=change_id))
+        # The skills applicable to its components at any stage, on their current files (TK.2). Agreement is
+        # enforced at implement, where drift from this pin needs a new agreement, not a new approval.
+        skills = self._skill_pins(record, flow[0])
+        if skills:
+            extra["skills"] = skills
         decision, path = self._decision("change-approve", change_id, actor, reason, proposal_digest=proposal_digest,
                                         criteria=evaluated, flow=flow_pin, **extra)
         writes = {path: encoded(decision)}
@@ -1161,7 +1390,9 @@ class Kernel:
             self._origin_approval(record)
             Adrs(self).approvable(record)
             Rejections(self).require_addresses("change", change_id, record["proposal_digest"], record["semantic"].get("addresses"))
-            self.require_session("define", self._flow()[0], change_id=change_id)
+            parsed = self._flow()[0]
+            self.require_session("define", parsed, change_id=change_id)
+            self._skill_pins(record, parsed)  # Approval pins them: each applicable skill must be readable.
             return {"change": change_id, "gate": stage, "scope": "structural; semantic approval is explicit"}
         self._component(record, component)
         self._approved(record)
@@ -1299,6 +1530,47 @@ class Kernel:
                 result["issues"].append(exc.issue)
         if include_flow:
             result["flow"] = self._conformance(record, decisions, approval, valid, rejection_state)
+            result["skills"] = self._skill_brief(record, decisions, result["issues"])
+        return result
+
+    def _skill_brief(self, record, decisions, issues):
+        """The `skills` section of `inspect --change` (TK.6): each role's brief of applicable knowledge skills.
+
+        {component: {stage: [{id, path, sha256, pinned, drift, state}]}} for every component of the change
+        scope, stages in flow order, stages without skills omitted (a component without any maps to {}).
+        `sha256` is the current fingerprint (None when the source is missing); `pinned` is the sha pinned by the
+        last change-approve in decision-chain order whose proposal digest is the current one (None without one or when it pinned none);
+        `drift` is pinned and different; `state` is the `inspect --reference` state. Read-only.
+
+        None when the flow is missing or invalid: the `flow` section and `check` report it, so no issue is
+        added. Any other unreadable input (references, an unsafe skill folder) also yields None and its
+        issue is appended to `issues`, so the rest of `inspect` stays available.
+        """
+        try:
+            parsed, _ = self._flow()
+        except ModelError:
+            return None
+        approvals = [d for d in decisions
+                     if d["kind"] == "change-approve" and d["proposal_digest"] == record["proposal_digest"]]
+        pinned = {row["id"]: row["sha256"] for row in (approvals[-1].get("skills", []) if approvals else [])}
+        order = [row["name"] for row in parsed["stages"]]
+        seen, result = {}, {}
+        try:
+            for component in sorted(record["semantic"]["components"]):
+                stages = defaultdict(list)
+                for ref in self.applicable_skills(component, parsed=parsed):
+                    if ref["id"] not in seen:
+                        inspected = self.inspect_reference(ref["id"])
+                        pin = pinned.get(ref["id"])
+                        seen[ref["id"]] = {"id": ref["id"], "path": ref["path"], "sha256": inspected["sha256"],
+                                           "pinned": pin, "drift": pin is not None and pin != inspected["sha256"],
+                                           "state": inspected["state"]}
+                    for stage in ref["stages"]:
+                        stages[stage].append(dict(seen[ref["id"]]))
+                result[component] = {stage: stages[stage] for stage in order if stages[stage]}
+        except ModelError as exc:
+            issues.append(exc.issue)
+            return None
         return result
 
     # Section 7.6: per-stage conformance. Read-only and deterministic: it reads records only, never
@@ -1995,6 +2267,8 @@ class Kernel:
         for path in self.store.path(".roclec/releases").glob("*/*/preparations/*.json"):
             Releases(self).preparation(path.parent.parent.parent.name, path.parent.parent.name, path.stem)
         warnings.extend(self._flow_warnings())
+        warnings.extend(self._skill_warnings())
+        warnings.extend(self._instruction_warnings())
         return {"profile_schema": 3, "current": current, "release_count": len(releases),
                 "increment": "C3", "run_count": len(run_paths), "unfinished_runs": sorted(unfinished),
                 "warnings": warnings,
@@ -2075,11 +2349,12 @@ class Kernel:
                  "INVALID_REFERENCE", "An integrated obligation needs a new change; rebase only pending participants", entity=component)
 
     def _flow_view(self, *, learning=False):
-        """Return (flow, view path, existing bytes, status, learning), or None when the flow file is missing.
+        """Return (flow, view path, existing bytes, status, inputs), or None when the flow file is missing.
 
-        Status and learning are computed only with `learning`: the status compares the full view,
-        whose learning section is projected from records (TL.6). Without it both are None (a caller
-        that needs only the view path reads no records).
+        Status and inputs are computed only with `learning`: the status compares the full view, whose
+        learning section is projected from records (TL.6) and whose knowledge skills section from the
+        registered skill references (TK.6); `inputs` are those keyword arguments of `project_flow.render`.
+        Without it both are None (a caller that needs only the view path reads no records).
         """
         try:
             flow, _ = self._flow()
@@ -2092,10 +2367,12 @@ class Kernel:
         existing = path.read_bytes() if path.is_file() else None
         if not learning:
             return flow, relative, existing, None, None
-        data = self._flow_learning()
+        inputs = {"learning": self._flow_learning(),
+                  "skills": [{"id": ref["id"], "path": ref["path"], "components": sorted(ref["components"])}
+                             for ref in self.references().values() if ref["role"] == SKILL_ROLE]}
         status = "edited" if path.exists() and existing is None else \
-            project_flow.view_status(flow, self.profile.data, existing, data)
-        return flow, relative, existing, status, data
+            project_flow.view_status(flow, self.profile.data, existing, **inputs)
+        return flow, relative, existing, status, inputs
 
     def _flow_learning(self):
         """Records projected for the flow view's learning section (TL.6): counts and lists, no judgments.
@@ -2162,6 +2439,7 @@ class Kernel:
                             f"{project_flow.FLOW_PATH} --role process {components}` and `roclec foundation agree --ref flow`.",
                             path=project_flow.FLOW_PATH, entity="flow")]
         flow, relative, _, status, _ = view
+        self.flow_skills(flow)
         result = list(flow["warnings"])
         if status in {"stale", "missing"}:
             result.append(warning("FLOW_VIEW_STALE", f"Generated flow view is {status}", "Run `roclec views --write`.",
@@ -2202,19 +2480,36 @@ class Kernel:
         payload, observed = {"sources": current}, {}
         flow_view = self._flow_view(learning=True)  # Skipped when the flow file is missing; `check` warns.
         if flow_view is not None:
-            flow, relative, existing, status, learning = flow_view
+            flow, relative, existing, status, inputs = flow_view
             need(status != "edited", "UNMANAGED_FILE", "Flow view is unmanaged or has local edits; resolve them before regenerating",
                  path=relative, remediation=f"Move the edits into {project_flow.FLOW_PATH}, delete {relative} and retry.")
             if status != "current":
                 stale.append(relative)
-                writes[relative] = project_flow.render(flow, self.profile.data, learning)
+                writes[relative] = project_flow.render(flow, self.profile.data, **inputs)
                 payload["flow_view"] = relative
-                # Restoring a deleted or edited view repeats earlier bytes; without a fresh
-                # generation the store would refuse to replay the diverged earlier receipt.
-                receipts = self.store.path(".roclec/receipts")
-                payload["generation"] = digest({"inputs": self.token, "receipts": sorted(
-                    p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []})
                 observed[relative] = existing
+        # The managed block of the root instruction files, only where one exists (`skills` adds it).
+        expected = None
+        for name in agent_instructions.FILES:
+            path = self.store.path(name)
+            if not path.is_file():
+                continue
+            existing = path.read_bytes()
+            parts = agent_instructions.split(agent_instructions.decode(existing, name), name)
+            if parts is None:
+                continue
+            expected = self.instruction_block() if expected is None else expected
+            if parts[1] != expected:
+                stale.append(name)
+                writes[name] = (parts[0] + expected + parts[2]).encode("utf-8")
+                payload.setdefault("instructions", []).append(name)
+                observed[name] = existing
+        if "flow_view" in payload or "instructions" in payload:
+            # Restoring a deleted or edited view repeats earlier bytes; without a fresh
+            # generation the store would refuse to replay the diverged earlier receipt.
+            receipts = self.store.path(".roclec/receipts")
+            payload["generation"] = digest({"inputs": self.token, "receipts": sorted(
+                p.name for p in receipts.glob("*.json")) if receipts.is_dir() else []})
         count = len(caps) + (flow_view is not None)
         if writes and write:
             # The flow view is outside the store token; recheck its bytes under the lock.
