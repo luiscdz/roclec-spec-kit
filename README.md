@@ -10,7 +10,7 @@ Roclec Spec Kit is a local framework for capability contracts, traceable changes
 
 ### Requirements and compatibility
 
-Python 3.11 or later and Git. The native CLI uses **profile 3 and model schema 2**. Projects using profile 1 or 2 require the corresponding earlier wheel. Profile 3 uses a project-wide `trunk_ref` and a `target_ref` for each component. Administrative writes are restricted to the trunk and return `OFF_TRUNK` on other branches. `change start` requires an explicit `--actor`.
+Python 3.11 or later and Git. The native CLI uses **profile 3 and model schema 2**. Schema 2 is the only `model_schema` change of `0.9.0`: it covers every JSON record this release writes, including roles, ADRs, change origins, findings, rejections, flow checkpoints, agent sessions and knowledge skills. The profile moves to schema 3 and `.roclec/flow.toml` carries its own `schema = 1`. `0.8.0` (model schema 1) rejects these records with `UNSUPPORTED_SCHEMA`; unpublished `0.9.0` development builds are not a compatibility target. Projects using profile 1 or 2 require the corresponding earlier wheel. Profile 3 uses a project-wide `trunk_ref` and a `target_ref` for each component. Administrative writes are restricted to the trunk and return `OFF_TRUNK` on other branches. `change start` requires an explicit `--actor`.
 
 ### Install Roclec in your project
 
@@ -152,7 +152,7 @@ Roclec Spec Kit es un framework local para contratos por capacidad, cambios traz
 
 ### Requisitos y compatibilidad
 
-Python 3.11 o posterior y Git. La CLI nativa usa **perfil 3 y esquema de modelo 2**. Los proyectos con perfil 1 o 2 requieren el wheel anterior correspondiente. El perfil 3 usa un `trunk_ref` global y un `target_ref` por componente. Las escrituras administrativas se restringen a la troncal y devuelven `OFF_TRUNK` en otras ramas. `change start` exige un `--actor` explícito.
+Python 3.11 o posterior y Git. La CLI nativa usa **perfil 3 y esquema de modelo 2**. El esquema 2 es el único cambio de `model_schema` en `0.9.0`: cubre todos los registros JSON que escribe esta versión, incluidos roles, ADR, orígenes de cambio, hallazgos, rechazos, puntos de control del flujo, sesiones de agente y skills de conocimiento. El perfil pasa al esquema 3 y `.roclec/flow.toml` lleva su propio `schema = 1`. `0.8.0` (esquema de modelo 1) rechaza esos registros con `UNSUPPORTED_SCHEMA`; las compilaciones de desarrollo de `0.9.0` no se publicaron y no son objetivo de compatibilidad. Los proyectos con perfil 1 o 2 requieren el wheel anterior correspondiente. El perfil 3 usa un `trunk_ref` global y un `target_ref` por componente. Las escrituras administrativas se restringen a la troncal y devuelven `OFF_TRUNK` en otras ramas. `change start` exige un `--actor` explícito.
 
 ### Instalar Roclec en tu proyecto
 

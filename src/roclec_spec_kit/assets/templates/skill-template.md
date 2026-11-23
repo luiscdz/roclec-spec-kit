@@ -5,7 +5,7 @@ description: One sentence saying when an agent should load this skill.
 
 # Skill name
 
-Copy this template to `.agents/skills/<skill-name>/SKILL.md`, where `<skill-name>` is the reference ID. Register the directory with `reference add <skill-name> --path .agents/skills/<skill-name> --role skill --component NAME` and agree it with `foundation agree --ref <skill-name>`. Its fingerprint covers every file in the directory: editing any of them makes it stale until it is agreed again. `roclec skills` copies it to `.claude/skills/`; edit only the copy under `.agents/skills/`.
+Copy this template to `.agents/skills/<skill-name>/SKILL.md`, where `<skill-name>` is the reference ID. Register the directory with `reference add <skill-name> --path .agents/skills/<skill-name> --role skill --component NAME` and agree it with `foundation agree --ref <skill-name>`. Its fingerprint covers every file in the directory: editing any of them makes it stale until it is agreed again. `roclec skills` copies it to `.claude/skills/`; edit only the canonical folder under `.agents/skills/`, never the copy.
 
 ## Purpose
 

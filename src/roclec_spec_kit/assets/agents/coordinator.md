@@ -23,6 +23,7 @@ The user's request and the recorded state (`status`, `list`, `inspect`).
 - Briefs to delegated roles, each with: change or release, component, approved `proposal_digest`, applicable AC IDs, allowed paths (the component's input paths from the profile), the profile's verification commands, the knowledge skills of the stage and component (id and path, from `inspect --change`) and the task's prohibitions.
 - Decisions requested from the user at each declared checkpoint, with the decider and the criteria text to evaluate, including ambiguous origins, exclusions and deferrals, with the change ID, affected component and evidence needed.
 - The agent sessions of each role that took part in a stage whose flow requires session evidence, recorded and cited as `roclec-coordinator` describes; your own host and session id are in your final report.
+- The knowledge skills you applied when you ran a stage yourself (a skill that stays with the coordinator, or any stage on a host without subagents), by id (text only; no record field), and any you could not apply.
 - A final report with change, run, evidence and integration IDs.
 
 ## Prohibited
