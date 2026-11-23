@@ -33,7 +33,7 @@ Do not declare `kind`; the command sets it.
 ```
 
 - Times are UTC `YYYY-MM-DDTHH:MM:SSZ`; `ended_at` is not before `started_at`. Take them from the export, not from memory.
-- Scope by stage: `change_id` for every stage except foundation and release, plus `component` for design, implement, verify, review and integrate (optional for define, approve and plan). A define session may name a CHG id not imported yet. Foundation uses `subject` (the reference or ADR id) instead. Release uses `release` `{"component": "NAME", "version": "vX.Y.0"}`.
+- Scope by stage: `change_id` for every stage except foundation and release, plus `component` for design, implement, verify, review and integrate (optional for define, approve and plan). A define or plan session may name a CHG id not imported yet (a chore's plan is its bundle); it then names no component. Foundation uses `subject` (the reference or ADR id) instead. Release uses `release` `{"component": "NAME", "version": "vX.Y.0"}`.
 - Cite the resulting EVD id with `--session EVD-...` (repeatable) on the closing record: `change approve|cancel|start`, `foundation agree`, `reject`, `checkpoint`, `fut decide` and `run verify`. An independent review cites the reviewer's session as its `context` when the review stage requires sessions.
 
 ## Privacy

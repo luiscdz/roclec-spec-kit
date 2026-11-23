@@ -32,7 +32,7 @@ def dump(data):
     for key, val in data.items():
         if not isinstance(val, dict):
             out.append(f"{key} = {value(val)}")
-    for section in ("roles", "criteria", "stages"):
+    for section in ("roles", "criteria", "stages", "kinds"):
         for name, table in data.get(section, {}).items():
             out.append(f"\n[{section}.{name}]")
             out.extend(f"{k} = {value(v)}" for k, v in table.items())
@@ -169,6 +169,56 @@ class FlowTests(unittest.TestCase):
         self.assertEqual([w["code"] for w in parsed["warnings"]], ["FLOW_CRITERION_UNUSED"])
         self.assertEqual(parsed["warnings"][0]["severity"], "warning")
         self.assertEqual(parsed["warnings"][0]["entity"], "criteria.CR-010")
+
+    def test_chore_kind_lane(self):
+        parsed = flow.parse(DEFAULT)
+        self.assertEqual(parsed["kinds"], {"chore": {"stages": ["approve", "plan", "implement", "verify", "integrate"],
+                                                     "criteria": ["CR-005"]}})
+        self.assertEqual(flow.kind_stages(parsed, "evolution"), list(flow.STAGES))
+        self.assertEqual(flow.kind_stages(parsed, "chore"), ["approve", "plan", "implement", "verify", "integrate"])
+        self.assertEqual(flow.approve_criteria(parsed, "chore"), ["CR-005"])
+        self.assertEqual(flow.approve_criteria(parsed, "fix"), ["CR-002", "CR-003"])
+        rows = [{"id": "CR-005", "status": "met"}]
+        self.assertEqual(flow.evaluate(parsed, "approve", rows, outcome="approved", kind="chore"), rows)
+        with self.assertRaises(ModelError) as ctx:
+            flow.evaluate(parsed, "approve", rows, outcome="approved", kind="evolution")
+        self.assertEqual(ctx.exception.issue["code"], "CRITERIA_MISMATCH")
+        # Review may join the lane; stages are kept in canonical order.
+        reviewed = flow.parse(dump(edit(lambda d: d["kinds"]["chore"].update(
+            stages=["integrate", "review", "verify", "implement", "plan", "approve"]))))
+        self.assertEqual(reviewed["kinds"]["chore"]["stages"],
+                         ["approve", "plan", "implement", "verify", "review", "integrate"])
+        # Without criteria a chore's approval evaluates the approve checkpoint's.
+        plain = flow.parse(dump(edit(lambda d: (d["kinds"]["chore"].pop("criteria"), d["criteria"].pop("CR-005")))))
+        self.assertEqual(flow.approve_criteria(plain, "chore"), ["CR-002", "CR-003"])
+
+    def test_chore_kind_absent_and_invalid(self):
+        legacy = flow.parse(dump(edit(lambda d: (d.pop("kinds"), d["criteria"].pop("CR-005")))))
+        self.assertNotIn("kinds", legacy)
+        self.assertIsNone(flow.kind_stages(legacy, "chore"))
+        with self.assertRaises(ModelError) as ctx:
+            flow.require_kind(legacy, "chore", "CHG-001")
+        self.assertEqual(ctx.exception.issue["code"], "CHANGE_KIND_DISABLED")
+        self.assertIn("[kinds.chore]", ctx.exception.issue["remediation"])
+        self.reject(lambda d: d["kinds"].update(evolution=dict(stages=["approve"])))
+        for stage in ("define", "design", "release", "foundation"):
+            issue = self.reject(lambda d, s=stage: d["kinds"]["chore"]["stages"].append(s))
+            self.assertEqual(issue["entity"], "kinds.chore.stages")
+        for stage in ("approve", "plan", "implement", "verify", "integrate"):
+            self.reject(lambda d, s=stage: d["kinds"]["chore"]["stages"].remove(s))
+        self.reject(lambda d: d["kinds"]["chore"].update(criteria=["CR-099"]))
+        self.reject(lambda d: d["kinds"]["chore"].update(ai=False))
+        self.reject(lambda d: d["kinds"]["chore"]["stages"].append("plan"))
+        # A chore criterion no checkpoint cites is still used.
+        self.assertEqual(flow.parse(DEFAULT)["warnings"], [])
+
+    def test_kinds_view_section(self):
+        parsed = flow.parse(DEFAULT)
+        body = flow.render(parsed, {}).decode()
+        self.assertIn("## Change kinds", body)
+        self.assertIn("| chore | approve, plan, implement, verify, integrate | define, design, review, release | CR-005 |", body)
+        legacy = flow.parse(dump(edit(lambda d: (d.pop("kinds"), d["criteria"].pop("CR-005")))))
+        self.assertNotIn("## Change kinds", flow.render(legacy, {}).decode())
 
     def test_point(self):
         parsed = flow.parse(DEFAULT)

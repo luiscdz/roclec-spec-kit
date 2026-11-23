@@ -16,7 +16,7 @@ export const CRITERION_TONE: Record<CriterionState, string> = {
 export const REPORT_STATE_LABEL: Record<string, string> = {
   applicable: "Aplicable", unfavorable: "Desfavorable", superseded: "Sustituida", stale: "Desactualizada", current: "Vigente",
 };
-export const KIND_LABEL: Record<string, string> = { evolution: "Evolución", fix: "Corrección", refactor: "Refactor", release: "Release", hotfix: "Hotfix", bugfix: "Bugfix" };
+export const KIND_LABEL: Record<string, string> = { evolution: "Evolución", fix: "Corrección", refactor: "Refactor", chore: "Tarea técnica", release: "Release", hotfix: "Hotfix", bugfix: "Bugfix" };
 export const OP_LABEL: Record<string, string> = { add: "Añade", retire: "Retira", revise: "Revisa", replace: "Reemplaza" };
 export const REPORT_KIND_LABEL: Record<string, string> = { manual: "Observación manual", "automated-import": "Importación automática", "independent-review": "Revisión independiente" };
 export const CANDIDATE_LABEL: Record<string, string> = {

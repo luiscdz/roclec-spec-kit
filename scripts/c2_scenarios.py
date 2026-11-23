@@ -8,10 +8,10 @@ import sys
 import shutil
 
 try:
-    from .c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
+    from .c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, chore_bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
                                seed_publication, seed_current, file_hash)
 except ImportError:
-    from c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
+    from c1_scenarios import (adr_bundle, adr_caller, adr_markdown, bundle, chore_bundle, criteria, declare_hook, foundation, put_json, tree, snapshot, digest,
                               seed_publication, seed_current, file_hash)
 
 
@@ -832,6 +832,172 @@ def adr_scenarios(workspace, invoke, check):
                                                       if c["id"] == "CHG-003"] == [("CHG-003", "integrated", False, pinned)], str(changes))
 
 
+CHORE_CRITERIA = [{"id": "CR-005", "status": "met"}]
+
+
+def chore_scenarios(workspace, invoke, check):
+    """A chore (no observable behavior): plan, approve, implement, verify, integrate; no spec, release or review."""
+    # The profile enables review and its only check cites AC-001: neither may bind a chore.
+    root, base = setup(workspace / "c2-chore", invoke, names=("engine",), review={"enabled": True})
+    call = adr_caller(root, invoke, check)
+    approval = workspace / "chore-criteria.json"
+    put_json(approval, CHORE_CRITERIA)
+    bundles = workspace / "chore-bundles"
+
+    drafts = []
+
+    def new(label, change_id, *, expect=0, issue=None, **kwargs):
+        folder = bundles / f"{change_id}-{len(drafts)}"
+        drafts.append(folder)
+        record = chore_bundle(folder, change_id=change_id, **kwargs)
+        call(label, "change", "new", "--file", folder / "change.json", expect=expect, issue=issue)
+        return record
+
+    def covered(semantic):
+        row = semantic["coverage"]["criteria"][0]
+        row.pop("reason")
+        row.update(status="covered", acceptance_ids=["AC-001"])
+
+    def approve(label, record, *extra, expect=0, issue=None):
+        return call(label, "change", "approve", record["id"], "--digest", record["proposal_digest"], "--actor", "Fixture owner",
+                    "--reason", "Approved chore plan", *extra, expect=expect, issue=issue)
+
+    # Abuse guards: a chore cannot touch a contract, an obligation, a prototype or a behavior-bearing origin.
+    abuse = {
+        "bases": lambda s: s.update(bases=[{"capability_id": "CAP-001", "component": "engine", "revision": None}]),
+        "deltas": lambda s: s.update(deltas=[{"op": "add", "capability_id": "CAP-001", "requirement_id": "REQ-001"}]),
+        "prototypes": lambda s: s.update(prototypes=[{"path": "docs/screen.html", "sha256": "0" * 64}]),
+        "fixes": lambda s: s.update(fixes=[]),
+    }
+    for key, mutate in abuse.items():
+        new(f"C2 chore cannot declare {key}", "CHG-101", mutate=mutate, expect=1, issue="INVALID_REFERENCE")
+    new("C2 chore cannot originate in a story", "CHG-101", origin_kind="story", expect=1, issue="INVALID_ORIGIN")
+    new("C2 chore cannot cover an origin criterion with ACs", "CHG-101", expect=1, issue="INVALID_COVERAGE",
+        mutate=covered)
+
+    # A flow without [kinds.chore] refuses chores; existing kinds are unaffected.
+    flow_path = root / ".roclec/flow.toml"
+    agreed = flow_path.read_bytes()
+    table = b'[kinds.chore]\nstages = ["approve", "plan", "implement", "verify", "integrate"]\ncriteria = ["CR-005"]\n'
+    check("C2 chore seeded flow enables chores", table in agreed, agreed.decode())
+    flow_path.write_bytes(agreed.replace(table, b""))
+    new("C2 chore needs [kinds.chore] in the flow", "CHG-101", expect=2, issue="CHANGE_KIND_DISABLED")
+    flow_path.write_bytes(agreed)
+
+    record = new("C2 chore imports", "CHG-101")
+    view = call("C2 chore inspects", "inspect", "--change", "CHG-101")["data"]
+    check("C2 chore is a draft with no ACs", view["status"] == "draft", str(view["status"]))
+    approve("C2 chore approval evaluates the chore criteria, not the approve checkpoint's", record,
+            *criteria(root, "approve"), expect=2, issue="CRITERIA_MISMATCH")
+    decision = approve("C2 chore approval", record, "--criteria", approval)["data"]["decision"]
+    check("C2 chore approval records the chore evaluation", decision["criteria"] == CHORE_CRITERIA, str(decision))
+    refused = call("C2 chore never joins a release", "release", "plan", "engine", "v1.0.0", "--change", "CHG-001",
+                   "--change", "CHG-101", expect=1, issue="VERSION_INVALID")
+    check("C2 chore release refusal names the chore", refused["issues"][0]["entity"] == "CHG-101", str(refused["issues"]))
+    gate = call("C2 chore implement gate needs no release assignment", "check", "--change", "CHG-101", "--component", "engine",
+                "--gate", "implement")
+    check("C2 chore gate names no release", gate["data"]["release"] is None, str(gate["data"]))
+    call("C2 chore starts", "change", "start", "CHG-101", "--component", "engine", "--actor", "Fixture implementer")
+
+    (root / "src/tooling.json").write_text('{"lint": true}\n')
+    commit(root, "chore: add workspace tooling")
+    run = call("C2 chore runs every configured check (its AC tag covers nothing)", "run", "verify", "CHG-101",
+               "--component", "engine", "--base", base, *PRODUCER)["data"]["run"]
+    check("C2 chore run passed", run["status"] == "pass", str(run["status"]))
+    call("C2 chore verify gate needs no review by default", "check", "--change", "CHG-101", "--component", "engine", "--gate", "verify")
+    stages = {s["stage"]: s for s in call("C2 chore inspect stages", "inspect", "--change", "CHG-101")["data"]["flow"]["stages"]}
+    states = {name: (stage.get("change") or stage["components"]["engine"])["status"] for name, stage in stages.items()}
+    check("C2 chore lane in conformance", {k: states[k] for k in ("define", "design", "plan", "review", "release")}
+          == {"define": "n/a", "design": "n/a", "plan": "done", "review": "n/a", "release": "n/a"}, str(states))
+    check("C2 chore approve presents the chore criteria", stages["approve"]["checkpoint"]["criteria"] == ["CR-005"],
+          str(stages["approve"]["checkpoint"]))
+    commit(root, "record chore run")
+    plan = workspace / "chore-plan.json"
+    call("C2 chore prepares integration", "integrate", "prepare", "CHG-101", "--component", "engine", "--run", run["id"], "--out", plan)
+    call("C2 chore integrates", "operation", "apply", plan)
+    final = call("C2 chore inspect after integration", "inspect", "--change", "CHG-101")["data"]
+    check("C2 chore integrated", final["status"] == "integrated", str(final["status"]))
+    check("C2 chore left contracts untouched", json.loads((root / ".roclec/current.json").read_text())["components"]["engine"] == {},
+          (root / ".roclec/current.json").read_text())
+
+    # Existing kinds keep the guard a chore skips: a refactor without AC-001 cannot run the AC-tagged check.
+    folder = workspace / "refactor-bundle"
+    refactor = bundle(folder, change_id="CHG-103", components=("engine",), kind="refactor")
+    call("C2 refactor imports", "change", "new", "--file", folder / "change.json")
+    call("C2 refactor approval", "change", "approve", "CHG-103", "--digest", refactor["proposal_digest"], *FLOW_ACTOR,
+         *criteria(root, "approve"))
+    call("C2 refactor joins the release", "release", "plan", "engine", "v1.0.0", "--change", "CHG-001", "--change", "CHG-103")
+    call("C2 refactor still refuses a check citing an inapplicable AC", "run", "verify", "CHG-103", "--component", "engine",
+         "--base", base, *PRODUCER, expect=1, issue="INVALID_REFERENCE")
+
+    # A chore may originate in a FUT and defer an origin criterion to another FUT; it never covers one.
+    for number in (1, 2):
+        fut = {"model_schema": 2, "id": f"FUT-{number:03}", "source": {"location": "docs/reference.md", "locator": "Synthetic context"},
+               "finding": "Workspace tooling is missing", "impact": "Blocks the first story", "questions": ["Which linter?"]}
+        put_json(workspace / f"chore-fut-{number}.json", fut)
+        call(f"C2 chore FUT {number} captured", "fut", "capture", "--file", workspace / f"chore-fut-{number}.json")
+
+    def deferred(semantic):
+        row = semantic["coverage"]["criteria"][0]
+        row.pop("reason")
+        row.update(status="deferred", fut="FUT-002")
+
+    from_fut = new("C2 chore from a FUT imports", "CHG-104", origin_kind="fut", origin_id="FUT-001", mutate=deferred)
+    approve("C2 chore from an unpromoted FUT cannot be approved", from_fut, "--criteria", approval, expect=1, issue="INVALID_ORIGIN")
+    call("C2 FUT promoted to the chore", "fut", "decide", "FUT-001", "--outcome", "promoted", "--target", "CHG-104", *FLOW_ACTOR)
+    approve("C2 chore from a promoted FUT approved", from_fut, "--criteria", approval)
+
+    # A lane that lists review demands the independent review again.
+    flow_path.write_bytes(agreed.replace(b'stages = ["approve", "plan", "implement", "verify", "integrate"]',
+                                         b'stages = ["approve", "plan", "implement", "verify", "review", "integrate"]'))
+    call("C2 chore lane with review is agreed", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
+    second = new("C2 second chore imports", "CHG-102")
+    approve("C2 second chore approval", second, "--criteria", approval)
+    call("C2 second chore starts", "change", "start", "CHG-102", "--component", "engine", "--actor", "Fixture implementer")
+    (root / "src/tooling.json").write_text('{"lint": true, "format": true}\n')
+    commit(root, "chore: add formatter")
+    ran = invoke(["--project", str(root), "--json", "run", "verify", "CHG-102", "--component", "engine", "--base", base, *PRODUCER])
+    check("C2 reviewed chore run is recorded but not verified", ran.returncode == 1
+          and "REVIEW_REQUIRED" in [i["code"] for i in json.loads(ran.stdout)["issues"]], ran.stdout + ran.stderr)
+    call("C2 reviewed chore needs its review", "check", "--change", "CHG-102", "--component", "engine", "--gate", "verify",
+         expect=1, issue="REVIEW_REQUIRED")
+
+    # A required plan session is the chore's authoring evidence at approval; it may precede the import.
+    flow_text = flow_path.read_text()
+    head, plan_block = flow_text.split("[stages.plan]\n", 1)
+    plan_block, tail = plan_block.split("\n\n", 1)
+    check("C2 chore plan stage is relaxed by the fixture", 'session_evidence = "optional"' in plan_block, plan_block)
+    flow_path.write_text(head + "[stages.plan]\n" + plan_block.replace('session_evidence = "optional"', 'session_evidence = "required"')
+                         + "\n\n" + tail)
+    call("C2 chore flow requiring plan sessions is agreed", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
+    record_session = session_importer(call, workspace / "chore-sessions", "chore")
+    unplanned = new("C2 chore without a plan session imports", "CHG-105")
+    record_session("C2 define session for the unplanned chore", "define", "specifier", change_id="CHG-105")
+    approve("C2 chore approval needs the plan session, not a define session", unplanned, "--criteria", approval,
+            expect=1, issue="SESSION_REQUIRED")
+    planned = record_session("C2 plan session precedes the chore import", "plan", "implementer", change_id="CHG-106")
+    record = new("C2 chore citing its plan session imports", "CHG-106", mutate=lambda s: s.update(sessions=[planned]))
+    approve("C2 chore with its plan session approved", record, "--criteria", approval)
+
+    # Dropping [kinds.chore] refuses pending chores but never reopens integrated ones.
+    text = flow_path.read_text()
+    start = text.index("\n[kinds.chore]\n") + 1  # The table, not the header comment that mentions it.
+    end = text.index("\n\n", start) + 2
+    # Plan sessions go back to optional: the approve gate re-reads session demands from the current flow for
+    # every kind, which this step does not exercise.
+    flow_path.write_text((text[:start] + text[end:]).replace('session_evidence = "required"', 'session_evidence = "optional"'))
+    call("C2 flow without chores is agreed", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
+    call("C2 integrated chore keeps passing its approve gate", "check", "--change", "CHG-101", "--component", "engine",
+         "--gate", "approve")
+    call("C2 integrated chore keeps passing its implement gate", "check", "--change", "CHG-101", "--component", "engine",
+         "--gate", "implement")
+    call("C2 pending chore is refused once the flow drops chores", "check", "--change", "CHG-106", "--component", "engine",
+         "--gate", "implement", expect=2, issue="CHANGE_KIND_DISABLED")
+    stages = {s["stage"]: s for s in call("C2 integrated chore inspects", "inspect", "--change", "CHG-101")["data"]["flow"]["stages"]}
+    check("C2 integrated chore define entry lists no sessions", stages["define"]["change"] == {
+        "status": "n/a", "record": None, "actor": None, "criteria": [], "kind": "chore", "sessions": []}, str(stages["define"]))
+
+
 MERGE = ("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "merge", "--no-ff", "--no-edit")
 FLOW_ACTOR = ("--actor", "Fixture owner", "--reason", "Synthetic human decision")
 
@@ -880,7 +1046,7 @@ def flow_scenarios(workspace, invoke, check):
         root, base = setup(workspace / name, invoke)
         call = adr_caller(root, invoke, check)
         declare_hook(root, "pre-implement")
-        declare_hook(root, "pre-integrate", declared={"CR-005": "The tested candidate is the one to integrate."})
+        declare_hook(root, "pre-integrate", declared={"CR-007": "The tested candidate is the one to integrate."})
         call(f"FF {name} agrees the edited flow", "foundation", "agree", "--ref", "flow", *FLOW_ACTOR, *criteria(root, "foundation"))
         call(f"FF {name} regenerates the flow view", "views", "--write")
         commit(root)
@@ -954,7 +1120,7 @@ def flow_scenarios(workspace, invoke, check):
     trunk = git(root, "rev-parse", "HEAD")
     edit = workspace / "flow-edit"
     git(root, "worktree", "add", "-qb", "flow-edit", str(edit), trunk)
-    declare_hook(edit, "handoff", declared={"CR-006": "QA can take the integrated change."}, on_reject="defer")
+    declare_hook(edit, "handoff", declared={"CR-008": "QA can take the integrated change."}, on_reject="defer")
     commit(edit, "edit the flow on a branch")
     git(root, *MERGE, "flow-edit")
     blocked = gate(call, root, "FF unagreed flow edit blocks the implement gate", "engine", "implement", expect=1, issue="FOUNDATION_INCOMPLETE")

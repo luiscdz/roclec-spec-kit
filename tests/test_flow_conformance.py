@@ -139,16 +139,16 @@ class FlowConformanceTest(unittest.TestCase):
     def test_declared_pending_hook_shows_its_decider_and_criteria(self):
         self.approve()
         self.plan()
-        declare_hook(self.root, "pre-implement", declared={"CR-005": "The plan is ready to implement."})
+        declare_hook(self.root, "pre-implement", declared={"CR-007": "The plan is ready to implement."})
         self.call("foundation", "agree", "--ref", "flow", *ACTOR, *criteria(self.root, "foundation"))
         stages = self.stages()
-        self.assertEqual(stages["implement"]["checkpoint"], {"decider": "owner", "criteria": ["CR-005"],
+        self.assertEqual(stages["implement"]["checkpoint"], {"decider": "owner", "criteria": ["CR-007"],
                                                              "on_reject": "revise", "hook": "pre-implement"})
         hook = stages["implement"]["components"]["engine"]["hook"]
         self.assertEqual(hook, {"status": "pending", "record": None, "actor": None, "criteria": [],
                                 "name": "pre-implement", "subject": self.record["proposal_digest"],
                                 "pending": {"decider": "owner", "criteria": [
-                                    {"id": "CR-005", "text": "The plan is ready to implement."}]}})
+                                    {"id": "CR-007", "text": "The plan is ready to implement."}]}})
         corrections = self.workspace / "corrections.json"
         put_json(corrections, [{"id": "R-1", "description": "Clarify the scope"}])
         base = ("checkpoint", "CHG-001", "--hook", "pre-implement", "--digest", self.record["proposal_digest"], *ACTOR)
@@ -163,7 +163,7 @@ class FlowConformanceTest(unittest.TestCase):
         self.assertEqual(viewer["criteria"], rejected["criteria"])
         engine = stages["implement"]["components"]["engine"]["hook"]
         self.assertEqual((engine["status"], engine["record"], engine["actor"], engine["criteria"]),
-                         ("done", approved["id"], "Owner", [{"id": "CR-005", "status": "met"}]))
+                         ("done", approved["id"], "Owner", [{"id": "CR-007", "status": "met"}]))
         self.assertNotIn("pending", engine)
         self.call("change", "start", "CHG-001", "--component", "engine", "--actor", "Implementer")
         start = self.stages()["implement"]["components"]["engine"]
