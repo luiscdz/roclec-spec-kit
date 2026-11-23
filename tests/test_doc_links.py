@@ -7,7 +7,8 @@ import unittest
 from urllib.parse import unquote
 
 ROOT = Path(__file__).resolve().parents[1]
-DOCS = ("README.md", "docs/c1.md", "docs/c2.md", "docs/c3.md", "docs/flujo-roclec.md")
+DOCS = ("README.md", "docs/c1.md", "docs/c2.md", "docs/c3.md", "docs/flujo-roclec.md",
+        "docs/strategy/plan-flujo-agentico-2026-11-17.md")
 LINK = re.compile(r"(?<!\!)\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 FENCE = re.compile(r"^\s*(```|~~~)")
 

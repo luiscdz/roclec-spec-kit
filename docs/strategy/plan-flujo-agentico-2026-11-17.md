@@ -57,6 +57,23 @@ Principio común (sección 2.1): el contrato del rol es neutral y versionado en 
 
 Las tareas de la sección 11 se ejecutan con el [modelo de desarrollo](../desarrollo-con-agentes.md): su columna «Rol» indica el rol responsable, cada tarea sigue el contrato de traspaso y la definición de terminado de ese documento, y las tareas en zonas críticas usan implementador crítico y revisión cruzada. Este plan no redefine esos roles.
 
+### Estado al 22 de noviembre de 2026
+
+Las fases de capacidad de este plan (FR, FD, FO, FH, FX, FF, FL y FK) y T5.1 están completas, cada fase con su revisión cruzada en `PASS`. Se integraron en la rama de integración `orquestacion` mediante una PR por fase y todavía no están en `main`. El CI pasó en cada merge salvo en el de FH, cuyo run se canceló y quedó cubierto por el run de `e4a6d94`. Siguen pendientes F4 (adopción en el piloto) y el resto de F5 (T5.2–T5.7), que según el [plan global](plan-global.md#13-hito-02) espera al resultado del piloto.
+
+| Fase | Tareas | PR | Merge en `orquestacion` | CI |
+| --- | --- | --- | --- | --- |
+| T5.1 y FR | T5.1, TR.1–TR.8 | [#2](https://github.com/luiscdz/roclec-spec-kit/pull/2) | `b9d4482` | [44931952667](https://github.com/luiscdz/roclec-spec-kit/actions/runs/44931952667) |
+| FO | TO.1–TO.9 | [#3](https://github.com/luiscdz/roclec-spec-kit/pull/3) | `120508d` | [44937941036](https://github.com/luiscdz/roclec-spec-kit/actions/runs/44937941036) |
+| FD | TD.1–TD.10 | [#4](https://github.com/luiscdz/roclec-spec-kit/pull/4) | `15efff0` | [44967304154](https://github.com/luiscdz/roclec-spec-kit/actions/runs/44967304154) |
+| FH | TH.1–TH.10 | [#5](https://github.com/luiscdz/roclec-spec-kit/pull/5) | `d988162` | Cancelado; cubierto por el run de `e4a6d94` ([45045809927](https://github.com/luiscdz/roclec-spec-kit/actions/runs/45045809927)) |
+| FX | TX.1–TX.10 | [#7](https://github.com/luiscdz/roclec-spec-kit/pull/7) | `354e945` | [45049289419](https://github.com/luiscdz/roclec-spec-kit/actions/runs/45049289419) |
+| FF | TF.1–TF.11 | [#8](https://github.com/luiscdz/roclec-spec-kit/pull/8) | `43c6d6e` | [45065628173](https://github.com/luiscdz/roclec-spec-kit/actions/runs/45065628173) |
+| FL | TL.1–TL.10 | [#9](https://github.com/luiscdz/roclec-spec-kit/pull/9) | `32f952d` | [45085748660](https://github.com/luiscdz/roclec-spec-kit/actions/runs/45085748660) |
+| FK | TK.1–TK.10 | [#10](https://github.com/luiscdz/roclec-spec-kit/pull/10) | `8f9eb69` | [45106752335](https://github.com/luiscdz/roclec-spec-kit/actions/runs/45106752335) |
+
+La revisión de fase de FK (TK.10) dejó hallazgos menores en los assets. Se corrigen después del merge en la rama `feature/model-schema-3`, que llega a `orquestacion` por PR junto con este registro de estado: la plantilla de skill, la salida del coordinador y la regla de skills al implementar en `model.md`, `workflow.md` y [C1](../c1.md#fijación-en-la-aprobación). La subida única de `model_schema` se resolvió sin cambio de código ([Orden entre fases](#orden-entre-fases)).
+
 ## 2. Roles que Roclec instala en el proyecto consumidor
 
 Objetivo: que un proyecto que adopta Roclec reciba roles de agente con responsabilidades separadas y un contrato declarado (instrucciones, herramientas, entradas y salidas), versionados en su propio repositorio desde que ejecuta `roclec skills`. Atiende M-28.
@@ -715,6 +732,24 @@ La preparación del modelo de desarrollo (validación de hosts, definiciones `ro
 | TG.1 | Comprobar checklist: F0 y F1 completas; T2.4 y T2.6; T3.1 y T3.2; T5.1; FR completa (TR.1–TR.8), FD completa (TD.1–TD.10), FO completa (TO.1–TO.9), FH completa (TH.1–TH.10), FX completa (TX.1–TX.10), FF completa (TF.1–TF.11), FL completa (TL.1–TL.10) y FK completa (TK.1–TK.10) según D9 | O | Checklist con enlaces a evidencia |
 | TG.2 | Decidir si se ejecuta la campaña semántica preparada, con alcance y coste | U | Decisión registrada |
 
+#### Checklist TG.1 (22 de noviembre de 2026)
+
+| Requisito | Estado | Evidencia |
+| --- | --- | --- |
+| F0 completa | Cumplido | [Evidencia local de F0–F3](plan-global.md#evidencia-local-de-f0f3): matriz inicial de seis combinaciones en verde, inventario SHA-256 y copia local verificada (D7 sustituye a T0.9) |
+| F1 completa | Cumplido | [Evidencia local de F0–F3](plan-global.md#evidencia-local-de-f0f3): `af6e9bf`, 69 pruebas y 855 comprobaciones del harness con `--spec-kit` |
+| T2.4 y T2.6 | Cumplido | Misma evidencia de F1–F3: regla troncal con `OFF_TRUNK` y `target_ref` por componente en el perfil 3 |
+| T3.1 y T3.2 | Cumplido | Misma evidencia de F1–F3: logs locales con cuota y extractos redactados; frontera de confianza y aviso `CHECK_ARGV_CHANGED` en [C2](../c2.md#ejecutar-y-comprobar) |
+| T5.1 | Cumplido | Dentro de FR, [#2](https://github.com/luiscdz/roclec-spec-kit/pull/2) |
+| FR, FD, FO, FH, FX, FF, FL y FK completas | Cumplido | [Estado al 22 de noviembre de 2026](#estado-al-22-de-noviembre-de-2026) |
+| Una sola subida de `model_schema` | Cumplido | `model_schema` 2 es la única ruptura de 0.9.0 ([Orden entre fases](#orden-entre-fases)) |
+
+Observaciones para el piloto:
+
+- CI: el usuario fijó el 22 de noviembre de 2026 como regla vigente un solo job en Ubuntu con Python 3.12 ([#6](https://github.com/luiscdz/roclec-spec-kit/pull/6)), por el costo de GitHub Actions. Sustituye la matriz de T0.7 (Python 3.11–3.13 en Ubuntu y macOS), que solo consta en la evidencia de F0. Las otras versiones y macOS no se verifican en el remoto.
+- Las fases están en `orquestacion` y no en `main`. Integrarlas en `main` queda como decisión aparte del usuario; hasta entonces, el piloto instala el wheel construido desde `orquestacion` después de integrar en ella las correcciones de TK.10.
+- TG.2, resuelto por el usuario el 22 de noviembre de 2026: no se ejecuta una campaña semántica antes del piloto. Los casos SEM-001…SEM-010 cubren el recorrido C1–C3 y no ejercitan las capacidades FR–FK, así que repetirlos solo mediría regresión. La evidencia de estas capacidades la aporta el piloto (F4), con sus fricciones como FUT. Una campaña posterior exige casos nuevos y acordar alcance y presupuesto ([evaluación semántica](../evaluation/semantic-c1-c3.md)).
+
 ### F4 — Adopción en el piloto
 
 | ID | Tarea | Hallazgo | Rol | Depende | Verificación |
@@ -892,6 +927,8 @@ flowchart LR
 ```
 
 FD, FO y FH pueden avanzar en paralelo tras FR si no tocan los mismos archivos; las tareas críticas en `kernel.py` y `verification.py` se coordinan entre ellas. Todos los cambios de modelo de FR, FD, FO, FH, FX, FF, FL y FK forman **una sola** subida de `model_schema`, documentada como ruptura de 0.9.0, con los fixtures regenerados una vez al final.
+
+Resuelto por el usuario el 22 de noviembre de 2026: esa subida única es la de 0.9.0 de `model_schema` 1 a 2, introducida en F2. 0.8.0 es la última versión publicada (esquema 1); las compilaciones 0.9.0.dev con esquema 2 no se publicaron ni tienen datos reales que migrar, así que FR–FK no suben de nuevo el esquema y los fixtures ya se generan con él. La ruptura queda documentada en el README y en las notas de migración de [C1](../c1.md#migrar-un-proyecto-existente) y [C2](../c2.md#actualizar-un-proyecto-existente).
 
 ## 12. Riesgos de ejecución
 
